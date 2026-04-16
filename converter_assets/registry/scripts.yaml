@@ -1,0 +1,63 @@
+metadata:
+  name: framework-script-registry
+  version: "1.0"
+  description: 你的自动化测试框架可复用通用脚本注册表
+  owner: Recorder
+
+entries:
+  - name: login_as_admin
+    entry_keyword: login_as_admin
+    summary: 使用管理员账号登录系统
+    description: 复用登录页填写用户名密码并提交的完整流程
+    script_type: business_flow
+    priority: 20
+    domain: auth
+    tags: [login, auth, admin]
+    aliases: [管理员登录, 登录系统]
+    covers_steps:
+      - 输入用户名
+      - 输入密码
+      - 点击登录
+    parameters:
+      - name: username
+        type: string
+        required: true
+        description: 登录用户名
+        example: admin
+      - name: password
+        type: string
+        required: true
+        description: 登录密码
+    preconditions:
+      - 当前位于登录页面
+    expected_outcome:
+      - 登录成功并进入首页
+    examples:
+      - login_as_admin(username="admin", password="${ADMIN_PASSWORD}")
+
+  - name: create_user
+    entry_keyword: create_user
+    summary: 创建一个新用户
+    description: 复用用户管理页面中的新增用户流程
+    script_type: reusable_flow
+    priority: 40
+    domain: user-management
+    tags: [create, user, form]
+    aliases: [新增用户, 创建用户]
+    covers_steps:
+      - 点击新增按钮
+      - 填写用户表单
+      - 点击提交
+    parameters:
+      - name: username
+        type: string
+        required: true
+        description: 用户名
+      - name: email
+        type: string
+        required: false
+        description: 邮箱地址
+    expected_outcome:
+      - 用户创建成功
+    examples:
+      - create_user(username="demo_user", email="demo@example.com")

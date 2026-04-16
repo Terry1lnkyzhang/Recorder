@@ -1,0 +1,695 @@
+from __future__ import annotations
+
+import ast
+import json
+import re
+import threading
+from pathlib import Path
+from collections.abc import Callable
+from typing import Any
+
+import yaml
+
+from src.recorder.settings import AISettings
+
+from .client import OpenAICompatibleAIClient
+from .errors import AIClientError
+from .memory import load_carry_memory, save_carry_memory
+from .models import AnalysisBatchRecord, SessionAnalysisResult
+from .prompt_builder import (
+    build_batch_events,
+    build_step_observation_prompt,
+    build_step_reasoning_prompt,
+    build_workflow_aggregation_prompt,
+    collect_batch_images,
+)
+
+
+class SessionWorkflowAnalyzer:
+    def __init__(self, settings: AISettings) -> None:
+        self.settings = settings
+        self.client = OpenAICompatibleAIClient(settings)
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_event.set()
+        self.client.cancel()
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
+
+    def analyze(
+        self,
+        session_dir: Path,
+        session_data: dict[str, object],
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> SessionAnalysisResult:
+        session_id = str(session_data.get("session_id", session_dir.name))
+        events = list(session_data.get("events", []))
+        environment = session_data.get("environment", {}) if isinstance(session_data.get("environment", {}), dict) else {}
+        display_layout = environment.get("display_layout") if isinstance(environment, dict) else None
+        batch_size = max(1, int(self.settings.analysis_batch_size))
+        memory_path = session_dir / "ai_batch_memory.json"
+        carry_memory = load_carry_memory(memory_path)
+        total_batches = max(1, (len(events) + batch_size - 1) // batch_size) if events else 0
+        prior_step_observations: list[dict[str, object]] = []
+
+        result = SessionAnalysisResult(session_id=session_id, batch_size=batch_size, status="running", carry_memory=list(carry_memory))
+
+        if progress_callback:
+            progress_callback(
+                "start",
+                {
+                    "session_id": session_id,
+                    "event_count": len(events),
+                    "batch_size": batch_size,
+                    "total_batches": total_batches,
+                },
+            )
+
+        for start_index in range(0, len(events), batch_size):
+            if self.is_cancelled():
+                raise AIClientError("AI 分析已取消。")
+            batch_id = f"batch_{start_index + 1:04d}_{min(len(events), start_index + batch_size):04d}"
+            current_batch = (start_index // batch_size) + 1
+
+            if progress_callback:
+                progress_callback(
+                    "batch_preprocess_start",
+                    {
+                        "session_id": session_id,
+                        "batch_id": batch_id,
+                        "current_batch": current_batch,
+                        "total_batches": total_batches,
+                        "start_step": start_index + 1,
+                        "end_step": min(len(events), start_index + batch_size),
+                    },
+                )
+
+            batch_events = build_batch_events(events, start_index, batch_size)
+            observation_prompt = build_step_observation_prompt(batch_events)
+            image_paths, image_stats = collect_batch_images(
+                session_dir,
+                events,
+                start_index,
+                batch_size,
+                display_layout=display_layout,
+                send_fullscreen=self.settings.send_fullscreen_screenshots,
+            )
+
+            if progress_callback:
+                progress_callback(
+                    "batch_preprocess_done",
+                    {
+                        "session_id": session_id,
+                        "batch_id": batch_id,
+                        "current_batch": current_batch,
+                        "total_batches": total_batches,
+                        "start_step": start_index + 1,
+                        "end_step": min(len(events), start_index + batch_size),
+                        "image_count": len(image_paths),
+                        "cropped_monitor_count": image_stats.get("cropped_monitor_count", 0),
+                    },
+                )
+
+            observation_response = self.client.query(
+                user_prompt=observation_prompt,
+                image_paths=image_paths,
+                system_prompt=self.settings.analysis_system_prompt,
+                progress_callback=(
+                    None
+                    if not progress_callback
+                    else lambda stage, payload, batch_id=batch_id, current_batch=current_batch: progress_callback(
+                        stage,
+                        {
+                            "session_id": session_id,
+                            "batch_id": batch_id,
+                            "current_batch": current_batch,
+                            "total_batches": total_batches,
+                            **payload,
+                        },
+                    )
+                ),
+                cancel_callback=self.is_cancelled,
+            )
+
+            if progress_callback:
+                progress_callback(
+                    "batch_parse",
+                    {
+                        "session_id": session_id,
+                        "batch_id": batch_id,
+                        "current_batch": current_batch,
+                        "total_batches": total_batches,
+                    },
+                )
+            observation_response_text = str(observation_response.get("response_text", ""))
+            try:
+                observation_parsed = _parse_ai_json(observation_response_text)
+            except Exception as exc:
+                result.status = "partial_failed" if result.step_insights else "failed"
+                result.failure_message = str(exc)
+                self._persist_partial_result(session_dir, result, carry_memory)
+                self._write_parse_failure_files(session_dir, batch_id, observation_response_text, observation_prompt)
+                raise AIClientError(
+                    f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
+                ) from exc
+            current_step_observations = _normalize_step_observations(observation_parsed, start_index, len(batch_events))
+            if not current_step_observations:
+                current_step_observations = _build_fallback_step_observations(batch_events, start_index)
+
+            reasoning_prompt = build_step_reasoning_prompt(
+                session_id,
+                current_step_observations,
+                prior_step_observations[-20:],
+                carry_memory,
+            )
+            reasoning_response = self.client.query(
+                user_prompt=reasoning_prompt,
+                system_prompt=(
+                    "你是桌面自动化多步骤推理助手。"
+                    "你基于当前步骤观察结果、最近步骤上下文和历史摘要做局部推理。"
+                    "输出必须是 JSON，且 step_insights 只针对当前步骤。"
+                ),
+                progress_callback=(
+                    None
+                    if not progress_callback
+                    else lambda stage, payload, batch_id=batch_id, current_batch=current_batch: progress_callback(
+                        stage,
+                        {
+                            "session_id": session_id,
+                            "batch_id": batch_id,
+                            "current_batch": current_batch,
+                            "total_batches": total_batches,
+                            "analysis_phase": "step_reasoning",
+                            **payload,
+                        },
+                    )
+                ),
+                cancel_callback=self.is_cancelled,
+            )
+            reasoning_response_text = str(reasoning_response.get("response_text", ""))
+            try:
+                parsed = _parse_ai_json(reasoning_response_text)
+            except Exception as exc:
+                result.status = "partial_failed" if result.step_insights else "failed"
+                result.failure_message = str(exc)
+                self._persist_partial_result(session_dir, result, carry_memory)
+                self._write_parse_failure_files(session_dir, batch_id, reasoning_response_text, reasoning_prompt)
+                raise AIClientError(
+                    f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
+                ) from exc
+            batch_record = AnalysisBatchRecord(
+                batch_id=batch_id,
+                start_step=start_index + 1,
+                end_step=min(len(events), start_index + batch_size),
+                event_indexes=list(range(start_index + 1, min(len(events), start_index + batch_size) + 1)),
+                image_paths=[path.relative_to(session_dir).as_posix() for path in image_paths],
+                prompt_preview=(
+                    "[Observation Prompt]\n"
+                    f"{observation_prompt[:1000]}\n\n"
+                    "[Reasoning Prompt]\n"
+                    f"{reasoning_prompt[:1000]}"
+                ),
+                response_text=(
+                    "[Observation Response]\n"
+                    f"{observation_response_text}\n\n"
+                    "[Reasoning Response]\n"
+                    f"{reasoning_response_text}"
+                ),
+                parsed_result={
+                    "observation_round": observation_parsed,
+                    "reasoning_round": parsed,
+                },
+            )
+            result.batches.append(batch_record)
+
+            step_insights = _normalize_step_insights(parsed, current_step_observations)
+            step_notes = _normalize_notes(parsed)
+            result.step_insights.extend(step_insights)
+            result.analysis_notes.extend(step_notes)
+            result.invalid_steps = _merge_unique_dict_items(result.invalid_steps, _normalize_invalid_steps(parsed))
+            result.reusable_modules = _merge_unique_dict_items(result.reusable_modules, _normalize_reusable_modules(parsed))
+            result.wait_suggestions = _merge_unique_dict_items(result.wait_suggestions, _normalize_wait_suggestions(parsed))
+
+            batch_summary = parsed.get("batch_summary", {}) if isinstance(parsed, dict) else {}
+            carry_entry = {
+                "batch_id": batch_id,
+                "step_range": [batch_record.start_step, batch_record.end_step],
+                "current_phase": batch_summary.get("current_phase", "") if isinstance(batch_summary, dict) else "",
+                "notable_state_changes": batch_summary.get("notable_state_changes", []) if isinstance(batch_summary, dict) else [],
+                "carry_over_notes": batch_summary.get("carry_over_notes", []) if isinstance(batch_summary, dict) else [],
+            }
+            if not carry_entry["current_phase"] and step_insights:
+                carry_entry["current_phase"] = str(step_insights[0].get("description", ""))
+            if not carry_entry["notable_state_changes"] and step_insights:
+                descriptions = [str(item.get("description", "")) for item in step_insights if str(item.get("description", "")).strip()]
+                carry_entry["notable_state_changes"] = descriptions[:3]
+            if step_notes:
+                carry_entry["carry_over_notes"] = [*carry_entry["carry_over_notes"], *step_notes][:6]
+            carry_memory.append(carry_entry)
+            result.carry_memory = carry_memory
+            prior_step_observations.extend(current_step_observations)
+            result.status = "running"
+            result.failure_message = ""
+            self._persist_partial_result(session_dir, result, carry_memory)
+
+            if progress_callback:
+                progress_callback(
+                    "batch_done",
+                    {
+                        "session_id": session_id,
+                        "batch_id": batch_id,
+                        "current_batch": current_batch,
+                        "total_batches": total_batches,
+                        "step_insight_count": len(result.step_insights),
+                    },
+                )
+
+        result.carry_memory = carry_memory
+        if self.is_cancelled():
+            raise AIClientError("AI 分析已取消。")
+        if result.step_insights:
+            aggregation_prompt = build_workflow_aggregation_prompt(session_id, result.step_insights, carry_memory)
+            if progress_callback:
+                progress_callback(
+                    "workflow_aggregate_start",
+                    {
+                        "session_id": session_id,
+                        "step_count": len(result.step_insights),
+                    },
+                )
+            aggregation_response = self.client.query(
+                user_prompt=aggregation_prompt,
+                system_prompt=(
+                    "你是桌面自动化流程聚合分析助手。"
+                    "你只基于给定 step_insights 做跨步骤推理，输出给人阅读的中文 Markdown 流程总结。"
+                    "不要输出 JSON，不要输出 markdown 代码块，不要输出任何解释性前后缀。"
+                    "必须按要求的标题顺序输出，并在无内容时明确写无。"
+                ),
+                progress_callback=(
+                    None
+                    if not progress_callback
+                    else lambda stage, payload: progress_callback(
+                        stage,
+                        {
+                            "session_id": session_id,
+                            "analysis_phase": "workflow_aggregate",
+                            **payload,
+                        },
+                    )
+                ),
+                cancel_callback=self.is_cancelled,
+            )
+            if progress_callback:
+                progress_callback(
+                    "workflow_aggregate_parse",
+                    {
+                        "session_id": session_id,
+                        "step_count": len(result.step_insights),
+                    },
+                )
+            aggregation_response_text = str(aggregation_response.get("response_text", ""))
+            result.batches.append(
+                AnalysisBatchRecord(
+                    batch_id="workflow_aggregation",
+                    start_step=1 if events else 0,
+                    end_step=len(events),
+                    event_indexes=list(range(1, len(events) + 1)),
+                    image_paths=[],
+                    prompt_preview=aggregation_prompt[:2000],
+                    response_text=aggregation_response_text,
+                    parsed_result={},
+                )
+            )
+            result.workflow_report_markdown = aggregation_response_text.strip()
+            result.analysis_notes = [note for note in result.analysis_notes if isinstance(note, str)]
+            if progress_callback:
+                progress_callback(
+                    "workflow_aggregate_done",
+                    {
+                        "session_id": session_id,
+                        "invalid_count": len(result.invalid_steps),
+                        "module_count": len(result.reusable_modules),
+                        "wait_count": len(result.wait_suggestions),
+                    },
+                )
+        if progress_callback:
+            progress_callback(
+                "write_result",
+                {
+                    "session_id": session_id,
+                    "total_batches": total_batches,
+                },
+            )
+        result.status = "completed"
+        result.failure_message = ""
+        save_carry_memory(memory_path, carry_memory)
+        self._write_result_files(session_dir, result)
+        if progress_callback:
+            progress_callback(
+                "done",
+                {
+                    "session_id": session_id,
+                    "total_batches": total_batches,
+                    "invalid_count": len(result.invalid_steps),
+                    "module_count": len(result.reusable_modules),
+                    "wait_count": len(result.wait_suggestions),
+                },
+            )
+        return result
+
+    def _write_result_files(self, session_dir: Path, result: SessionAnalysisResult) -> None:
+        json_path = session_dir / "ai_analysis.json"
+        yaml_path = session_dir / "ai_analysis.yaml"
+        payload = result.to_dict()
+        json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        yaml_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    def _persist_partial_result(
+        self,
+        session_dir: Path,
+        result: SessionAnalysisResult,
+        carry_memory: list[dict[str, Any]],
+    ) -> None:
+        save_carry_memory(session_dir / "ai_batch_memory.json", carry_memory)
+        self._write_result_files(session_dir, result)
+
+    def _write_parse_failure_files(
+        self,
+        session_dir: Path,
+        batch_id: str,
+        response_text: str,
+        prompt: str,
+    ) -> None:
+        (session_dir / "ai_parse_error_last_response.txt").write_text(response_text, encoding="utf-8")
+        (session_dir / "ai_parse_error_last_prompt.txt").write_text(prompt, encoding="utf-8")
+        (session_dir / "ai_parse_error_meta.json").write_text(
+            json.dumps({"batch_id": batch_id}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
+def _parse_ai_json(response_text: str) -> dict[str, object]:
+    candidates = _build_json_candidates(response_text)
+    for candidate in candidates:
+        payload = _try_load_json_object(candidate)
+        if payload is not None:
+            return payload
+    preview = response_text[:800]
+    if len(response_text) > 800:
+        preview += "..."
+    raise AIClientError(f"AI 返回无法解析为 JSON: {preview}")
+
+
+def _try_load_json_object(candidate: str) -> dict[str, object] | None:
+    attempts = [candidate]
+    repaired = _repair_json_candidate(candidate)
+    if repaired != candidate:
+        attempts.append(repaired)
+
+    for attempt in attempts:
+        try:
+            payload = json.loads(attempt)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+
+    for attempt in attempts:
+        payload = _try_load_python_dict(attempt)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _repair_json_candidate(candidate: str) -> str:
+    repaired = candidate.strip().lstrip("\ufeff")
+    repaired = re.sub(r"^json\s*", "", repaired, flags=re.IGNORECASE)
+    repaired = repaired.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+    repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    repaired = _escape_unescaped_inner_quotes(repaired)
+    return repaired
+
+
+def _escape_unescaped_inner_quotes(text: str) -> str:
+    result: list[str] = []
+    in_string = False
+    escape = False
+
+    for index, char in enumerate(text):
+        if not in_string:
+            if char == '"':
+                in_string = True
+            result.append(char)
+            continue
+
+        if escape:
+            result.append(char)
+            escape = False
+            continue
+
+        if char == "\\":
+            result.append(char)
+            escape = True
+            continue
+
+        if char == '"':
+            next_sig = _next_significant_char(text, index + 1)
+            if next_sig in {",", "}", "]", ":", None}:
+                in_string = False
+                result.append(char)
+            else:
+                result.append(r'\"')
+            continue
+
+        result.append(char)
+
+    return "".join(result)
+
+
+def _next_significant_char(text: str, start: int) -> str | None:
+    for index in range(start, len(text)):
+        if not text[index].isspace():
+            return text[index]
+    return None
+
+
+def _try_load_python_dict(candidate: str) -> dict[str, object] | None:
+    try:
+        payload = ast.literal_eval(candidate)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    normalized = _normalize_python_literal(payload)
+    return normalized if isinstance(normalized, dict) else None
+
+
+def _normalize_python_literal(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _normalize_python_literal(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_normalize_python_literal(item) for item in value]
+    if isinstance(value, tuple):
+        return [_normalize_python_literal(item) for item in value]
+    return value
+
+
+def _build_json_candidates(response_text: str) -> list[str]:
+    stripped = response_text.strip()
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(candidate: str) -> None:
+        normalized = candidate.strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    add(stripped)
+
+    fence_matches = re.findall(r"```(?:json)?\s*(.*?)```", stripped, flags=re.IGNORECASE | re.DOTALL)
+    for match in fence_matches:
+        add(match)
+
+    without_think = re.sub(r"<think>.*?</think>", "", stripped, flags=re.IGNORECASE | re.DOTALL).strip()
+    add(without_think)
+
+    for source in list(candidates):
+        extracted = _extract_first_json_object(source)
+        if extracted:
+            add(extracted)
+
+    return candidates
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        start = text.find("{", start + 1)
+    return None
+
+
+def _normalize_invalid_steps(parsed: dict[str, object]) -> list[dict[str, object]]:
+    values = parsed.get("invalid_steps", []) if isinstance(parsed, dict) else []
+    return [item for item in values if isinstance(item, dict)]
+
+
+def _normalize_step_observations(parsed: dict[str, object], start_index: int, expected_count: int) -> list[dict[str, object]]:
+    values = parsed.get("step_observations", []) if isinstance(parsed, dict) else []
+    if not isinstance(values, list) or not values:
+        values = parsed.get("step_insights", []) if isinstance(parsed, dict) else []
+    normalized: list[dict[str, object]] = []
+    if not isinstance(values, list):
+        return normalized
+    for offset, item in enumerate(values[:expected_count], start=1):
+        if not isinstance(item, dict):
+            continue
+        observation = str(item.get("observation", item.get("description", ""))).strip()
+        if not observation:
+            continue
+        semantic_kind = _normalize_semantic_kind(item.get("semantic_kind"))
+        normalized_item = {
+            "step_id": start_index + offset,
+            "observation": observation,
+        }
+        if semantic_kind:
+            normalized_item["semantic_kind"] = semantic_kind
+        normalized.append(normalized_item)
+    return normalized
+
+
+def _normalize_step_insights(parsed: dict[str, object], current_step_observations: list[dict[str, object]]) -> list[dict[str, object]]:
+    values = parsed.get("step_insights", []) if isinstance(parsed, dict) else []
+    normalized: list[dict[str, object]] = []
+    if not isinstance(values, list):
+        return normalized
+    for observation, item in zip(current_step_observations, values):
+        if not isinstance(item, dict):
+            continue
+        description = str(item.get("description", "")).strip()
+        if not description:
+            continue
+        normalized_item: dict[str, object] = {
+            "step_id": int(observation.get("step_id", 0) or 0),
+            "description": description,
+        }
+        conclusion = str(item.get("conclusion", "")).strip()
+        if conclusion:
+            normalized_item["conclusion"] = conclusion
+        normalized.append(normalized_item)
+    return normalized
+
+
+def _normalize_reusable_modules(parsed: dict[str, object]) -> list[dict[str, object]]:
+    values = parsed.get("reusable_modules", []) if isinstance(parsed, dict) else []
+    return [item for item in values if isinstance(item, dict)]
+
+
+def _normalize_wait_suggestions(parsed: dict[str, object]) -> list[dict[str, object]]:
+    values = parsed.get("wait_suggestions", []) if isinstance(parsed, dict) else []
+    return [item for item in values if isinstance(item, dict)]
+
+
+def _normalize_notes(parsed: dict[str, object]) -> list[str]:
+    values = parsed.get("notes", []) if isinstance(parsed, dict) else []
+    return [str(item) for item in values if isinstance(item, str)]
+
+
+def _build_fallback_step_observations(batch_events: list[dict[str, object]], start_index: int) -> list[dict[str, object]]:
+    fallback: list[dict[str, object]] = []
+    for offset, event in enumerate(batch_events, start=1):
+        event_type = str(event.get("event_type", "")).strip()
+        action = str(event.get("action", "")).strip()
+        ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
+        label = str(ui_element.get("name", ui_element.get("help_text", ""))).strip()
+        control_type = str(ui_element.get("control_type", "")).strip()
+        observation_parts = [part for part in [event_type, action, label, control_type] if part]
+        fallback.append(
+            {
+                "step_id": start_index + offset,
+                "observation": " | ".join(observation_parts) if observation_parts else "未提取到明确观察结果",
+                "semantic_kind": _infer_semantic_kind_from_batch_event(event),
+            }
+        )
+    return fallback
+
+
+def _normalize_semantic_kind(value: object) -> str:
+    candidate = str(value or "").strip()
+    allowed = {"wait", "mouseAction", "tableOperation", "controlOperation", "input", "comment", "checkpoint"}
+    return candidate if candidate in allowed else ""
+
+
+def _infer_semantic_kind_from_batch_event(event: dict[str, object]) -> str:
+    event_type = str(event.get("event_type", "")).strip().lower()
+    action = str(event.get("action", "")).strip().lower()
+    ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
+    control_type = str(ui_element.get("control_type", "")).strip().lower()
+    observation_text = " ".join(
+        str(value)
+        for value in [event.get("action", ""), ui_element.get("name", ""), ui_element.get("help_text", ""), control_type]
+        if str(value).strip()
+    ).lower()
+
+    if event_type == "comment":
+        return "comment"
+    if event_type == "checkpoint":
+        return "checkpoint"
+    if event_type in {"key_press", "type_input"}:
+        return "input"
+    if "wait" in observation_text or "等待" in observation_text:
+        return "wait"
+    if any(token in control_type for token in ["table", "grid", "dataitem", "row", "cell"]) or any(
+        token in observation_text for token in ["table", "grid", "row", "cell", "表格", "列表"]
+    ):
+        return "tableOperation"
+    if event_type == "mouse_drag" or action in {"drag", "scroll"} or event_type == "scroll":
+        return "mouseAction"
+    if any(
+        token in control_type
+        for token in ["button", "checkbox", "edit", "combobox", "radio", "tab", "menu", "listitem", "treeitem"]
+    ):
+        return "controlOperation"
+    return "mouseAction"
+
+
+def _merge_unique_dict_items(base_items: list[dict[str, object]], new_items: list[dict[str, object]]) -> list[dict[str, object]]:
+    merged: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in [*base_items, *new_items]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged

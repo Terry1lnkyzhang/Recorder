@@ -1,0 +1,28 @@
+metadata:
+  name: pilot-script-registry
+  version: "1.0"
+  description: Small curated script registry for early conversion validation.
+  owner: Recorder Converter
+
+# Fill this file with only the few reusable modules or sub-cases you want to test
+# during the current validation round, for example 2 scripts.
+#
+# Minimal entry shape:
+# - name: login_as_admin
+#   entry_keyword: login_as_admin
+#   summary: 使用管理员账号登录系统
+#   description: 复用登录页填写用户名密码并提交的完整流程
+#   script_type: business_flow
+#   priority: 20
+#   tags: [login, auth]
+#   aliases: [管理员登录, 登录系统]
+#   covers_steps:
+#   - 输入用户名
+#   - 输入密码
+#   - 点击登录
+#   parameters: []
+#   preconditions: []
+#   expected_outcome: []
+#   examples: []
+
+entries: []

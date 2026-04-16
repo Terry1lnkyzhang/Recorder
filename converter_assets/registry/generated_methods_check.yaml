@@ -1,0 +1,1557 @@
+metadata:
+  name: ControlCheck-method-registry
+  version: '1.0'
+  description: Extracted public methods from ControlCheck in ControlCheck.py
+  owner: Recorder Converter
+entries:
+- name: init
+  summary: init
+  description: ''
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: init
+    line: '50'
+  aliases: []
+  parameters: []
+  returns: ''
+  examples: []
+  exposed_keyword: init
+- name: 'Null'
+  summary: No-op check action placeholder.
+  description: 'Purpose:
+
+    Acts as a neutral step that always returns True (currently) so a pipeline expecting
+    a callable doesn''t break. Typically used when a dynamically generated step resolves
+    to "do nothing".
+
+    Parameters:
+
+    uiControl (auto.Control): Ignored.
+
+    paramDict (Dict): Ignored.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: 'Null'
+    line: '78'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'bool: Always True (note: a TODO indicates this may change in future).'
+  examples: []
+  exposed_keyword: 'Null'
+- name: check
+  summary: Generic catch-all check hook.
+  description: Intended as an integration point for legacy scripts referencing a generic
+    'check' action before specialized checks were introduced. Currently, this method
+    unconditionally returns True.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: check
+    line: '94'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The UI control to be checked. This parameter is currently ignored.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of parameters for the check. This parameter is currently
+      ignored.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'bool: Always returns True. A "TODO" in the code indicates this behavior
+    may be refined in the future.'
+  examples: []
+  exposed_keyword: check
+- name: CheckProperty
+  summary: Checks a specific property of a UI control against an expected value.
+  description: 'This method polls a property of a UI control and compares it with
+    an expected value. It supports both direct property access and retrieval via the
+    Snoop utility. The method will wait for a specified time before performing the
+    check.
+
+    Note:
+
+    This method is marked as potentially expiring in the future. It has TODOs for
+    adding more comparison operators (e.g., greater than, less than).'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckProperty
+    line: '109'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The UI control to be checked.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary containing parameters for the check. Expected keys
+      include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'bool: True if the actual value matches the expected value, False otherwise.'
+  examples: []
+  exposed_keyword: CheckProperty
+- name: InnerGetResultPath
+  summary: InnerGetResultPath
+  description: ''
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetResultPath
+    line: '180'
+  aliases: []
+  parameters: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerGetResultPath
+- name: InnerMakeReportAttach
+  summary: Generally no need for active invocation.
+  description: Generally no need for active invocation.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerMakeReportAttach
+    line: '190'
+  aliases: []
+  parameters:
+  - name: Description
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: ExpectResult
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: ActualValue
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: compareResult
+    type: Any
+    required: false
+    description: ''
+    default: false
+    example: null
+    schema_fields: []
+  - name: isExecpt
+    type: Any
+    required: false
+    description: ''
+    default: false
+    example: null
+    schema_fields: []
+  - name: screenShot
+    type: Any
+    required: false
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerMakeReportAttach
+- name: Printf
+  summary: Prints a message to the console with a timestamp.
+  description: 'Note:
+
+    This method is marked as potentially expiring in the future.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: Printf
+    line: '324'
+  aliases: []
+  parameters:
+  - name: str
+    type: str
+    required: true
+    description: The message string to be printed.
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: Printf
+- name: InnerGetDataGridValueByColRow
+  summary: 'nRowIndex: int = None, nColumnIndex: int = None'
+  description: 'nRowIndex: int = None, nColumnIndex: int = None'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetDataGridValueByColRow
+    line: '335'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.GridPattern
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: nRowIndex
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: nColumnIndex
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerGetDataGridValueByColRow
+- name: CheckOptionKeyStatus
+  summary: Verifies the status of option keys in a grid-like control.
+  description: 'This method reads a grid where option key names and their statuses
+    (e.g., ''Opened'', ''Disable'') are displayed in different columns. It checks
+    if the actual status of each specified option key matches its expected status.
+
+    If `propertyNameList` is provided, only the keys in that list are validated. If
+    `propertyNameList` is not provided, all rows in the grid are checked. Default
+    expected values are inferred if `propertyValueList` is not provided (''Disable''
+    for ''Precise Image Trial'', ''Opened'' for others).'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckOptionKeyStatus
+    line: '345'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The parent control that contains the grid of option keys.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method does not return a value but updates `paramDict` with
+    the comparison result and actual result description for reporting purposes.'
+  examples: []
+  exposed_keyword: CheckOptionKeyStatus
+- name: CheckExist
+  summary: Determines if a UI control exists based on specified criteria.
+  description: 'This method can operate in two modes:
+
+    1. **Current-control mode (`isCurrent=True`)**: Evaluates the provided `uiControl`
+    itself against property filters and optional screen placement constraints.
+
+    2. **Child-search mode (default)**: Recursively searches through the child controls
+    of `uiControl` to find matches, with options to include off-screen elements.
+
+    The matching logic is as follows:
+
+    - If `isExist` is True (default), the check succeeds only if exactly one matching
+    control is found.
+
+    - If `isExist` is False, the check succeeds only if zero matching controls are
+    found.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckExist
+    line: '388'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control | str
+    required: true
+    description: The base control to search within, or a string key to look up the
+      control.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'bool: True if the existence expectation is met, False otherwise. The result
+    is also stored in `paramDict` for reporting.'
+  examples: []
+  exposed_keyword: CheckExist
+- name: CheckMsgTextEquals
+  summary: Asserts that a message box's text contains an expected substring.
+  description: If `uiControl` is provided as a string key, this method will wait up
+    to a specified `timeout` for the control to appear. The check uses a substring
+    search, allowing for flexible matching of the message content.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckMsgTextEquals
+    line: '518'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control | str
+    required: true
+    description: The message box control or its lookup key in the control manager.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method does not return a value but updates `paramDict` with
+    the comparison result and actual result description for reporting purposes.'
+  examples: []
+  exposed_keyword: CheckMsgTextEquals
+- name: CheckPageOnScreen
+  summary: Determines which monitor a control is displayed on (main or extended).
+  description: This method checks the location of the `uiControl`'s bounding rectangle
+    to determine if it resides on the main monitor or an extended monitor. The result
+    is then compared with the expected location specified in the `Expect` parameter.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckPageOnScreen
+    line: '553'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The target UI control whose on-screen location is to be checked.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method does not return a value but updates `paramDict` with
+    the comparison result and actual result description for reporting purposes.'
+  examples: []
+  exposed_keyword: CheckPageOnScreen
+- name: InnerGetTreeVeiwList
+  summary: Return a flat list of visible texts from a tree or list-like control.
+  description: 'The method walks first-level children; if a child itself has children
+    (and is not an EditControl) it will append each grandchild Name, otherwise it
+    appends the child''s Name. If the control has no children its own Name is returned
+    as the single element. Empty strings can be optionally removed.
+
+    Parameters:
+
+    uiControl (auto.Control): Root tree/list control to enumerate.
+
+    removeNone (bool, default True): When True, empty string entries are filtered
+    out.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetTreeVeiwList
+    line: '584'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: removeNone
+    type: Any
+    required: false
+    description: ''
+    default: true
+    example: null
+    schema_fields: []
+  returns: 'list[str]: Collected item names (order as encountered).'
+  examples: []
+  exposed_keyword: InnerGetTreeVeiwList
+- name: InnerGetComboboxList
+  summary: Retrieve all visible list item texts from an expanded combo box.
+  description: 'Implementation Notes:
+
+    - Expands the combo (InnerExpandCombobox) and walks descendants to gather ListItemControl
+    instances.
+
+    - Prefers TextControl().Name where available; falls back to HelpText or Name heuristics
+    for certain composite items.
+
+    - Optionally strips empty strings.
+
+    - Caller is responsible for collapsing (method does NOT auto-collapse).
+
+    Parameters:
+
+    uiControl (auto.Control): Combo box root.
+
+    removeNone (bool): When True (default) empty entries are removed.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetComboboxList
+    line: '617'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: removeNone
+    type: Any
+    required: false
+    description: ''
+    default: true
+    example: null
+    schema_fields: []
+  returns: 'list[str]: Ordered list of discovered item labels.'
+  examples: []
+  exposed_keyword: InnerGetComboboxList
+- name: InnerGetPropertyValue
+  summary: Fetch a property value from a UI control (standard or snoop mode).
+  description: 'Resolution Order:
+
+    1. Snoop path (isSnoop=True): Use framework snoop helpers to gather raw property
+    (supports regexList filtering and ImageInfo special handling).
+
+    2. Direct path: Derive value by attribute access or supported aliases (Value,
+    rangeValue, childrencount, filmcount, rowcount, row/col for DataGrid & Table,
+    ComboBox current selection, list/tree expansion).
+
+    Special Keys:
+
+    dataGrid: Requires rowIndex + (colIndex|colName) (+ dataGridProperty)
+
+    Table: Requires rowIndex + colIndex (+ cellProperty)
+
+    list: Expands combo/tree, returns all item texts
+
+    combox/combobox: Returns selected value or selection item name
+
+    Parameters:
+
+    uiControl (auto.Control): Control from which to obtain the value.
+
+    paramDict (Dict):
+
+    propertyName / propertyNameList (str | list[str]): Target property name(s); first
+    element used when list form.
+
+    isSnoop (bool): Enables snoop retrieval route.
+
+    regexList (list[str]): Optional regex selectors for snoop block list mode.
+
+    floatPrecision (int): If >0, value coerced to float and rounded down to precision.
+
+    colIndex / colName / rowIndex / dataGridProperty / cellProperty: Additional selectors
+    for grid/table access.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetPropertyValue
+    line: '675'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'Any: Extracted value or "Null" when not resolved.'
+  examples: []
+  exposed_keyword: InnerGetPropertyValue
+- name: InnerExpandCombobox
+  summary: InnerExpandCombobox
+  description: ''
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerExpandCombobox
+    line: '833'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: false
+    description: ''
+    default: {}
+    example: null
+    schema_fields: []
+  - name: collapse
+    type: Any
+    required: false
+    description: ''
+    default: false
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerExpandCombobox
+- name: InnerCollapseCombobox
+  summary: InnerCollapseCombobox
+  description: ''
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerCollapseCombobox
+    line: '849'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: Any
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerCollapseCombobox
+- name: CheckSelectChildrenProperty
+  summary: Checks if any selected child item of a control matches property filters.
+  description: This method is typically used to validate the properties of a selected
+    item within a parent control like a `TabControl` or `ListControl`. It retrieves
+    the currently selected child item(s) and then uses `FindChildControl` to check
+    if any of them match the provided property filters in `paramDict`.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckSelectChildrenProperty
+    line: '860'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The parent control (e.g., `TabControl` or `ListControl`) that contains
+      the selected item.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of property filters to be passed to `FindChildControl`
+      for matching against the selected child.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method does not return a value but updates `paramDict` with
+    the comparison result and actual result description for reporting purposes.'
+  examples: []
+  exposed_keyword: CheckSelectChildrenProperty
+- name: RecordProperty
+  summary: Records a property value from a UI control for later use or reporting.
+  description: 'This method retrieves a specified property from a UI control, which
+    can be a standard attribute or a value obtained via the Snoop utility. It supports
+    navigating to a related control using a `browser` expression before fetching the
+    value. The recorded value can be used to populate variables for reporting.
+
+    Supported `propertyName` values include standard control attributes and special
+    keys like: `Value`, `childrencount`, `rangeValue`, `filmcount`, `rowcount`, `check`,
+    `isSelected`, `combox`/`combobox`, `list`, `dataGrid`, and `Table`.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: RecordProperty
+    line: '894'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The base UI control from which to record the property.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the recording action. Expected keys
+      include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'any: The raw value of the recorded property.'
+  examples: []
+  exposed_keyword: RecordProperty
+- name: RecordFuncReturnValue
+  summary: Executes another action or check and records its return value.
+  description: This method dynamically calls another method from either `ControlAction`
+    or `ControlCheck` based on the provided `funcName`. The return value of the called
+    function is then recorded. This is useful for capturing the outcome of a dynamic
+    operation for later use or reporting.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: RecordFuncReturnValue
+    line: '945'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The UI control to be passed to the target function.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'any: The return value of the invoked function.'
+  examples: []
+  exposed_keyword: RecordFuncReturnValue
+- name: Compare
+  summary: Compares a control's property value against a dynamic formula.
+  description: This method retrieves a property value from a UI control and then evaluates
+    a given comparison formula. The placeholder 'propertyValue' within the formula
+    is replaced by the actual property value before evaluation. This allows for flexible
+    and dynamic comparisons.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: Compare
+    line: '998'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control | str
+    required: true
+    description: The UI control to read from. Can be a string when only using Snoop.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the comparison. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'bool: The result of the formula evaluation. The result is also stored
+    in `paramDict` for reporting.'
+  examples: []
+  exposed_keyword: Compare
+- name: VarOperator
+  summary: Evaluates a Python expression and optionally formats it for reporting.
+  description: This method takes a Python expression from the `formula` parameter,
+    evaluates it, and returns the result. It can also store the result in a variable
+    (though this is currently only logged if `varName` is empty) and format a string
+    for reporting purposes.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: VarOperator
+    line: '1067'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: An unused placeholder for interface consistency.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'any: The result of the evaluated formula.'
+  examples: []
+  exposed_keyword: VarOperator
+- name: CompareVarFormula
+  summary: Evaluates a formula for comparison and reports the result.
+  description: 'Note:
+
+    This method is marked as potentially expiring in the future.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CompareVarFormula
+    line: '1117'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: An unused placeholder for interface consistency.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters. Expected keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method does not return a value but updates `paramDict` with
+    the comparison result and actual result description for reporting purposes.'
+  examples: []
+  exposed_keyword: CompareVarFormula
+- name: CheckEquals
+  summary: Compares a control's property with an expected value.
+  description: 'Note:
+
+    This method is marked as potentially expiring in the future.
+
+    This method retrieves a property from a UI control and compares it to an expected
+    value using a specified comparison function. It supports various modes, such as
+    recording values, accumulating values, and using the Snoop utility.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckEquals
+    line: '1152'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The UI control to check.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. Supported keys include:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: CheckEquals
+- name: CheckImageInfo
+  summary: Validate image tag values across a sequence of images (snoop based).
+  description: Iterates one or more images (via mouse wheel scrolling) and collects
+    tag values specified by ``tagNumberList`` (or all when empty). Compares the collected
+    ValueText list with ``propertyValueList``. Optionally validates that a numeric
+    increment tag changes by a fixed delta between successive images (``isIncrement``)
+    and/or runs orientation validation for each image (``isCheckOri``).
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckImageInfo
+    line: '1299'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Image viewer control used for focus and scrolling when multiple images
+      are checked.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters controlling validation.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None | bool: ``False`` if aborted early by a thread wait event; otherwise
+    ``None``. Side Effects: Updates ``paramDict`` with ``compareResult`` and actual
+    string.'
+  examples: []
+  exposed_keyword: CheckImageInfo
+- name: InnerGetImageInfo
+  summary: Retrieves image-related property values (such as TagNumber, ValueText,
+    etc.) from the specified control.
+  description: "Retrieves image-related property values (such as TagNumber, ValueText,\
+    \ etc.) from the specified control.\n\nArgs:\n    uiControl (auto.Control): The\
+    \ target UI control.\n    paramDict (Dict): Dictionary of parameters, commonly\
+    \ including:\n        - propertyNameList (list): List of property names, usually\
+    \ only the first element is used.\n        - regexList (list): List of regex parameters\
+    \ for locating specific properties.\n        - tagNumberList (list): List of target\
+    \ tag numbers. If empty, all property values are returned.\n\nReturns:\n    list:\
+    \ The actual property values retrieved, always as a list.\n\nNotes:\n    - If\
+    \ tagNumberList is empty, all property values are returned directly.\n    - If\
+    \ the property structure matches the standard Count/TagNumber/ValueText pattern,\
+    \ all TagNumber and ValueText values are retrieved in batches.\n    - If the structure\
+    \ is non-standard, values are retrieved one by one according to tagNumberList.\n\
+    \    - The return value is always a list for consistency."
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetImageInfo
+    line: '1459'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The target UI control.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'Dictionary of parameters, commonly including:'
+    default: null
+    example: null
+    schema_fields:
+    - name: propertyNameList
+      type: list
+      description: List of property names, usually only the first element is used.
+      required: true
+      default: null
+      example: null
+    - name: regexList
+      type: list
+      description: List of regex parameters for locating specific properties.
+      required: true
+      default: null
+      example: null
+    - name: tagNumberList
+      type: list
+      description: List of target tag numbers. If empty, all property values are returned.
+      required: true
+      default: null
+      example: null
+  returns: 'list: The actual property values retrieved, always as a list. Notes: -
+    If tagNumberList is empty, all property values are returned directly. - If the
+    property structure matches the standard Count/TagNumber/ValueText pattern, all
+    TagNumber and ValueText values are retrieved in batches. - If the structure is
+    non-standard, values are retrieved one by one according to tagNumberList. - The
+    return value is always a list for consistency.'
+  examples: []
+  exposed_keyword: InnerGetImageInfo
+- name: CheckImageOrientation
+  summary: Validate orientation mapping for a given patient position.
+  description: Resolves the expected orientation string from a YAML mapping using
+    either ``supineIndex`` or ``decubitusIndex`` (exactly one should be provided)
+    and compares it to the snooped orientation value(s).
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckImageOrientation
+    line: '1563'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Context control for snoop retrieval.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: Writes actual description and ``compareResult`` to ``paramDict``.'
+  examples: []
+  exposed_keyword: CheckImageOrientation
+- name: CheckListViewTextEquals
+  summary: Check list (or selected items) text against an expected value.
+  description: 'Note:
+
+    Marked for future deprecation ("Expire in the feature").
+
+    This method optionally reads only the selected item''s text (`IsSelection=True`)
+    or all descendant text values under the passed control. It can record gathered
+    values for later reuse (`isRecord=True`) or perform a direct / regex-based comparison
+    with `expectValue`.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckListViewTextEquals
+    line: '1621'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: List-like control whose item text(s) are evaluated.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters controlling the check.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: Populates `paramDict` with comparison result and actual text.'
+  examples: []
+  exposed_keyword: CheckListViewTextEquals
+- name: CheckTimedSeriesDelayTime
+  summary: Validate actual timed series trigger delays against expected values.
+  description: 'Note:
+
+    Marked for future deprecation ("Expire in the feature").
+
+    Observes a scan icon''s visibility state transitions to capture trigger timestamps.
+    Compares each measured delay (with an initial +1s buffer) against a list of expected
+    per-event delay times, asserting that the absolute error for all events is below
+    a configured threshold.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckTimedSeriesDelayTime
+    line: '1702'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Unused placeholder (present for uniform method signature).
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters controlling the timing validation.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: Updates `paramDict` with comparison outcome and actual details.'
+  examples: []
+  exposed_keyword: CheckTimedSeriesDelayTime
+- name: CheckIsSelect
+  summary: Check a radio-style control selection state against an expected flag.
+  description: 'Note:
+
+    Marked for future deprecation ("Expire in the feature").
+
+    Uses the legacy accessible pattern state integer to determine whether the control
+    is selected (1048592) or selected+focusable (1048596) etc.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckIsSelect
+    line: '1762'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The radio / selectable control to inspect.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters for the check.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: Populates `paramDict` with comparison result and actual text.'
+  examples: []
+  exposed_keyword: CheckIsSelect
+- name: CheckECGSeriesSelect
+  summary: Verify ECG wave series selection follows clinical recon selection.
+  description: 'Note:
+
+    Marked for future deprecation ("Expire in the feature").
+
+    For a complete series data grid: when a clinical reconstruction series row is
+    selected, the ECG wave series row immediately following (index+1) should also
+    be selected.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckECGSeriesSelect
+    line: '1792'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Data grid control exposing selection via legacy accessible pattern.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters for the check.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: Writes result and actual description into `paramDict`.'
+  examples: []
+  exposed_keyword: CheckECGSeriesSelect
+- name: CheckTextNumberCount
+  summary: Count numeric characters in a control's text (optionally a substring).
+  description: 'Note:
+
+    Marked for future deprecation ("Expire in the feature").
+
+    Extracts the control''s `Name` (or its ValuePattern value when empty). If `substr`
+    provided and found, a slice beginning just after `substr` is used for counting.
+    The resulting digit count is compared using a simple operator against `expectedValue`.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckTextNumberCount
+    line: '1945'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Control whose text is analyzed.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters for the check.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: Stores result and actual description inside `paramDict`.'
+  examples: []
+  exposed_keyword: CheckTextNumberCount
+- name: CheckFileText
+  summary: Assert a file's contents include a target substring.
+  description: Reads the entire file using the specified encoding and performs a substring
+    search (case-sensitive). On success marks comparison True; otherwise includes
+    the full file text in the actual description.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckFileText
+    line: '1991'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Unused placeholder for signature consistency.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: Parameters for the check.
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'bool: True if substring found, False otherwise. Also writes formatted
+    actual/compareResult into `paramDict`.'
+  examples: []
+  exposed_keyword: CheckFileText
+- name: CheckPathExist
+  summary: Asserts that a file system path (file or directory) exists.
+  description: "Asserts that a file system path (file or directory) exists.\n\nArgs:\n\
+    \    uiControl (auto.Control): An unused placeholder to maintain a consistent\
+    \ method signature across different checks.\n    paramDict (Dict): A dictionary\
+    \ containing parameters for the check. It should include:\n        - path (str):\
+    \ The file or directory path to validate.\n        - Expect (str, optional): A\
+    \ template string for the success message.\n\nReturns:\n    None: This method\
+    \ does not return a value directly but updates `paramDict` with the actual result\
+    \ description and a boolean comparison result."
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckPathExist
+    line: '2031'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: An unused placeholder to maintain a consistent method signature across
+      different checks.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary containing parameters for the check. It should include:'
+    default: null
+    example: null
+    schema_fields:
+    - name: path
+      type: str
+      description: The file or directory path to validate.
+      required: true
+      default: null
+      example: null
+    - name: Expect
+      type: str
+      description: A template string for the success message.
+      required: false
+      default: null
+      example: null
+  returns: 'None: This method does not return a value directly but updates `paramDict`
+    with the actual result description and a boolean comparison result.'
+  examples: []
+  exposed_keyword: CheckPathExist
+- name: CheckMedicalControlName
+  summary: Validates that a snooped set of medical control names matches the expected
+    values.
+  description: This method retrieves a count and sequence of item names using the
+    snoop utility, then performs an order-insensitive set equality comparison with
+    the provided list of expected names.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckMedicalControlName
+    line: '2056'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The context control used for the snoop query path.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. Expected keys include:'
+    default: null
+    example: null
+    schema_fields:
+    - name: propertyNameList
+      type: list[str]
+      description: The base property name for the snoop query (only the first element
+        is used).
+      required: true
+      default: null
+      example: null
+    - name: propertyValueList
+      type: list[str]
+      description: The expected set of names for comparison.
+      required: true
+      default: null
+      example: null
+    - name: regexList
+      type: list[str]
+      description: A list of regex tokens to guide the snoop lookup.
+      required: true
+      default: null
+      example: null
+    - name: Expect
+      type: str
+      description: A template string for the success message.
+      required: false
+      default: null
+      example: null
+  returns: 'None: This method does not return a value but updates `paramDict` with
+    the comparison result and the actual result description.'
+  examples: []
+  exposed_keyword: CheckMedicalControlName
+- name: CheckRibList
+  summary: Verifies that the collected rib labels match an expected set in an order-insensitive
+    manner.
+  description: This method iterates through the direct children of the `uiControl`,
+    reads the name (label) of each child's first child, and compares the resulting
+    set of labels to the expected `propertyValueList`.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckRibList
+    line: '2100'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The parent control that contains the rib elements.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters for the check. It should contain:'
+    default: null
+    example: null
+    schema_fields:
+    - name: propertyValueList
+      type: list[str]
+      description: A list of the expected rib labels.
+      required: true
+      default: null
+      example: null
+    - name: Expect
+      type: str
+      description: A template string for the success message.
+      required: false
+      default: null
+      example: null
+  returns: 'None: This method does not return a value but populates `paramDict` with
+    the actual result description and the comparison result.'
+  examples: []
+  exposed_keyword: CheckRibList
+- name: CheckTrendForControl
+  summary: Monitors a numeric control (e.g., couch position) and verifies its trend.
+  description: This method samples a numeric string value from a control until a specified
+    set of property values changes or a timeout is reached. Each sample is checked
+    against an expected trend (Increase, Decrease, or Unchanged), with a configurable
+    tolerance for 'Unchanged'. The net change between the first and last samples must
+    also match the expected trend.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckTrendForControl
+    line: '2135'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The control whose numeric string is sampled. Can be 'Null' if only
+      snoop properties are used.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of runtime parameters, including:'
+    default: null
+    example: null
+    schema_fields:
+    - name: propertyNameList
+      type: list[str]
+      description: A list of property names that form the change sentinel set.
+      required: true
+      default: null
+      example: null
+    - name: propertyValueList
+      type: list[Any]
+      description: The target values that indicate the end state.
+      required: true
+      default: null
+      example: null
+    - name: trend
+      type: str
+      description: The expected trend ('Increase', 'Decrease', 'Unchanged').
+      required: true
+      default: null
+      example: null
+    - name: timeout
+      type: float
+      description: 'The overall monitoring timeout in seconds (default: 300).'
+      required: false
+      default: null
+      example: null
+    - name: interval
+      type: float
+      description: 'The sampling interval in seconds (default: 0.3).'
+      required: false
+      default: null
+      example: null
+    - name: allowedError
+      type: float
+      description: 'The absolute delta to be treated as ''Unchanged'' (default: 0.1).'
+      required: false
+      default: null
+      example: null
+    - name: isSnoop
+      type: bool
+      description: If True, uses snoop for property retrieval.
+      required: false
+      default: null
+      example: null
+    - name: regexList
+      type: list[str]
+      description: A list of snoop path tokens for when `isSnoop` is True.
+      required: false
+      default: null
+      example: null
+    - name: Expect
+      type: str
+      description: A template for the success message.
+      required: false
+      default: null
+      example: null
+    - name: Description
+      type: str
+      description: A description for reporting purposes.
+      required: false
+      default: null
+      example: null
+  returns: 'None: This method does not return a value but writes the result and an
+    actual trend summary into `paramDict`.'
+  examples:
+  - 'To stop when a control becomes enabled while its value is decreasing:'
+  - propertyNameList=['IsEnabled'], propertyValueList=[True], timeout=600, trend='Decrease'
+  - 'To stop when the recon state ends while a value is increasing (using snoop):'
+  - propertyNameList=['ReconState'], propertyValueList=['RECON_END'], regexList=['1','1'],
+    timeout=600, trend='Increase', isSnoop=True
+  exposed_keyword: CheckTrendForControl
+- name: CheckDurationTime
+  summary: Checks the timing of scan exposure intervals and, optionally, a movement
+    trend.
+  description: 'This method waits for a configured number of exposure appearances
+    (`powerOn`) per cycle and compares the timestamp of the first exposure in each
+    cycle to the previous one, ensuring the difference is within a specified tolerance
+    (`expectError`) of `durationTime`. It can also sample a numeric control''s position
+    after exposures to validate its trend (Increase/Decrease/Unchanged).
+
+    Power-on detection can be done in two ways:
+
+    1.  By polling a property (e.g., `ScanIconImage.IsOffscreen` changing from `False`
+    to `True`).
+
+    2.  By waiting for an image pattern to appear (using `sourcePath`, `rect`, `accuracy`,
+    etc.).'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: CheckDurationTime
+    line: '2222'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control or str
+    required: true
+    description: The control used for position sampling. A string can be used if only
+      image-based waits are performed.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters, including:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method does not return a value but stores the actual result
+    description and comparison result in `paramDict`.'
+  examples:
+  - 'For basic timing validation:'
+  - cycles=10, powerOn=2, durationTime=4.0, expectError=0.5, trend='Unchanged'
+  - 'For image-based detection:'
+  - sourcePath='commonFiles\resource\ScanIcon.png', rect=[350,1030,490,1080]
+  exposed_keyword: CheckDurationTime
+- name: ManualCheck
+  summary: Marks a step as requiring manual (human) verification.
+  description: 'When `query` is provided, this method upgrades the step into an AI-assisted
+    vision check. It accepts one or more input images (`image` / `imageList` / `images`),
+    or captures a screenshot from `rect` / `area`. If neither image nor region is
+    provided but `uiControl` is available, the control bounding rectangle is captured
+    automatically.
+
+    If `query` is not provided, the method keeps the legacy behavior: it copies `Expect`
+    into the actual result field and sets `compareResult` to the sentinel value `''null''`.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: ManualCheck
+    line: '2337'
+  tags:
+  - Check
+  - AI
+  - LLM
+  - ManualCheck
+  - AI check
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: A placeholder for interface consistency; this parameter is ignored.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters. It should contain:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None: This method mutates `paramDict` by setting the actual result text
+    and setting `compareResult` to `''null''`.'
+  examples: []
+  when_to_use:
+  - Need to add AI check point
+  exposed_keyword: ManualCheck
+- name: InnerGetPlanboxMASValue
+  summary: 'propertyNameList: list, "[''xx'', ''xx'',...]". If isSnoop is True, must
+    [''xx''], len(propertyNameList)==1.'
+  description: 'propertyValueList: list, "[''xx'', ''xx'',...]"
+
+    regexList: list, "[''0'',''1'']", use for regex. config regular:(regexX).Only
+    work isSnoop is True.
+
+    isMasValue: bool, default=True'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerGetPlanboxMASValue
+    line: '2410'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerGetPlanboxMASValue
+- name: InnerCUS_CheckCanOpenLog
+  summary: 'folderPath: ''D:\Logs\CanOpenLog''     folder path.'
+  description: 'compareStr1: Debug              CanOpenProtocolManager   -------------
+    CanOpenProgress Monitor -------------
+
+    compareStr2: Debug              Philips.Pcc.CT.Console.ScanRuler.ScanRulerController   ScanRuler
+    update InjectionProgress End'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: InnerCUS_CheckCanOpenLog
+    line: '2436'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: ''
+    default: null
+    example: null
+    schema_fields: []
+  returns: ''
+  examples: []
+  exposed_keyword: InnerCUS_CheckCanOpenLog
+- name: Inspection
+  summary: Performs a bulk inspection of UI element presence across multiple windows
+    of a process.
+  description: When `start` is True, this method clears the previous pass cache. Subsequent
+    calls traverse each top-level window of the specified `processName` and attempt
+    to locate all known element keys (from `ElementsParse`). For each found key, a
+    bitmap and rectangle are stored. When `end` is True, it attaches report steps
+    for each key, using the captured bitmap for successful finds and a placeholder
+    image for missing keys.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: Inspection
+    line: '2465'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: An unused placeholder for signature consistency.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters to control the inspection, including:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'None Side Effects: This method populates the internal `__inspectionPassKeyDict`
+    and emits report attachments via `InnerMakeReportAttach` when `end` is True.'
+  examples: []
+  exposed_keyword: Inspection

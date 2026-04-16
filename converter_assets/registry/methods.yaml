@@ -1,0 +1,54 @@
+metadata:
+  name: framework-method-registry
+  version: "1.0"
+  description: 你的自动化测试框架对外暴露方法注册表
+  owner: Recorder
+
+entries:
+  - name: click_button
+    exposed_keyword: click_button
+    summary: 点击按钮类控件
+    description: 适用于提交、保存、确认、下一步等按钮点击
+    tags: [click, button, submit, save, ui]
+    aliases: [点击按钮, 点击保存, 点击确认]
+    domain: common
+    stability: stable
+    parameters:
+      - name: locator
+        type: string
+        required: true
+        description: 用于定位目标按钮的表达式
+        example: text=保存
+    when_to_use:
+      - 页面上存在明确按钮需要点击
+      - 语义步骤包含确认、提交、保存等动作
+    when_not_to_use:
+      - 输入文本
+      - 选择下拉框
+    examples:
+      - click_button(locator="text=保存")
+
+  - name: input_text
+    exposed_keyword: input_text
+    summary: 在输入框中输入文本
+    description: 适用于用户名、邮箱、查询词等文本输入
+    tags: [input, text, edit, form]
+    aliases: [输入文本, 填写输入框]
+    domain: common
+    stability: stable
+    parameters:
+      - name: locator
+        type: string
+        required: true
+        description: 输入框定位表达式
+      - name: text
+        type: string
+        required: true
+        description: 需要输入的文本
+    when_to_use:
+      - 语义步骤包含输入、填写、录入
+    when_not_to_use:
+      - 点击按钮
+      - 等待断言
+    examples:
+      - input_text(locator="automation_id=username", text="demo")

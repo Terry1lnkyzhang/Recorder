@@ -1,0 +1,424 @@
+metadata:
+  name: pilot-method-registry
+  version: '1.0'
+  description: Minimal curated method registry for action/check conversion validation.
+  owner: Recorder Converter
+entries:
+- name: FindControlByName
+  summary: Find a control by property conditions and optionally operate on a nearby
+    target control.
+  description: 'This method uses property/value pairs in ``paramDict`` to find a starting
+    control,
+
+    then searches nearby child, sibling, or parent controls for an actionable target.
+
+    It is mainly used for "label + control" layouts, for example locating a label
+    by
+
+    ``Name=''Patient ID''`` or ``HelpText=''Zoom In''`` and then operating the nearby
+    target.
+
+    Root selection order:
+
+    1. Explicit ``uiControl`` object.
+
+    2. Explicit ``parentKeyName``.
+
+    3. Explicit ``uiControl`` string key when it is not ``Null`` or ``MainWindow``.
+
+    4. Current foreground top-level window.
+
+    5. Other currently visible top-level windows on the desktop.
+
+    6. Fallback ``MainWindow``.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: FindControlByName
+    line: '5618'
+  tags:
+  - click
+  - edit
+  - select
+  - combobox
+  - button
+  - label
+  - text
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Parent control or control key used as search root.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of search and action parameters.
+    default: null
+    example: null
+    schema_fields:
+    - name: Name
+      type: str
+      description: Find the starting control by Name, for example ``Name='Patient
+        ID'``.
+      required: false
+      default: null
+      example: null
+    - name: HelpText
+      type: str
+      description: Find the starting control by HelpText. This is useful for icon-only
+        controls that expose tooltip/help text.
+      required: false
+      default: null
+      example: null
+    - name: cellValue
+      type: str
+      description: Action or value to apply, such as ``click``, input text, ``on``,
+        ``off``, or ``search``.
+      required: true
+      default: null
+      example: null
+    - name: direction
+      type: str
+      description: 'Enable rectangle-based nearby search. Supported values: ``right``,
+        ``left``, ``below``, ``above``, ``any``.'
+      required: false
+      default: null
+      example: null
+    - name: controlTypeList
+      type: List[str]
+      description: Allowed nearby target control types.
+      required: false
+      default: null
+      example: null
+    - name: parentKeyName
+      type: str
+      description: Explicit root key name.
+      required: false
+      default: null
+      example: null
+    - name: scrollable
+      type: bool
+      description: If True, infer a scrollable container from ``clickPoint`` and search
+        it first.
+      required: false
+      default: null
+      example: null
+    - name: clickPoint
+      type: list[int] | dict
+      description: Absolute point used for scrollable-container inference. - Other
+        key-value pairs are treated as property filters, such as ``AutomationId``,
+        ``ClassName``, ``ControlTypeName``, or ``HelpText``.
+      required: false
+      default: null
+      example: null
+  returns: The matched control object on successful search/action path, or ``None``
+    when no valid target is found or an exception occurs.
+  examples:
+  - 'Find by Name and edit nearby input:'
+  - '``{"Name": "Patient ID", "cellValue": "12345"}``'
+  - 'Find by HelpText and click an icon control:'
+  - '``{"HelpText": "Zoom In", "cellValue": "click"}``'
+  - 'Turn on a checkbox near a located row:'
+  - '``{"Name": "Enable Feature", "cellValue": "on", "controlTypeList": ["CheckBoxControl"]}``'
+  exposed_keyword: FindControlByName
+- name: SendKeys
+  summary: Simulates sending keyboard input, including complex sequences.
+  description: 'This method can operate in two modes: sending a rich text string with
+    special key macros, or sending a single virtual key press. It can optionally click
+    on a target control or coordinate before sending keys to ensure focus.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: SendKeys
+    line: '622'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The target control for the key presses. Used to determine coordinates
+      for an initial click if x and y are not provided.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of parameters to control the action.
+    default: null
+    example: null
+    schema_fields:
+    - name: text
+      type: str
+      description: A macro string with special tokens like '{Ctrl}', '{Shift}', '{a
+        3}'. Mutually exclusive with 'key'.
+      required: true
+      default: null
+      example: null
+    - name: key
+      type: str
+      description: A single virtual key name (e.g., "VK_F5").
+      required: true
+      default: null
+      example: null
+    - name: x
+      type: int
+      description: The x-coordinate to click before sending keys.
+      required: true
+      default: null
+      example: null
+    - name: y
+      type: int
+      description: The y-coordinate to click before sending keys.
+      required: true
+      default: null
+      example: null
+    - name: interval
+      type: float
+      description: Delay between characters in a text string.
+      required: true
+      default: null
+      example: null
+    - name: waitTime
+      type: float
+      description: Time to sleep after the keys are sent.
+      required: true
+      default: null
+      example: null
+    - name: charMode
+      type: bool
+      description: If False, uses IME-dependent input.
+      required: true
+      default: null
+      example: null
+    - name: debug
+      type: bool
+      description: If True, prints the expanded key sequence.
+      required: true
+      default: null
+      example: null
+  returns: ''
+  examples:
+  - '`{''text'': ''{Ctrl}a{Delete}''}`: Simulates Ctrl+A, then Delete.'
+  - '`{''text'': ''{Ctrl}(AB)''}`: Simulates holding Ctrl, pressing A, B, then releasing
+    Ctrl.'
+  - '`{''text'': ''{{}Hello{}}''}`: Sends the literal string "{Hello}".'
+  exposed_keyword: SendKeys
+- name: MouseAction
+  summary: Executes a normalized mouse action with optional modifier keys.
+  description: 'This method provides a single entry point for mouse interactions over
+    a
+
+    control, an absolute point, an explicit point parameter, or the current
+
+    cursor position. It supports click-like actions, move/hover, left-button
+
+    press/release flows, drag/drag-drop, wheel scrolling, and combined
+
+    keyboard modifiers such as Ctrl/Shift/Alt/Win.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: MouseAction
+    line: '466'
+  tags:
+  - x
+  - y
+  - wheel
+  - scoll
+  - drag
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: Target control. Pass ``"Null"`` when operating only with
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of mouse action parameters.
+    default: null
+    example: null
+    schema_fields:
+    - name: action
+      type: str
+      description: Required action name. Supported values are ``click``, ``rightclick``,
+        ``doubleclick``, ``middleclick``, ``moveto``, ``hover``, ``press``, ``release``,
+        ``longclick``, ``drag``, ``dragdrop``, and ``wheel``.
+      required: true
+      default: null
+      example: null
+    - name: button
+      type: str
+      description: Mouse button alias for click actions. Supported values are ``left``,
+        ``right``, and ``middle``.
+      required: false
+      default: null
+      example: null
+    - name: clickCount
+      type: int
+      description: Click count when ``action='click'``.
+      required: false
+      default: null
+      example: null
+    - name: target
+      type: str
+      description: Target mode. Supported values are ``control``, ``absolute``, ``point``,
+        and ``current``.
+      required: false
+      default: null
+      example: null
+    - name: absolute
+      type: bool
+      description: 'Compatibility alias of ``target=''absolute''``. - x, y (int, optional):
+        Absolute coordinates, or control-relative offsets when ``target=''control''``.'
+      required: false
+      default: null
+      example: null
+    - name: point
+      type: list[int] | tuple[int, int] | dict
+      description: 'Explicit point in screen coordinates. - ratioX, ratioY (float,
+        optional): Relative position inside a control. Defaults to ``0.5``. - offsetX,
+        offsetY (int, optional): Offset applied after target point resolution.'
+      required: false
+      default: null
+      example: null
+    - name: useClickablePoint
+      type: bool
+      description: Whether to prefer ``GetClickablePoint`` for control targets. Defaults
+        to True.
+      required: false
+      default: null
+      example: null
+    - name: fallbackToCenter
+      type: bool
+      description: Whether to use control center when clickable point is unavailable.
+        Defaults to True.
+      required: false
+      default: null
+      example: null
+    - name: endTarget
+      type: str
+      description: 'Drag end target mode. - x2, y2 (int, optional): Drag end absolute
+        coordinates. - endPoint / targetPoint (list[int] | tuple[int, int] | dict,
+        optional): Drag end point.'
+      required: false
+      default: null
+      example: null
+    - name: endControl
+      type: auto.Control
+      description: 'Drag end control. - endRatioX, endRatioY (float, optional): Relative
+        position inside the drag end control. - endOffsetX, endOffsetY (int, optional):
+        Offset for drag end point.'
+      required: false
+      default: null
+      example: null
+    - name: modifierKeys
+      type: list[str] | str
+      description: Modifier keys to hold during the action.
+      required: false
+      default: null
+      example: null
+    - name: pressKey
+      type: str
+      description: Compatibility alias for one modifier.
+      required: false
+      default: null
+      example: null
+    - name: duration
+      type: float
+      description: Hold/hover duration for ``press``, ``longclick``, and ``hover``.
+      required: false
+      default: null
+      example: null
+    - name: moveSpeed
+      type: float
+      description: Cursor move speed for move/drag.
+      required: false
+      default: null
+      example: null
+    - name: simulateMove
+      type: bool
+      description: Whether to move to the resolved point before click-like actions.
+      required: false
+      default: null
+      example: null
+    - name: waitTime
+      type: float
+      description: Delay after the action completes.
+      required: false
+      default: null
+      example: null
+    - name: direction
+      type: str
+      description: 'Wheel direction. Supported values are ``up`` and ``down``. Defaults
+        to ``down`` when ``isDown`` is not provided. - wheelTimes / wheelCount (int,
+        optional): Wheel scroll count.'
+      required: false
+      default: null
+      example: null
+    - name: interval
+      type: float
+      description: Interval between wheel ticks.
+      required: false
+      default: null
+      example: null
+  returns: True when the mouse action is executed, otherwise False.
+  examples: []
+  exposed_keyword: MouseAction
+- name: AgentInterface
+  summary: Runs an AI-only Agent flow.
+  description: '<<<<<<< HEAD
+
+    When `query` is provided, this method performs an AI-assisted vision check or
+
+    value extraction. It accepts one or more input images (`image` / `imageList` /
+
+    `images`), or captures a screenshot from `rect` / `area`. If neither image nor
+
+    region is provided but `uiControl` is available, the control bounding rectangle
+
+    is captured automatically.
+
+    If `returnValue` is enabled, the method returns the extracted result directly.
+
+    Otherwise, it writes the AI judgment back into `paramDict`, marks the report
+
+    status source as `agent`, and continues with Agent-specific report handling.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: AgentInterface
+    line: '2400'
+  tags:
+  - AI
+  - check
+  - checkpoint
+  - AICheckpoint
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: A placeholder for interface consistency; this parameter is ignored.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters. It should contain:'
+    default: null
+    example: null
+    schema_fields: []
+  returns: 'Any | None: Returns the extracted value in value-extraction mode; otherwise
+    returns None after writing report-related fields back into `paramDict`.'
+  examples: []
+  exposed_keyword: AgentInterface

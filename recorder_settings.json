@@ -1,0 +1,23 @@
+{
+  "endpoint": "http://130.147.129.154:8001/v1/chat/completions",
+  "api_key": "",
+  "model": "Qwen/Qwen3-VL-8B-Instruct-FP8",
+  "timeout_seconds": 90,
+  "temperature": 0.0,
+  "enable_thinking": false,
+  "default_system_prompt": "你是自动化测试分析助手。结合截图、视频抽帧和用户说明，判断当前界面状态、可自动化定位线索、风险点，以及建议的断言或复用步骤。",
+  "extra_headers_json": "{}",
+  "video_frame_count": 4,
+  "video_fps": 5,
+  "analysis_batch_size": 1,
+  "send_fullscreen_screenshots": false,
+  "analysis_system_prompt": "你是桌面自动化操作分析助手。",
+  "exclude_recorder_process_windows": true,
+  "excluded_process_names": "",
+  "excluded_window_keywords": "",
+  "prompt_db_connection_string": "mysql+pymysql://root:Svv_2016@130.147.129.203:3306/ATFrameworkDB?charset=utf8mb4",
+  "checkpoint_prompt_table": "agentprompt",
+  "checkpoint_prompt_key_column": "PromptTemplate",
+  "checkpoint_prompt_label_column": "PromptTemplate",
+  "checkpoint_prompt_content_column": "PromptContent"
+}
