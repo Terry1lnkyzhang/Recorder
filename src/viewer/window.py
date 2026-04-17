@@ -59,6 +59,9 @@ class RecorderViewerWindow:
         self._event_list_reload_after_id: str | None = None
         self._pending_event_list_rows: list[tuple[int, dict[str, object]]] = []
         self._event_list_batch_size = 300
+        self._session_picker_scan_token = 0
+        self._session_load_token = 0
+        self._session_candidate_cache: dict[str, dict[str, object]] = {}
         self._synchronizing_tree_selection = False
         self.cleaning_suggestions: list[CleaningSuggestion] = []
         self.ai_analysis: dict[str, object] | None = None
@@ -422,27 +425,49 @@ class RecorderViewerWindow:
         tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
         tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
 
+        status_var = tk.StringVar(value="正在扫描 Session...")
+        ttk.Label(dialog, textvariable=status_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
+
         button_bar = ttk.Frame(dialog, padding=(16, 0, 16, 16))
         button_bar.pack(fill=tk.X)
 
-        sessions = self._find_session_candidates(self.recordings_root)
+        sessions: list[dict[str, object]] = []
 
-        def populate() -> None:
+        def populate(force_refresh: bool = False) -> None:
+            self._session_picker_scan_token += 1
+            token = self._session_picker_scan_token
+            status_var.set("正在扫描 Session...")
             for item_id in tree.get_children():
                 tree.delete(item_id)
-            sessions.clear()
-            sessions.extend(self._find_session_candidates(self.recordings_root))
-            path_var.set(str(self.recordings_root))
-            for index, item in enumerate(sessions):
-                tree.insert(
-                    "",
-                    tk.END,
-                    iid=str(index),
-                    values=(item["name"], item["modified"], item["events"]),
-                )
-            if sessions:
-                tree.selection_set("0")
-                tree.focus("0")
+
+            def worker() -> None:
+                try:
+                    items = self._find_session_candidates(self.recordings_root, force_refresh=force_refresh)
+                except Exception as exc:
+                    self.window.after(0, lambda: status_var.set(f"扫描 Session 失败: {exc}"))
+                    return
+
+                def apply_results() -> None:
+                    if not dialog.winfo_exists() or token != self._session_picker_scan_token:
+                        return
+                    sessions.clear()
+                    sessions.extend(items)
+                    path_var.set(str(self.recordings_root))
+                    status_var.set(f"共找到 {len(sessions)} 个 Session")
+                    for index, item in enumerate(sessions):
+                        tree.insert(
+                            "",
+                            tk.END,
+                            iid=str(index),
+                            values=(item["name"], item["modified"], item["events"]),
+                        )
+                    if sessions:
+                        tree.selection_set("0")
+                        tree.focus("0")
+
+                self.window.after(0, apply_results)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def confirm() -> None:
             selection = tree.selection()
@@ -453,7 +478,7 @@ class RecorderViewerWindow:
             dialog.destroy()
             self.load_session(session_dir)
 
-        ttk.Button(button_bar, text="刷新", command=populate).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="刷新", command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
         ttk.Button(button_bar, text="打开 recordings 目录", command=lambda: self._open_path(self.recordings_root)).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
         ttk.Button(button_bar, text="加载所选 Session", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
@@ -685,43 +710,66 @@ class RecorderViewerWindow:
         self.event_list_status_var = None
         self.popup_process_filter_combo = None
 
-    def _find_session_candidates(self, base_dir: Path) -> list[dict[str, object]]:
+    def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False) -> list[dict[str, object]]:
         if not base_dir.exists():
             return []
 
         candidates: list[dict[str, object]] = []
-        session_dirs = [item for item in base_dir.rglob("*") if item.is_dir()]
-        session_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        for item in session_dirs:
-            if not item.is_dir():
-                continue
-            session_json = item / "session.json"
-            if not session_json.exists():
-                continue
-            event_count = ""
+        for session_json in self._iter_session_json_paths(base_dir):
+            session_dir = session_json.parent
             try:
-                payload = json.loads(session_json.read_text(encoding="utf-8"))
-                if isinstance(payload, dict):
-                    events = payload.get("events", [])
-                    if isinstance(events, list):
-                        event_count = len(events)
-            except Exception:
-                event_count = "?"
+                session_stat = session_json.stat()
+                dir_stat = session_dir.stat()
+            except OSError:
+                continue
+
+            cache_key = str(session_json.resolve())
+            cache_stamp = (session_stat.st_mtime_ns, session_stat.st_size)
+            cached = None if force_refresh else self._session_candidate_cache.get(cache_key)
+
+            if cached and cached.get("stamp") == cache_stamp:
+                event_count = cached.get("events", "")
+            else:
+                event_count: object = ""
+                try:
+                    payload = json.loads(session_json.read_text(encoding="utf-8"))
+                    if isinstance(payload, dict):
+                        events = payload.get("events", [])
+                        if isinstance(events, list):
+                            event_count = len(events)
+                except Exception:
+                    event_count = "?"
+                self._session_candidate_cache[cache_key] = {
+                    "stamp": cache_stamp,
+                    "events": event_count,
+                }
+
             candidates.append(
                 {
-                    "name": self._format_session_candidate_name(base_dir, item),
-                    "modified": datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "name": self._format_session_candidate_name(base_dir, session_dir),
+                    "modified": datetime.fromtimestamp(dir_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "modified_ts": dir_stat.st_mtime,
                     "events": event_count,
-                    "path": str(item),
+                    "path": str(session_dir),
                 }
             )
+
+        candidates.sort(key=lambda item: float(item.get("modified_ts", 0.0) or 0.0), reverse=True)
+        for item in candidates:
+            item.pop("modified_ts", None)
         return candidates
 
     def _find_latest_session(self, base_dir: Path) -> Path | None:
-        candidates = [item for item in base_dir.rglob("*") if item.is_dir() and (item / "session.json").exists()]
+        candidates = [item.parent for item in self._iter_session_json_paths(base_dir)]
         if not candidates:
             return None
         return max(candidates, key=lambda item: item.stat().st_mtime)
+
+    def _iter_session_json_paths(self, base_dir: Path):
+        for root, _dirs, files in os.walk(base_dir):
+            if "session.json" not in files:
+                continue
+            yield Path(root) / "session.json"
 
     @staticmethod
     def _format_session_candidate_name(base_dir: Path, item: Path) -> str:
@@ -736,8 +784,36 @@ class RecorderViewerWindow:
             messagebox.showerror("加载失败", f"未找到 session.json:\n{session_path}", parent=self.window)
             return
 
+        self._session_load_token += 1
+        token = self._session_load_token
+        self.path_var.set(str(session_dir))
+        self.load_status_var.set(f"正在加载 Session: {session_dir.name}")
+
+        def worker() -> None:
+            try:
+                payload = json.loads(session_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise ValueError("session.json 格式无效")
+            except Exception as exc:
+                self.window.after(0, lambda: self._on_load_session_failed(token, session_path, str(exc)))
+                return
+
+            self.window.after(0, lambda: self._apply_loaded_session(token, session_dir, payload))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_load_session_failed(self, token: int, session_path: Path, message: str) -> None:
+        if token != self._session_load_token:
+            return
+        self.load_status_var.set("")
+        messagebox.showerror("加载失败", f"无法读取 session.json:\n{session_path}\n\n{message}", parent=self.window)
+
+    def _apply_loaded_session(self, token: int, session_dir: Path, payload: dict[str, object]) -> None:
+        if token != self._session_load_token:
+            return
+
         self.session_dir = session_dir
-        self.session_data = json.loads(session_path.read_text(encoding="utf-8"))
+        self.session_data = payload
         self.event_rows = list(self.session_data.get("events", []))
         self.path_var.set(str(session_dir))
         self.cleaning_suggestions = []
@@ -759,9 +835,7 @@ class RecorderViewerWindow:
         self._refresh_coverage_summary()
         self._refresh_filter_options()
         self._load_session_metadata_editor()
-        self.summary_var.set(
-            self._build_session_summary_text()
-        )
+        self.summary_var.set(self._build_session_summary_text())
         self._try_load_historical_suggestions()
         self._reload_tree()
         self._reload_event_list_popup()
