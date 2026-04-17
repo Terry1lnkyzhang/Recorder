@@ -642,11 +642,13 @@ class SettingsDialog:
         self.playground_video_paths: list[Path] = []
         self.connectivity_running = False
         self.query_running = False
+        self._settings_canvas: tk.Canvas | None = None
+        self._settings_canvas_window: int | None = None
 
         self.window = tk.Toplevel(parent)
         self.window.title("Settings")
-        self.window.geometry("1080x860")
-        self.window.minsize(920, 760)
+        self.window.geometry("1020x760")
+        self.window.minsize(860, 620)
 
         self.endpoint_var = tk.StringVar(value=self.settings.endpoint)
         self.api_key_var = tk.StringVar(value=self.settings.api_key)
@@ -675,11 +677,28 @@ class SettingsDialog:
         self.window.after(200, self.check_connection)
 
     def _build_ui(self) -> None:
-        wrapper = ttk.Frame(self.window, padding=16)
-        wrapper.pack(fill=tk.BOTH, expand=True)
+        outer = ttk.Frame(self.window, padding=0)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._settings_canvas = canvas
+
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        wrapper = ttk.Frame(canvas, padding=16)
+        wrapper.columnconfigure(0, weight=1)
+        self._settings_canvas_window = canvas.create_window((0, 0), window=wrapper, anchor=tk.NW)
+
+        wrapper.bind("<Configure>", self._on_settings_wrapper_configure)
+        canvas.bind("<Configure>", self._on_settings_canvas_configure)
+        canvas.bind_all("<MouseWheel>", self._on_settings_mousewheel, add="+")
+        self.window.bind("<Destroy>", self._on_settings_window_destroy, add="+")
 
         notebook = ttk.Notebook(wrapper)
-        notebook.pack(fill=tk.BOTH, expand=True)
+        notebook.grid(row=0, column=0, sticky="nsew")
 
         config_tab = ttk.Frame(notebook, padding=12)
         prompts_tab = ttk.Frame(notebook, padding=12)
@@ -693,9 +712,44 @@ class SettingsDialog:
         self._build_playground_tab(playground_tab)
 
         buttons = ttk.Frame(wrapper)
-        buttons.pack(fill=tk.X, pady=(12, 0))
+        buttons.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         ttk.Button(buttons, text="保存", command=self.save).pack(side=tk.RIGHT)
         ttk.Button(buttons, text="取消", command=self.window.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _on_settings_wrapper_configure(self, _event: tk.Event | None = None) -> None:
+        if self._settings_canvas is None:
+            return
+        self._settings_canvas.configure(scrollregion=self._settings_canvas.bbox("all"))
+
+    def _on_settings_canvas_configure(self, event: tk.Event) -> None:
+        if self._settings_canvas is None or self._settings_canvas_window is None:
+            return
+        self._settings_canvas.itemconfigure(self._settings_canvas_window, width=event.width)
+
+    def _on_settings_mousewheel(self, event: tk.Event) -> None:
+        if self._settings_canvas is None or not self.window.winfo_exists():
+            return
+        if self.window.focus_displayof() is None:
+            return
+        try:
+            widget = self.window.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            widget = None
+        if widget is None:
+            return
+        if not str(widget).startswith(str(self.window)):
+            return
+        delta = int(-event.delta / 120) if event.delta else 0
+        if delta:
+            self._settings_canvas.yview_scroll(delta, "units")
+
+    def _on_settings_window_destroy(self, _event: tk.Event | None = None) -> None:
+        if self._settings_canvas is None:
+            return
+        try:
+            self._settings_canvas.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
 
     def _build_config_tab(self, parent: ttk.Frame) -> None:
         form = ttk.Frame(parent)
@@ -1287,8 +1341,8 @@ class AICheckpointDialog:
         self._refresh_prompt_template_combo()
 
         ttk.Label(preset_frame, text="Query").pack(anchor=tk.W, padx=8)
-        self.query_text = tk.Text(preset_frame, height=5, wrap=tk.WORD, font=("Segoe UI", 11))
-        self.query_text.pack(fill=tk.BOTH, expand=False, padx=8, pady=(4, 8))
+        self.query_text = tk.Text(preset_frame, height=8, wrap=tk.WORD, font=("Segoe UI", 11))
+        self.query_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
 
         query_bar = ttk.Frame(preset_frame)
         query_bar.pack(fill=tk.X, padx=8, pady=(0, 8))

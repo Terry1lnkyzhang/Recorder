@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -21,6 +22,292 @@ from .dialogs import (
 from .recorder import RecorderEngine
 from .settings import SettingsStore
 from src.viewer.window import open_viewer_window
+
+
+class DesignStepsOverlay:
+    def __init__(self, parent: tk.Misc) -> None:
+        self.parent = parent
+        self._expanded_size = (520, 220)
+        self._all_steps_size = (520, 360)
+        self._collapsed_size = (420, 44)
+        self._collapsed = False
+        self._show_all_steps = False
+        self._manual_position: tuple[int, int] | None = None
+        self._drag_offset = (0, 0)
+        self._steps: list[str] = []
+        self._current_step_index = 0
+        self.window = tk.Toplevel(parent)
+        self.window.withdraw()
+        self.window.overrideredirect(True)
+        self.window.attributes("-topmost", True)
+        try:
+            self.window.attributes("-alpha", 0.88)
+        except tk.TclError:
+            pass
+        try:
+            self.window.wm_attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+        self.window.configure(bg="#d7caa3")
+
+        outer = tk.Frame(self.window, bg="#d7caa3", bd=1, relief=tk.SOLID)
+        outer.pack(fill=tk.BOTH, expand=True)
+        self.outer = outer
+
+        header = tk.Frame(outer, bg="#efe4bd", height=36)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        self.header = header
+
+        title = tk.Label(
+            header,
+            text="Design Steps",
+            bg="#efe4bd",
+            fg="#2f2a1f",
+            font=("Segoe UI", 11, "bold"),
+            anchor=tk.W,
+            padx=12,
+        )
+        title.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.title_label = title
+
+        self.toggle_button = tk.Button(
+            header,
+            text="－",
+            command=self.toggle_collapsed,
+            bg="#efe4bd",
+            fg="#2f2a1f",
+            activebackground="#e5d8aa",
+            activeforeground="#2f2a1f",
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=("Segoe UI", 11, "bold"),
+            width=3,
+            cursor="hand2",
+        )
+        self.toggle_button.pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+
+        self.mode_button = tk.Button(
+            header,
+            text="All Steps",
+            command=self.toggle_steps_mode,
+            bg="#efe4bd",
+            fg="#2f2a1f",
+            activebackground="#e5d8aa",
+            activeforeground="#2f2a1f",
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            cursor="hand2",
+        )
+        self.mode_button.pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+
+        for widget in (header, title):
+            widget.bind("<ButtonPress-1>", self._start_drag, add="+")
+            widget.bind("<B1-Motion>", self._drag_window, add="+")
+
+        body = tk.Frame(outer, bg="#fffaf0")
+        body.pack(fill=tk.BOTH, expand=True)
+        self.body = body
+        body.columnconfigure(1, weight=1)
+
+        self.previous_button = tk.Button(
+            body,
+            text="◀",
+            command=self.show_previous_step,
+            bg="#fffaf0",
+            fg="#2f2a1f",
+            activebackground="#f2ead8",
+            activeforeground="#2f2a1f",
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=("Segoe UI", 16, "bold"),
+            width=3,
+            cursor="hand2",
+        )
+        self.previous_button.grid(row=0, column=0, sticky="ns", padx=(8, 0), pady=8)
+
+        content = tk.Frame(body, bg="#fffaf0")
+        content.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
+        self.content_frame = content
+
+        self.step_index_var = tk.StringVar(value="1 / 1")
+        self.step_text_var = tk.StringVar(value="当前 Session 未填写 Design Steps。")
+
+        self.step_index_label = tk.Label(
+            content,
+            textvariable=self.step_index_var,
+            bg="#fffaf0",
+            fg="#7a6c4d",
+            font=("Segoe UI", 9, "bold"),
+            anchor=tk.CENTER,
+        )
+        self.step_index_label.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        self.step_message = tk.Message(
+            content,
+            textvariable=self.step_text_var,
+            bg="#fffaf0",
+            fg="#2f2a1f",
+            font=("Segoe UI", 11),
+            width=360,
+            justify=tk.LEFT,
+            anchor=tk.NW,
+            padx=6,
+            pady=6,
+        )
+        self.step_message.grid(row=1, column=0, sticky="nsew")
+
+        self.next_button = tk.Button(
+            body,
+            text="▶",
+            command=self.show_next_step,
+            bg="#fffaf0",
+            fg="#2f2a1f",
+            activebackground="#f2ead8",
+            activeforeground="#2f2a1f",
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=("Segoe UI", 16, "bold"),
+            width=3,
+            cursor="hand2",
+        )
+        self.next_button.grid(row=0, column=2, sticky="ns", padx=(0, 8), pady=8)
+
+    def show(self, design_steps: str) -> None:
+        self._steps = self._split_design_steps(design_steps)
+        self._current_step_index = 0
+        self._render_current_step()
+        self._position_window()
+        self.window.deiconify()
+        self.window.lift()
+
+    def hide(self) -> None:
+        if self.window.winfo_exists():
+            self.window.withdraw()
+
+    def destroy(self) -> None:
+        if self.window.winfo_exists():
+            self.window.destroy()
+
+    def toggle_collapsed(self) -> None:
+        self._collapsed = not self._collapsed
+        if self._collapsed:
+            self.body.pack_forget()
+            self.toggle_button.configure(text="＋")
+        else:
+            self.body.pack(fill=tk.BOTH, expand=True)
+            self.toggle_button.configure(text="－")
+        self._position_window()
+
+    def toggle_steps_mode(self) -> None:
+        self._show_all_steps = not self._show_all_steps
+        self._render_current_step()
+        self._position_window()
+
+    def _start_drag(self, event: tk.Event) -> None:
+        self._drag_offset = (event.x_root, event.y_root)
+
+    def _drag_window(self, event: tk.Event) -> None:
+        current_x = self.window.winfo_x()
+        current_y = self.window.winfo_y()
+        delta_x = event.x_root - self._drag_offset[0]
+        delta_y = event.y_root - self._drag_offset[1]
+        new_x = max(0, current_x + delta_x)
+        new_y = max(0, current_y + delta_y)
+        self.window.geometry(f"+{new_x}+{new_y}")
+        self._manual_position = (new_x, new_y)
+        self._drag_offset = (event.x_root, event.y_root)
+
+    def show_previous_step(self) -> None:
+        if self._current_step_index <= 0:
+            return
+        self._current_step_index -= 1
+        self._render_current_step()
+
+    def show_next_step(self) -> None:
+        if self._current_step_index >= len(self._steps) - 1:
+            return
+        self._current_step_index += 1
+        self._render_current_step()
+
+    def _render_current_step(self) -> None:
+        if not self._steps:
+            self._steps = ["当前 Session 未填写 Design Steps。"]
+            self._current_step_index = 0
+
+        total = len(self._steps)
+        self._current_step_index = min(max(self._current_step_index, 0), total - 1)
+        if self._show_all_steps:
+            self.step_text_var.set("\n\n".join(self._steps))
+            self.step_index_var.set(f"All Steps · {total} 条")
+            self.previous_button.configure(state=tk.DISABLED)
+            self.next_button.configure(state=tk.DISABLED)
+            self.mode_button.configure(text="Single Step")
+            self.step_message.configure(width=420)
+            return
+
+        current_text = self._steps[self._current_step_index]
+        self.step_text_var.set(current_text)
+        self.step_index_var.set(f"{self._current_step_index + 1} / {total}")
+        self.previous_button.configure(state=tk.NORMAL if self._current_step_index > 0 else tk.DISABLED)
+        self.next_button.configure(state=tk.NORMAL if self._current_step_index < total - 1 else tk.DISABLED)
+        self.mode_button.configure(text="All Steps")
+        self.step_message.configure(width=360)
+
+    def _split_design_steps(self, design_steps: str) -> list[str]:
+        normalized = (design_steps or "").replace("\r\n", "\n").strip()
+        if not normalized:
+            return ["当前 Session 未填写 Design Steps。"]
+
+        numbered_steps = self._split_by_number_prefix(normalized)
+        if numbered_steps:
+            return numbered_steps
+
+        line_steps = [line.strip() for line in re.split(r"\n+", normalized) if line.strip()]
+        if len(line_steps) > 1:
+            return line_steps
+
+        return [normalized]
+
+    @staticmethod
+    def _split_by_number_prefix(text: str) -> list[str]:
+        line_matches = [
+            match.group(1).strip()
+            for match in re.finditer(r"(?ms)(?:^|\n)\s*(\d+\.\s*.*?)(?=(?:\n\s*\d+\.)|\Z)", text)
+        ]
+        if len(line_matches) > 1:
+            return line_matches
+
+        inline_text = re.sub(r"\s+", " ", text).strip()
+        inline_matches = [
+            match.group(1).strip()
+            for match in re.finditer(r"(?s)(\d+\.\s*.*?)(?=(?:\s+\d+\.)|\Z)", inline_text)
+        ]
+        if len(inline_matches) > 1:
+            return inline_matches
+
+        return []
+
+    def _position_window(self) -> None:
+        if self._collapsed:
+            width, height = self._collapsed_size
+        elif self._show_all_steps:
+            width, height = self._all_steps_size
+        else:
+            width, height = self._expanded_size
+        margin_x = 24
+        margin_y = 24
+        if self._manual_position is not None:
+            x, y = self._manual_position
+        else:
+            screen_width = self.window.winfo_screenwidth()
+            x = max(0, screen_width - width - margin_x)
+            y = margin_y
+        self.window.geometry(f"{width}x{height}+{x}+{y}")
 
 
 class RecorderApp:
@@ -52,8 +339,10 @@ class RecorderApp:
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
         self._manual_screenshot_in_progress = False
+        self.design_steps_overlay = DesignStepsOverlay(self.root)
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._handle_root_close)
         self.logger.info("Recorder UI initialized | output_dir=%s", output_dir)
 
     def _build_ui(self) -> None:
@@ -153,6 +442,7 @@ class RecorderApp:
         )
         message = self.engine.start(metadata=metadata_draft.to_dict())
         self.last_session_dir = self.engine.store.session_dir
+        self._show_design_steps_overlay(metadata_draft.design_steps)
         self._set_active_session_text("录制中")
         self._refresh_controls()
         self._set_status(message)
@@ -327,6 +617,7 @@ class RecorderApp:
 
     def _on_stop_success(self, session_dir: Path, suggestions_path: Path) -> None:
         self.stop_in_progress = False
+        self._hide_design_steps_overlay()
         self.session_var.set(f"已停止: {session_dir.name}")
         self.last_session_dir = session_dir
         self._refresh_controls()
@@ -371,6 +662,7 @@ class RecorderApp:
                 design_steps=metadata.design_steps,
                 scope=metadata.scope,
             )
+            self._show_design_steps_overlay(metadata.design_steps)
         self._set_active_session_text("续录中")
         self._refresh_controls()
         self._set_status(message)
@@ -378,10 +670,21 @@ class RecorderApp:
 
     def _on_import_failed(self, message: str) -> None:
         self.import_in_progress = False
+        self._hide_design_steps_overlay()
         self.session_var.set("未开始录制")
         self._refresh_controls()
         self.logger.error("Import-and-continue failed | message=%s", message)
         messagebox.showerror("导入失败", message, parent=self.root)
+
+    def _show_design_steps_overlay(self, design_steps: str) -> None:
+        self.design_steps_overlay.show(design_steps)
+
+    def _hide_design_steps_overlay(self) -> None:
+        self.design_steps_overlay.hide()
+
+    def _handle_root_close(self) -> None:
+        self.design_steps_overlay.destroy()
+        self.root.destroy()
 
     def _set_active_session_text(self, prefix: str) -> None:
         session_dir = self.engine.store.session_dir
