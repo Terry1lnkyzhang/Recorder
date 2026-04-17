@@ -1189,7 +1189,7 @@ class WaitForImageDialog:
         self._parent_was_iconic_on_open = self.parent.wm_state() == "iconic"
 
         self.window = tk.Toplevel(parent)
-        self.window.title("添加等待图片")
+        self.window.title("添加等待事件")
         self.window.geometry("900x720")
         self.window.minsize(760, 620)
         self.window.transient(parent)
@@ -1208,24 +1208,41 @@ class WaitForImageDialog:
         wrapper = ttk.Frame(self.window, padding=16)
         wrapper.pack(fill=tk.BOTH, expand=True)
         wrapper.columnconfigure(0, weight=1)
-        wrapper.rowconfigure(1, weight=3)
-        wrapper.rowconfigure(3, weight=2)
+        wrapper.rowconfigure(2, weight=1)
+
+        header = ttk.Frame(wrapper)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="添加等待事件", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(
+            header,
+            text="框选等待区域后，可填写等待说明和最大等待时间，再保存为新的等待事件。",
+            justify=tk.LEFT,
+            wraplength=820,
+        ).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
 
         top = ttk.Frame(wrapper)
-        top.grid(row=0, column=0, sticky="ew")
+        top.grid(row=1, column=0, sticky="ew", pady=(14, 12))
         top.columnconfigure(1, weight=1)
-        ttk.Button(top, text="选择等待区域", command=self.capture_region).pack(side=tk.LEFT)
+        ttk.Button(top, text="选择等待区域", command=self.capture_region).grid(row=0, column=0, sticky=tk.W)
         self.selection_var = tk.StringVar(value="尚未选择区域")
-        ttk.Label(top, textvariable=self.selection_var, wraplength=560, justify=tk.LEFT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12)
+        ttk.Label(top, textvariable=self.selection_var, wraplength=640, justify=tk.LEFT).grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
-        preview_frame = ttk.LabelFrame(wrapper, text="等待区域截图预览")
-        preview_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 12))
+        content = ttk.Frame(wrapper)
+        content.grid(row=2, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=3)
+        content.columnconfigure(1, weight=2)
+        content.rowconfigure(0, weight=1)
+
+        preview_frame = ttk.LabelFrame(content, text="等待区域截图预览")
+        preview_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         self.preview_view = ZoomableImageView(preview_frame, empty_text="请先选择等待区域")
         self.preview_view.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        form_frame = ttk.LabelFrame(wrapper, text="等待配置")
-        form_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        form_frame = ttk.LabelFrame(content, text="等待配置")
+        form_frame.grid(row=0, column=1, sticky="nsew")
         form_frame.columnconfigure(1, weight=1)
+        form_frame.rowconfigure(1, weight=1)
 
         ttk.Label(form_frame, text="最大等待时间").grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 6))
         timeout_input = ttk.Frame(form_frame)
@@ -1237,17 +1254,18 @@ class WaitForImageDialog:
         self.note_text = tk.Text(form_frame, height=5, wrap=tk.WORD, font=("Segoe UI", 11))
         self.note_text.grid(row=1, column=1, sticky="nsew", padx=(12, 12), pady=(4, 12))
         self.note_text.insert("1.0", "等待此区域中的目标图片出现")
-        form_frame.rowconfigure(1, weight=1)
 
+        info_frame = ttk.Frame(wrapper)
+        info_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         ttk.Label(
-            wrapper,
+            info_frame,
             text="说明: 当前第一版仅记录等待图片步骤，会保存框选范围、截图和最大等待时间，用于后续人工审查或转换。",
-            wraplength=760,
+            wraplength=820,
             justify=tk.LEFT,
-        ).grid(row=3, column=0, sticky="nw")
+        ).pack(anchor=tk.W)
 
         buttons = ttk.Frame(wrapper)
-        buttons.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        buttons.grid(row=4, column=0, sticky="ew", pady=(14, 0))
         ttk.Button(buttons, text="保存", command=self.save).pack(side=tk.RIGHT)
         ttk.Button(buttons, text="取消", command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -1255,7 +1273,7 @@ class WaitForImageDialog:
         self.selection = _select_region_with_window_management(
             self.parent,
             self.window,
-            "选择等待图片区域",
+            "选择等待事件区域",
             dialog_hide_mode="withdraw",
             parent_restore_mode="keep_iconified",
         )

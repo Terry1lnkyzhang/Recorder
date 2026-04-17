@@ -388,7 +388,7 @@ class RecorderApp:
         self.comment_button = ttk.Button(button_frame, text="添加 Comment", command=self.add_comment, state=tk.DISABLED)
         self.comment_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.wait_button = ttk.Button(button_frame, text="添加等待图片", command=self.add_wait_for_image, state=tk.DISABLED)
+        self.wait_button = ttk.Button(button_frame, text="添加等待事件", command=self.add_wait_for_image, state=tk.DISABLED)
         self.wait_button.pack(side=tk.LEFT, padx=(10, 0))
 
         self.screenshot_button = ttk.Button(button_frame, text="记录截图", command=self.capture_manual_screenshot, state=tk.DISABLED)
@@ -413,7 +413,7 @@ class RecorderApp:
         notes_text = (
             "1. 点击开始录制后，会先填写本次录制的 Session 元数据，再开始监听键盘、鼠标点击和滚轮事件。\n"
             "2. Comment 通过鼠标拖拽选择截图区域，再填写大文本说明。\n"
-            "3. 等待图片支持框选等待区域并自动保存截图，当前第一版用于记录等待图片出现的步骤。\n"
+            "3. 等待事件支持框选等待区域并自动保存截图，当前第一版用于记录等待图片出现的步骤。\n"
             "4. 记录截图支持手动选区并保存到当前 Session 的 screenshots，可通过 Ctrl+F4 快捷键快速触发。\n"
             "5. AI Checkpoint 支持两张截图、区域视频录制、Query 调模型并保存返回内容，也支持 Ctrl+F5 快捷键快速打开。\n"
             "6. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
@@ -777,7 +777,19 @@ class RecorderApp:
             return []
 
         candidates: list[dict[str, object]] = []
-        session_dirs = [item for item in base_dir.rglob("*") if item.is_dir()]
+        session_dirs: list[Path] = []
+        try:
+            testcase_dirs = [item for item in base_dir.iterdir() if item.is_dir()]
+        except Exception:
+            testcase_dirs = []
+
+        for testcase_dir in testcase_dirs:
+            try:
+                child_session_dirs = [item for item in testcase_dir.iterdir() if item.is_dir()]
+            except Exception:
+                continue
+            session_dirs.extend(child_session_dirs)
+
         session_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
         for item in session_dirs:
             if not item.is_dir():
