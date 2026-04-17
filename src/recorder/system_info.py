@@ -27,6 +27,9 @@ except ImportError:
 
 _HELP_TEXT_PARENT_FALLBACK_DEPTH = 3
 _HELP_TEXT_FALLBACK_BUDGET_SECONDS = 0.03
+_TEXT_NAME_FALLBACK_DEPTH = 2
+_TEXT_NAME_FALLBACK_BUDGET_SECONDS = 0.03
+_TEXT_NAME_FALLBACK_LIMIT = 8
 
 
 def utc_now_iso() -> str:
@@ -78,12 +81,16 @@ def get_ui_element_at_point(x: int, y: int) -> UIElementInfo:
         element = Desktop(backend="uia").from_point(x, y)
         rect = element.rectangle()
         info = element.element_info
+        current_control_type = str(getattr(info, "control_type", "") or "")
+        current_help_text = _extract_help_text(element, info) if current_control_type.strip().lower() == "image" else ""
         return UIElementInfo(
             name=getattr(info, "name", "") or "",
-            control_type=getattr(info, "control_type", "") or "",
+            control_type=current_control_type,
             automation_id=getattr(info, "automation_id", "") or "",
             class_name=getattr(info, "class_name", "") or "",
-            help_text=_extract_help_text_with_parent_fallback(element, info),
+            help_text=current_help_text,
+            help_text_fallback="" if current_help_text or current_control_type.strip().lower() != "image" else _extract_parent_help_text(element),
+            name_fallbacks=_extract_text_child_names(element, info),
             rectangle={
                 "left": rect.left,
                 "top": rect.top,
@@ -95,12 +102,8 @@ def get_ui_element_at_point(x: int, y: int) -> UIElementInfo:
         return UIElementInfo()
 
 
-def _extract_help_text_with_parent_fallback(element: object, info: object) -> str:
+def _extract_parent_help_text(element: object) -> str:
     deadline = time.perf_counter() + _HELP_TEXT_FALLBACK_BUDGET_SECONDS
-    text = _extract_help_text(element, info)
-    if text:
-        return text
-
     current = element
     for _ in range(_HELP_TEXT_PARENT_FALLBACK_DEPTH):
         if time.perf_counter() >= deadline:
@@ -156,6 +159,60 @@ def _get_parent_element(element: object) -> object | None:
         pass
 
     return None
+
+
+def _extract_text_child_names(element: object, info: object) -> list[str]:
+    control_type = str(getattr(info, "control_type", "") or "").strip().lower()
+    if control_type == "text":
+        return []
+
+    deadline = time.perf_counter() + _TEXT_NAME_FALLBACK_BUDGET_SECONDS
+    matches: list[str] = []
+    seen: set[str] = set()
+    queue: list[tuple[object, int]] = [(element, 0)]
+
+    while queue and time.perf_counter() < deadline and len(matches) < _TEXT_NAME_FALLBACK_LIMIT:
+        current, depth = queue.pop(0)
+        if depth >= _TEXT_NAME_FALLBACK_DEPTH:
+            continue
+        for child in _get_child_elements(current):
+            child_info = getattr(child, "element_info", None)
+            child_control_type = str(getattr(child_info, "control_type", "") or "").strip().lower()
+            child_name = str(getattr(child_info, "name", "") or "").strip()
+            if child_control_type == "text" and child_name and child_name not in seen:
+                matches.append(child_name)
+                seen.add(child_name)
+                if len(matches) >= _TEXT_NAME_FALLBACK_LIMIT:
+                    break
+            queue.append((child, depth + 1))
+
+    return matches
+
+
+def _get_child_elements(element: object) -> list[object]:
+    children_method = getattr(element, "children", None)
+    if callable(children_method):
+        try:
+            children = children_method()
+            if isinstance(children, list):
+                return [child for child in children if child is not None]
+        except Exception:
+            pass
+
+    info = getattr(element, "element_info", None)
+    info_children = getattr(info, "children", None) if info is not None else None
+    if isinstance(info_children, list):
+        wrappers: list[object] = []
+        for child_info in info_children:
+            try:
+                wrapper = getattr(child_info, "wrapper_object", lambda: None)()
+            except Exception:
+                wrapper = None
+            if wrapper is not None:
+                wrappers.append(wrapper)
+        return wrappers
+
+    return []
 
 
 def serialize_window_info(window: WindowInfo) -> dict[str, object]:

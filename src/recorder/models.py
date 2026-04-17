@@ -97,6 +97,8 @@ class UIElementInfo:
     automation_id: str = ""
     class_name: str = ""
     help_text: str = ""
+    help_text_fallback: str = ""
+    name_fallbacks: list[str] = field(default_factory=list)
     rectangle: dict[str, int] = field(default_factory=dict)
 
     @classmethod
@@ -109,6 +111,8 @@ class UIElementInfo:
             automation_id=str(data.get("automation_id", "")),
             class_name=str(data.get("class_name", "")),
             help_text=str(data.get("help_text", "")),
+            help_text_fallback=str(data.get("help_text_fallback", "")),
+            name_fallbacks=[str(item) for item in data.get("name_fallbacks", []) if str(item).strip()] if isinstance(data.get("name_fallbacks", []), list) else [],
             rectangle=rectangle if isinstance(rectangle, dict) else {},
         )
 

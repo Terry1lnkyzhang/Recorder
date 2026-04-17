@@ -582,9 +582,9 @@ class RecorderEngine:
             highlight_rect = ui_element.rectangle if ui_element.rectangle else None
         captured_image = job.get("captured_image")
         if isinstance(captured_image, Image.Image):
-            screenshot = self.store.save_image(captured_image, "step", highlight_rect=highlight_rect)
+            screenshot = self.store.save_image(captured_image, "step", highlight_rect=highlight_rect, focus_point=(x, y))
         else:
-            screenshot = self.store.capture_screenshot("step", highlight_rect=highlight_rect)
+            screenshot = self.store.capture_screenshot("step", highlight_rect=highlight_rect, focus_point=(x, y))
         visual_focus_hint = {
             "red_box_marks_target": bool(highlight_rect),
             "target_control_name": ui_element.name,
@@ -633,9 +633,9 @@ class RecorderEngine:
             highlight_rect = ui_element.rectangle if ui_element.rectangle else None
         captured_image = job.get("captured_image")
         if isinstance(captured_image, Image.Image):
-            screenshot = self.store.save_image(captured_image, "step", highlight_rect=highlight_rect)
+            screenshot = self.store.save_image(captured_image, "step", highlight_rect=highlight_rect, focus_point=(end_x, end_y))
         else:
-            screenshot = self.store.capture_screenshot("step", highlight_rect=highlight_rect)
+            screenshot = self.store.capture_screenshot("step", highlight_rect=highlight_rect, focus_point=(end_x, end_y))
         visual_focus_hint = {
             "red_box_marks_target": bool(highlight_rect),
             "target_control_name": ui_element.name,

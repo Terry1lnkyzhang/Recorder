@@ -650,7 +650,7 @@ def _build_fallback_step_observations(batch_events: list[dict[str, object]], ste
         event_type = str(event.get("event_type", "")).strip()
         action = str(event.get("action", "")).strip()
         ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
-        label = str(ui_element.get("name", ui_element.get("help_text", ""))).strip()
+        label = _pick_ui_element_label(ui_element)
         control_type = str(ui_element.get("control_type", "")).strip()
         observation = _build_observation_text(
             control_type=control_type or event_type,
@@ -693,9 +693,28 @@ def _normalize_optional_bool(value: object) -> bool | None:
 def _infer_is_table_from_batch_event(event: dict[str, object]) -> bool:
     ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
     control_type = str(ui_element.get("control_type", "")).strip().lower()
-    label = str(ui_element.get("name", ui_element.get("help_text", ""))).strip().lower()
+    label = _pick_ui_element_label(ui_element).lower()
     observation_text = " ".join(part for part in [control_type, label, str(event.get("action", ""))] if str(part).strip())
     return any(token in observation_text for token in ["table", "grid", "row", "cell", "list", "表格", "列表"])
+
+
+def _pick_ui_element_label(ui_element: dict[str, object]) -> str:
+    name = str(ui_element.get("name", "")).strip()
+    if name:
+        return name
+
+    name_fallbacks = ui_element.get("name_fallbacks", [])
+    if isinstance(name_fallbacks, list):
+        for item in name_fallbacks:
+            text = str(item).strip()
+            if text:
+                return text
+
+    help_text = str(ui_element.get("help_text", "")).strip()
+    if help_text:
+        return help_text
+
+    return str(ui_element.get("help_text_fallback", "")).strip()
 
 
 def _build_observation_text(

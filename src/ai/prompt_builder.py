@@ -222,12 +222,18 @@ def _build_prompt_ui_element(event: dict[str, object]) -> dict[str, object]:
     name = str(ui_element.get("name", "")).strip()
     control_type = str(ui_element.get("control_type", "")).strip()
     help_text = str(ui_element.get("help_text", "")).strip()
+    help_text_fallback = str(ui_element.get("help_text_fallback", "")).strip()
+    name_fallbacks = [str(item).strip() for item in ui_element.get("name_fallbacks", []) if str(item).strip()] if isinstance(ui_element.get("name_fallbacks", []), list) else []
 
     prompt_ui_element: dict[str, object] = {}
     if name:
         prompt_ui_element["name"] = name
-    elif help_text:
+    elif name_fallbacks:
+        prompt_ui_element["name_fallbacks"] = name_fallbacks
+    if help_text:
         prompt_ui_element["help_text"] = help_text
+    elif help_text_fallback:
+        prompt_ui_element["help_text_fallback"] = help_text_fallback
     if control_type:
         prompt_ui_element["control_type"] = control_type
     return prompt_ui_element
