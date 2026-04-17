@@ -851,6 +851,8 @@ class RecorderViewerWindow:
         is_prs_recording = metadata.get("is_prs_recording", True)
         testcase_id = metadata.get("testcase_id", "")
         version_number = metadata.get("version_number", "")
+        project = metadata.get("project", "")
+        baseline_name = metadata.get("baseline_name", "")
         name = metadata.get("name", "")
         recorder_person = metadata.get("recorder_person", "")
         metadata_bits: list[str] = []
@@ -858,6 +860,10 @@ class RecorderViewerWindow:
             metadata_bits.append(f"TestcaseID={testcase_id}")
         if is_prs_recording and version_number:
             metadata_bits.append(f"Version={version_number}")
+        if project:
+            metadata_bits.append(f"Project={project}")
+        if baseline_name:
+            metadata_bits.append(f"Baseline={baseline_name}")
         if not is_prs_recording and name:
             metadata_bits.append(f"Name={name}")
         if recorder_person:
@@ -874,6 +880,8 @@ class RecorderViewerWindow:
                 "is_prs_recording": True,
                 "testcase_id": "",
                 "version_number": "",
+                "project": "Taichi",
+                "baseline_name": "",
                 "name": "",
                 "recorder_person": "",
                 "design_steps": "",
@@ -897,6 +905,8 @@ class RecorderViewerWindow:
             "is_prs_recording": is_prs_recording,
             "testcase_id": str(metadata.get("testcase_id", "")) if is_prs_recording else "",
             "version_number": str(metadata.get("version_number", "")) if is_prs_recording else "",
+            "project": str(metadata.get("project", "Taichi") or "Taichi"),
+            "baseline_name": str(metadata.get("baseline_name", "")),
             "name": "" if is_prs_recording else str(metadata.get("name", "")),
             "recorder_person": str(metadata.get("recorder_person", "")),
             "design_steps": str(metadata.get("design_steps", "")),
@@ -999,10 +1009,13 @@ class RecorderViewerWindow:
         self._validate_session_metadata_with_ai(metadata_payload)
 
     def _collect_session_metadata_payload(self) -> dict[str, object]:
+        existing_metadata = self._get_session_metadata()
         return {
             "is_prs_recording": self._is_session_prs_recording_selected(),
             "testcase_id": self.session_testcase_id_var.get().strip(),
             "version_number": self.session_version_number_var.get().strip(),
+            "project": str(existing_metadata.get("project", "")).strip(),
+            "baseline_name": str(existing_metadata.get("baseline_name", "")).strip(),
             "name": self.session_name_var.get().strip(),
             "recorder_person": self.session_recorder_person_var.get().strip(),
             "design_steps": self.session_design_steps_text.get("1.0", tk.END).strip(),

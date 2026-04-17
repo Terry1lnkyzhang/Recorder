@@ -42,6 +42,8 @@ class SessionMetadata:
     is_prs_recording: bool = True
     testcase_id: str = ""
     version_number: str = ""
+    project: str = "Taichi"
+    baseline_name: str = ""
     name: str = ""
     recorder_person: str = ""
     design_steps: str = ""
@@ -66,6 +68,8 @@ class SessionMetadata:
             is_prs_recording=is_prs_recording,
             testcase_id=str(data.get("testcase_id", "")),
             version_number=str(data.get("version_number", "")),
+            project=str(data.get("project", "Taichi") or "Taichi"),
+            baseline_name=str(data.get("baseline_name", "")),
             name=name,
             recorder_person=str(data.get("recorder_person", "")),
             design_steps=str(data.get("design_steps", "")),
@@ -80,6 +84,8 @@ class SessionMetadata:
             "is_prs_recording": self.is_prs_recording,
             "testcase_id": self.testcase_id if self.is_prs_recording else "",
             "version_number": self.version_number if self.is_prs_recording else "",
+            "project": self.project,
+            "baseline_name": self.baseline_name,
             "name": "" if self.is_prs_recording else self.name,
             "recorder_person": self.recorder_person,
             "design_steps": self.design_steps,

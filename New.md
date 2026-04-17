@@ -155,3 +155,109 @@ AI checkpoint 增加一个停止功能，当query 有时候会卡主，当前没
 1. 添加等待图片的按钮 文字改为  添加等待事件
 2. 添加等待图片的窗口上方的文字改为  添加等待事件
 3. 现在添加等待图片的窗口整体的布局再优化一下，现在保存与取消的上方有一条断断续续的黑线不知道是什么
+
+开始录制的弹出 录制元数据的窗口增加新逻辑
+1. Project 下拉框
+下拉框内容 Taichi、Kylin、Earth_Kylin、 Earth_Taichi、 Earth
+2.BaselineName 下拉框
+下拉框的数据来源：
+读取数据库baselinetable表
+获取BaseLineName列并去重得到最后的数据
+
+
+现在最后生成的数据
+
+Project
+BaselineName 这两个元素要放在testcaseid上面
+project默认为Taichi
+BaselineName默认为空，并允许为空
+
+
+
+102 x 9
+现在生成路径的规则是：
+
+根目录固定在网络共享目录
+见 runtime_paths.py:8-26
+
+当前根目录是：
+
+Recordings
+第一层目录用 testcase_id
+见 session.py:76-85
+
+第二层目录名规则是：
+t
+e
+s
+t
+c
+a
+s
+e
+_
+i
+d
+_
+v
+e
+r
+s
+i
+o
+n
+_
+n
+u
+m
+b
+e
+r
+_
+r
+e
+c
+o
+r
+d
+e
+r
+_
+p
+e
+r
+s
+o
+n
+_
+Y
+Y
+Y
+Y
+M
+M
+D
+D
+_
+H
+H
+M
+M
+S
+S
+testcase_id_version_number_recorder_person_YYYYMMDD_HHMMSS
+
+代码在这里： session.py:80-85
+
+也就是最终完整路径规则为：
+
+Recordings根目录
+ 
+/
+ 
+testcase_id
+ 
+/
+ 现在改成
+testcase_id_version_number_recorder_person_时间戳
+Recordings根目录/testcase_id/project/testcase_id_version_number_recorder_person_时间戳

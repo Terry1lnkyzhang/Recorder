@@ -87,10 +87,11 @@ class SessionStore:
 
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         testcase_id = self._sanitize_session_name_part(metadata_model.testcase_id, "Testcase ID")
+        project = self._sanitize_session_name_part(metadata_model.project or "Taichi", "Project")
         version_number = self._sanitize_session_name_part(metadata_model.version_number, "Version Number")
         recorder_person = self._sanitize_session_name_part(metadata_model.recorder_person, "录制人员")
         session_id = f"{testcase_id}_{version_number}_{recorder_person}_{timestamp}"
-        self.session_dir = self.base_dir / testcase_id / session_id
+        self.session_dir = self.base_dir / testcase_id / project / session_id
         self.screenshots_dir = self.session_dir / "screenshots"
         self.media_dir = self.session_dir / "media"
         self.events_log_path = self.session_dir / "events.jsonl"

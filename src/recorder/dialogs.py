@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageGrab
 
 from src.common.prompt_templates import PromptTemplateRecord, load_checkpoint_prompt_templates
-from src.database import fetch_latest_testcase_management_record
+from src.database import fetch_distinct_baseline_names, fetch_latest_testcase_management_record
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.errors import AIClientError
 from src.ai.remote_service_client import RemoteAIServiceClient
@@ -69,6 +69,7 @@ AI_CHECKPOINT_EXTRACTION_PROMPT = """你是一名严谨的图像信息提取助�
 
 SESSION_SCOPE_OPTIONS = ["All", "Sub"]
 PRS_RECORDING_OPTIONS = [("是", True), ("否", False)]
+SESSION_PROJECT_OPTIONS = ["Taichi", "Kylin", "Earth_Kylin", "Earth_Taichi", "Earth"]
 MAX_AI_CHECKPOINT_IMAGES = 5
 AI_CHECKPOINT_PREVIEW_HEIGHT = 220
 AI_CHECKPOINT_SCROLLBAR_WIDTH = 18
@@ -199,6 +200,8 @@ class SessionMetadataDraft:
     is_prs_recording: bool = True
     testcase_id: str = ""
     version_number: str = ""
+    project: str = "Taichi"
+    baseline_name: str = ""
     name: str = ""
     recorder_person: str = ""
     design_steps: str = ""
@@ -213,6 +216,8 @@ class SessionMetadataDraft:
             "is_prs_recording": self.is_prs_recording,
             "testcase_id": self.testcase_id.strip() if self.is_prs_recording else "",
             "version_number": self.version_number.strip() if self.is_prs_recording else "",
+            "project": self.project.strip(),
+            "baseline_name": self.baseline_name.strip(),
             "name": "" if self.is_prs_recording else self.name.strip(),
             "recorder_person": self.recorder_person.strip(),
             "design_steps": self.design_steps.strip(),
@@ -230,6 +235,8 @@ class SessionMetadataDraft:
                 return "请输入 Version Number。"
         else:
             return "当前版本仅支持 PRS 用例录制。"
+        if self.project.strip() and self.project.strip() not in SESSION_PROJECT_OPTIONS:
+            return "请选择合法的 Project。"
         if not self.recorder_person.strip():
             return "请输入录制人员。"
         if not self.design_steps.strip():
@@ -248,36 +255,41 @@ class SessionMetadataDialog:
         self.ai_running = False
         self._testcase_lookup_after_id: str | None = None
         self._testcase_lookup_token = 0
+        self._baseline_lookup_token = 0
 
         self.window = tk.Toplevel(parent)
         self.window.title("录制元数据")
-        self.window.geometry("760x760")
-        self.window.minsize(700, 680)
+        self.window.geometry("800x820")
+        self.window.minsize(740, 720)
         self.window.transient(parent)
         self.window.grab_set()
 
         self.is_prs_recording_var = tk.StringVar(value="是" if self.draft.is_prs_recording else "否")
         self.testcase_id_var = tk.StringVar(value=self.draft.testcase_id)
         self.version_number_var = tk.StringVar(value=self.draft.version_number)
+        self.project_var = tk.StringVar(value=self.draft.project or "Taichi")
+        self.baseline_name_var = tk.StringVar(value=self.draft.baseline_name)
         self.name_var = tk.StringVar(value=self.draft.name)
         self.recorder_person_var = tk.StringVar(value=self.draft.recorder_person)
         self.scope_var = tk.StringVar(value=self.draft.scope if self.draft.scope in SESSION_SCOPE_OPTIONS else "All")
         self.testcase_lookup_status_var = tk.StringVar(value="")
         self.testcase_lookup_details_var = tk.StringVar(value="")
+        self.baseline_lookup_status_var = tk.StringVar(value="BaselineName 加载中...")
 
         self._build_ui()
         self.window.protocol("WM_DELETE_WINDOW", self.cancel)
         self.window.lift()
         self.window.focus_force()
+        self.window.after(0, self._load_baseline_names)
 
     def _build_ui(self) -> None:
         wrapper = ttk.Frame(self.window, padding=16)
         wrapper.pack(fill=tk.BOTH, expand=True)
         wrapper.columnconfigure(1, weight=1)
-        wrapper.rowconfigure(5, weight=1)
         wrapper.rowconfigure(7, weight=1)
-        wrapper.rowconfigure(8, weight=1)
         wrapper.rowconfigure(9, weight=1)
+        wrapper.rowconfigure(10, weight=1)
+        wrapper.rowconfigure(11, weight=1)
 
         ttk.Label(
             wrapper,
@@ -297,10 +309,28 @@ class SessionMetadataDialog:
         self.prs_combo.grid(row=1, column=1, sticky=tk.W, pady=6)
         self.prs_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_prs_mode())
 
+        ttk.Label(wrapper, text="Project").grid(row=2, column=0, sticky=tk.W, pady=6)
+        self.project_combo = ttk.Combobox(
+            wrapper,
+            textvariable=self.project_var,
+            state="readonly",
+            values=SESSION_PROJECT_OPTIONS,
+            width=20,
+        )
+        self.project_combo.grid(row=2, column=1, sticky=tk.W, pady=6)
+
+        ttk.Label(wrapper, text="BaselineName").grid(row=3, column=0, sticky=tk.W, pady=6)
+        baseline_frame = ttk.Frame(wrapper)
+        baseline_frame.grid(row=3, column=1, sticky=tk.EW, pady=6)
+        baseline_frame.columnconfigure(0, weight=1)
+        self.baseline_name_combo = ttk.Combobox(baseline_frame, textvariable=self.baseline_name_var, state="readonly")
+        self.baseline_name_combo.grid(row=0, column=0, sticky=tk.EW)
+        ttk.Label(baseline_frame, textvariable=self.baseline_lookup_status_var).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+
         self.primary_id_label = ttk.Label(wrapper, text="Testcase ID")
-        self.primary_id_label.grid(row=2, column=0, sticky=tk.W, pady=6)
+        self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
         testcase_frame = ttk.Frame(wrapper)
-        testcase_frame.grid(row=2, column=1, sticky=tk.EW, pady=6)
+        testcase_frame.grid(row=4, column=1, sticky=tk.EW, pady=6)
         testcase_frame.columnconfigure(0, weight=1)
 
         self.primary_id_entry = ttk.Entry(testcase_frame, textvariable=self.testcase_id_var)
@@ -317,34 +347,34 @@ class SessionMetadataDialog:
         )
 
         self.secondary_id_label = ttk.Label(wrapper, text="Version Number")
-        self.secondary_id_label.grid(row=3, column=0, sticky=tk.W, pady=6)
+        self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, pady=6)
         self.secondary_id_entry = ttk.Entry(wrapper, textvariable=self.version_number_var)
-        self.secondary_id_entry.grid(row=3, column=1, sticky=tk.EW, pady=6)
+        self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=6)
 
         self.name_label = ttk.Label(wrapper, text="Name")
         self.name_entry = ttk.Entry(wrapper, textvariable=self.name_var)
 
-        ttk.Label(wrapper, text="录制人员").grid(row=4, column=0, sticky=tk.W, pady=6)
-        ttk.Entry(wrapper, textvariable=self.recorder_person_var).grid(row=4, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(wrapper, text="录制人员").grid(row=6, column=0, sticky=tk.W, pady=6)
+        ttk.Entry(wrapper, textvariable=self.recorder_person_var).grid(row=6, column=1, sticky=tk.EW, pady=6)
 
-        ttk.Label(wrapper, text="Design Steps").grid(row=5, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text="Design Steps").grid(row=7, column=0, sticky=tk.NW, pady=6)
         self.design_steps_text = tk.Text(wrapper, height=10, wrap=tk.WORD, font=("Consolas", 10))
-        self.design_steps_text.grid(row=5, column=1, sticky="nsew", pady=6)
+        self.design_steps_text.grid(row=7, column=1, sticky="nsew", pady=6)
         self.design_steps_text.insert("1.0", self.draft.design_steps)
 
-        ttk.Label(wrapper, text="前置条件").grid(row=7, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text="前置条件").grid(row=9, column=0, sticky=tk.NW, pady=6)
         self.preconditions_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.preconditions_text.grid(row=7, column=1, sticky="nsew", pady=6)
+        self.preconditions_text.grid(row=9, column=1, sticky="nsew", pady=6)
         self.preconditions_text.insert("1.0", self.draft.preconditions)
 
-        ttk.Label(wrapper, text="配置要求").grid(row=8, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text="配置要求").grid(row=10, column=0, sticky=tk.NW, pady=6)
         self.configuration_requirements_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.configuration_requirements_text.grid(row=8, column=1, sticky="nsew", pady=6)
+        self.configuration_requirements_text.grid(row=10, column=1, sticky="nsew", pady=6)
         self.configuration_requirements_text.insert("1.0", self.draft.configuration_requirements)
 
-        ttk.Label(wrapper, text="额外设备").grid(row=9, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text="额外设备").grid(row=11, column=0, sticky=tk.NW, pady=6)
         self.extra_devices_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.extra_devices_text.grid(row=9, column=1, sticky="nsew", pady=6)
+        self.extra_devices_text.grid(row=11, column=1, sticky="nsew", pady=6)
         self.extra_devices_text.insert("1.0", self.draft.extra_devices)
 
         ttk.Label(
@@ -352,17 +382,17 @@ class SessionMetadataDialog:
             text="以上 3 项请尽量按‘词语/短语’填写，每行一个，例如：第一次启动、倾斜、systemphantom。",
             wraplength=560,
             justify=tk.LEFT,
-        ).grid(row=10, column=1, sticky=tk.W, pady=(2, 0))
+        ).grid(row=12, column=1, sticky=tk.W, pady=(2, 0))
 
-        ttk.Label(wrapper, text="Scope").grid(row=11, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text="Scope").grid(row=13, column=0, sticky=tk.W, pady=6)
         scope_combo = ttk.Combobox(wrapper, textvariable=self.scope_var, state="readonly", values=SESSION_SCOPE_OPTIONS, width=16)
-        scope_combo.grid(row=11, column=1, sticky=tk.W, pady=6)
+        scope_combo.grid(row=13, column=1, sticky=tk.W, pady=6)
 
         self.ai_status_var = tk.StringVar(value="")
-        ttk.Label(wrapper, textvariable=self.ai_status_var).grid(row=12, column=1, sticky=tk.W, pady=(2, 0))
+        ttk.Label(wrapper, textvariable=self.ai_status_var).grid(row=14, column=1, sticky=tk.W, pady=(2, 0))
 
         buttons = ttk.Frame(wrapper)
-        buttons.grid(row=13, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        buttons.grid(row=15, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
         ttk.Button(buttons, text="取消", command=self.cancel).pack(side=tk.RIGHT)
         self.save_button = ttk.Button(buttons, text="开始录制", command=self.save)
         self.save_button.pack(side=tk.RIGHT, padx=(0, 8))
@@ -383,10 +413,10 @@ class SessionMetadataDialog:
             self.name_entry.grid_remove()
             self.primary_id_label.configure(text="Testcase ID")
             self.secondary_id_label.configure(text="Version Number")
-            self.primary_id_label.grid(row=2, column=0, sticky=tk.W, pady=6)
-            self.primary_id_entry.master.grid(row=2, column=1, sticky=tk.EW, pady=6)
-            self.secondary_id_label.grid(row=3, column=0, sticky=tk.W, pady=6)
-            self.secondary_id_entry.grid(row=3, column=1, sticky=tk.EW, pady=6)
+            self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
+            self.primary_id_entry.master.grid(row=4, column=1, sticky=tk.EW, pady=6)
+            self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, pady=6)
+            self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=6)
             self.primary_id_entry.focus_set()
             self._schedule_testcase_lookup(immediate=True)
             return
@@ -399,9 +429,47 @@ class SessionMetadataDialog:
         self.secondary_id_entry.grid_remove()
         self.testcase_lookup_status_var.set("")
         self.testcase_lookup_details_var.set("")
-        self.name_label.grid(row=2, column=0, sticky=tk.W, pady=6)
-        self.name_entry.grid(row=2, column=1, sticky=tk.EW, pady=6)
+        self.name_label.grid(row=4, column=0, sticky=tk.W, pady=6)
+        self.name_entry.grid(row=4, column=1, sticky=tk.EW, pady=6)
         self.name_entry.focus_set()
+
+    def _load_baseline_names(self) -> None:
+        self._baseline_lookup_token += 1
+        token = self._baseline_lookup_token
+        connection_string = self.settings_store.load().prompt_db_connection_string.strip()
+        if not connection_string:
+            self.baseline_lookup_status_var.set("未配置数据库连接")
+            self.baseline_name_combo.configure(values=[])
+            return
+
+        def worker() -> None:
+            try:
+                baseline_names = fetch_distinct_baseline_names(connection_string)
+            except Exception as exc:
+                self.window.after(0, lambda: self._finish_baseline_lookup_error(token, str(exc)))
+                return
+            self.window.after(0, lambda: self._finish_baseline_lookup_success(token, baseline_names))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_baseline_lookup_success(self, token: int, baseline_names: list[str]) -> None:
+        if token != self._baseline_lookup_token:
+            return
+        combo_values = [""] + baseline_names
+        self.baseline_name_combo.configure(values=combo_values)
+        if baseline_names:
+            self.baseline_lookup_status_var.set(f"已加载 {len(baseline_names)} 个 BaselineName")
+            current_value = self.baseline_name_var.get().strip()
+            if current_value and current_value not in baseline_names:
+                self.baseline_name_combo.configure(values=["", *baseline_names, current_value])
+        else:
+            self.baseline_lookup_status_var.set("未查询到可用的 BaselineName")
+
+    def _finish_baseline_lookup_error(self, token: int, message: str) -> None:
+        if token != self._baseline_lookup_token:
+            return
+        self.baseline_name_combo.configure(values=[])
+        self.baseline_lookup_status_var.set(f"BaselineName 加载失败: {message}")
 
     def _on_testcase_id_changed(self, _event: tk.Event | None = None) -> None:
         self._schedule_testcase_lookup(immediate=False)
@@ -480,6 +548,8 @@ class SessionMetadataDialog:
             is_prs_recording=self._is_prs_recording_selected(),
             testcase_id=self.testcase_id_var.get().strip(),
             version_number=self.version_number_var.get().strip(),
+            project=self.project_var.get().strip(),
+            baseline_name=self.baseline_name_var.get().strip(),
             name=self.name_var.get().strip(),
             recorder_person=self.recorder_person_var.get().strip(),
             design_steps=self.design_steps_text.get("1.0", tk.END).strip(),
@@ -511,6 +581,8 @@ class SessionMetadataDialog:
             is_prs_recording=self._is_prs_recording_selected(),
             testcase_id=self.testcase_id_var.get().strip(),
             version_number=self.version_number_var.get().strip(),
+            project=self.project_var.get().strip(),
+            baseline_name=self.baseline_name_var.get().strip(),
             name=self.name_var.get().strip(),
             recorder_person=self.recorder_person_var.get().strip(),
             design_steps=self.design_steps_text.get("1.0", tk.END).strip(),
@@ -557,6 +629,8 @@ class SessionMetadataDialog:
                 is_prs_recording=draft.is_prs_recording,
                 testcase_id=draft.testcase_id,
                 version_number=draft.version_number,
+                project=draft.project,
+                baseline_name=draft.baseline_name,
                 name=draft.name,
                 recorder_person=draft.recorder_person,
                 design_steps=draft.design_steps,

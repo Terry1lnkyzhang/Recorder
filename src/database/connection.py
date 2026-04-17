@@ -118,3 +118,35 @@ def fetch_latest_testcase_management_record(
         script_version=str(row.get("script_version") or "").strip(),
         update_time=str(row.get("update_time") or "").strip(),
     )
+
+
+def fetch_distinct_baseline_names(
+    connection_string: str,
+    *,
+    table_name: str = "baselinetable",
+    baseline_name_column: str = "BaseLineName",
+) -> list[str]:
+    resolved_table_name = validate_sql_identifier(table_name, "table_name")
+    resolved_baseline_name_column = validate_sql_identifier(baseline_name_column, "baseline_name_column")
+
+    query = f"""
+        SELECT DISTINCT `{resolved_baseline_name_column}` AS baseline_name
+        FROM `{resolved_table_name}`
+        WHERE `{resolved_baseline_name_column}` IS NOT NULL
+          AND TRIM(`{resolved_baseline_name_column}`) <> ''
+        ORDER BY `{resolved_baseline_name_column}` ASC
+    """
+
+    with closing(connect_mysql(connection_string)) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall() or []
+
+    results: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get("baseline_name") or "").strip()
+        if value:
+            results.append(value)
+    return results

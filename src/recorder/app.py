@@ -367,46 +367,52 @@ class RecorderApp:
         ttk.Label(info_frame, text="输出目录:").grid(row=1, column=0, sticky=tk.W, padx=12, pady=8)
         ttk.Label(info_frame, textvariable=self.output_var, wraplength=420).grid(row=1, column=1, sticky=tk.W, padx=8, pady=8)
 
-        button_frame = ttk.Frame(wrapper)
+        button_frame = ttk.LabelFrame(wrapper, text="操作")
         button_frame.pack(fill=tk.X, pady=20)
 
-        self.start_button = ttk.Button(button_frame, text="开始录制", command=self.start_recording)
+        primary_actions = ttk.Frame(button_frame, padding=(12, 10, 12, 6))
+        primary_actions.pack(fill=tk.X)
+
+        secondary_actions = ttk.Frame(button_frame, padding=(12, 0, 12, 10))
+        secondary_actions.pack(fill=tk.X)
+
+        self.start_button = ttk.Button(primary_actions, text="开始录制", command=self.start_recording)
         self.start_button.pack(side=tk.LEFT)
 
-        self.import_button = ttk.Button(button_frame, text="导入并续录", command=self.import_and_continue_recording)
+        self.import_button = ttk.Button(primary_actions, text="导入并续录", command=self.import_and_continue_recording)
         self.import_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.stop_button = ttk.Button(button_frame, text="停止录制", command=self.stop_recording, state=tk.DISABLED)
-        self.stop_button.pack(side=tk.LEFT, padx=10)
+        self.stop_button = ttk.Button(primary_actions, text="停止录制", command=self.stop_recording, state=tk.DISABLED)
+        self.stop_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.save_button = ttk.Button(button_frame, text="保存", command=self.save_recording, state=tk.DISABLED)
-        self.save_button.pack(side=tk.LEFT)
+        self.save_button = ttk.Button(primary_actions, text="保存", command=self.save_recording, state=tk.DISABLED)
+        self.save_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.pause_resume_button = ttk.Button(button_frame, text="暂停录制", command=self.toggle_pause_resume, state=tk.DISABLED)
+        self.pause_resume_button = ttk.Button(primary_actions, text="暂停录制", command=self.toggle_pause_resume, state=tk.DISABLED)
         self.pause_resume_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.comment_button = ttk.Button(button_frame, text="添加 Comment", command=self.add_comment, state=tk.DISABLED)
-        self.comment_button.pack(side=tk.LEFT, padx=(10, 0))
+        self.comment_button = ttk.Button(secondary_actions, text="添加 Comment", command=self.add_comment, state=tk.DISABLED)
+        self.comment_button.pack(side=tk.LEFT)
 
-        self.wait_button = ttk.Button(button_frame, text="添加等待事件", command=self.add_wait_for_image, state=tk.DISABLED)
+        self.wait_button = ttk.Button(secondary_actions, text="添加等待事件", command=self.add_wait_for_image, state=tk.DISABLED)
         self.wait_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.screenshot_button = ttk.Button(button_frame, text="记录截图", command=self.capture_manual_screenshot, state=tk.DISABLED)
+        self.screenshot_button = ttk.Button(secondary_actions, text="记录截图", command=self.capture_manual_screenshot, state=tk.DISABLED)
         self.screenshot_button.pack(side=tk.LEFT, padx=(10, 0))
 
         self.checkpoint_button = ttk.Button(
-            button_frame,
+            secondary_actions,
             text="添加 AI Checkpoint",
             command=self.add_checkpoint,
             state=tk.DISABLED,
         )
-        self.checkpoint_button.pack(side=tk.LEFT, padx=10)
+        self.checkpoint_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.viewer_button = ttk.Button(button_frame, text="查看录制内容", command=self.open_viewer)
-        self.viewer_button.pack(side=tk.LEFT)
+        self.viewer_button = ttk.Button(secondary_actions, text="查看录制内容", command=self.open_viewer)
+        self.viewer_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.settings_button = ttk.Button(button_frame, text="Settings", command=self.open_settings)
-        self.settings_button.pack(side=tk.LEFT, padx=10)
+        self.settings_button = ttk.Button(secondary_actions, text="Settings", command=self.open_settings)
+        self.settings_button.pack(side=tk.LEFT, padx=(10, 0))
 
         notes_frame = ttk.LabelFrame(wrapper, text="说明")
         notes_frame.pack(fill=tk.BOTH, expand=True)
@@ -674,6 +680,8 @@ class RecorderApp:
                 is_prs_recording=metadata.is_prs_recording,
                 testcase_id=metadata.testcase_id,
                 version_number=metadata.version_number,
+                project=metadata.project,
+                baseline_name=metadata.baseline_name,
                 name=metadata.name,
                 recorder_person=metadata.recorder_person,
                 design_steps=metadata.design_steps,
@@ -785,10 +793,22 @@ class RecorderApp:
 
         for testcase_dir in testcase_dirs:
             try:
-                child_session_dirs = [item for item in testcase_dir.iterdir() if item.is_dir()]
+                child_dirs = [item for item in testcase_dir.iterdir() if item.is_dir()]
             except Exception:
                 continue
-            session_dirs.extend(child_session_dirs)
+
+            for child_dir in child_dirs:
+                session_json = child_dir / "session.json"
+                events_log = child_dir / "events.jsonl"
+                if session_json.exists() or events_log.exists():
+                    session_dirs.append(child_dir)
+                    continue
+
+                try:
+                    project_session_dirs = [item for item in child_dir.iterdir() if item.is_dir()]
+                except Exception:
+                    continue
+                session_dirs.extend(project_session_dirs)
 
         session_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
         for item in session_dirs:
