@@ -219,6 +219,35 @@ class RecorderEngine:
         self.logger.info("Comment with media added | event_id=%s | region=%s", event.event_id, region)
         self.status_callback("Comment added.")
 
+    def add_wait_for_image_with_media(
+        self,
+        note: str,
+        image: Image.Image,
+        region: dict[str, int],
+        timeout_seconds: int = 120,
+    ) -> None:
+        if not self.is_recording:
+            raise RuntimeError("Recorder is not running.")
+
+        screenshot = self.store.save_image(image, "wait")
+        event = RecordedEvent(
+            event_id=self.store.next_event_id("wait"),
+            timestamp=utc_now_iso(),
+            event_type="wait",
+            action="wait_for_image",
+            screenshot=screenshot,
+            note=note,
+            window=get_active_window_info(),
+            media=[{"type": "image", "path": screenshot, "region": region}],
+            additional_details={
+                "source": "user",
+                "wait_timeout_seconds": timeout_seconds,
+            },
+        )
+        self.store.append_event(event)
+        self.logger.info("Wait-for-image added | event_id=%s | region=%s | timeout=%s", event.event_id, region, timeout_seconds)
+        self.status_callback("Wait step added.")
+
     def add_checkpoint(self, title: str, expectation: str) -> None:
         if not self.is_recording:
             raise RuntimeError("Recorder is not running.")

@@ -79,3 +79,74 @@ AI checkpoint 增加一个停止功能，当query 有时候会卡主，当前没
 4.悬浮穿左右两侧分别加一个 向左 向右的符号，点击后可以切换拆分后的DesignSteps
  
  当前主页面上的settings功能按钮 要换成一个设置图片放在右上角，而且 setting页面太长了  看不到保存按钮，应该增加scroll
+
+ {
+  "event_type": "wait",
+  "action": "wait_for_image",
+  "screenshot": "screenshots/wait_0001.png",
+  "mouse": {},
+  "keyboard": {},
+  "media": [
+    {
+      "type": "image",
+      "path": "screenshots/wait_0001.png",
+      "region": {
+        "left": 100,
+        "top": 200,
+        "width": 320,
+        "height": 80
+      }
+    }
+  ],
+  "additional_details": {
+      "wait_timeout_seconds": 30
+    }
+  }
+}
+
+{
+  "event_id": "wait_0371",
+  "timestamp": "2026-04-17T10:22:22.748781+08:00",
+  "event_type": "wait",
+  "action": "wait_for_image",
+  "screenshot": "screenshots/wait_0056.png",
+  "mouse": {},
+  "keyboard": {},
+  "scroll": {},
+  "window": {
+    "title": "添加等待图片",
+    "class_name": "TkTopLevel",
+    "handle": "0x500a40",
+    "process_id": 38448,
+    "process_name": "python.exe"
+  },
+  "ui_element": {
+    "name": "",
+    "control_type": "",
+    "automation_id": "",
+    "class_name": "",
+    "help_text": "",
+    "rectangle": {}
+  },
+  "note": "等待此区域中的目标图片出现",
+  "checkpoint": {},
+  "media": [
+    {
+      "type": "image",
+      "path": "screenshots/wait_0056.png",
+      "region": {
+        "left": 219,
+        "top": 188,
+        "right": 577,
+        "bottom": 551,
+        "width": 358,
+        "height": 363
+      }
+    }
+  ],
+  "ai_result": {},
+  "additional_details": {
+    "source": "user",
+    "wait_timeout_seconds": 120
+  }
+}

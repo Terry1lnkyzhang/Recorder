@@ -3427,7 +3427,7 @@ class RecorderViewerWindow:
         self.ai_var.set(self.analysis_status_base)
 
     def _extract_comment(self, event: dict[str, object]) -> str:
-        if event.get("event_type") == "comment":
+        if event.get("event_type") in {"comment", "wait"}:
             return str(event.get("note", ""))
         details = event.get("additional_details", {})
         if isinstance(details, dict):
