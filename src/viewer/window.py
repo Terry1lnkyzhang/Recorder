@@ -25,7 +25,7 @@ from src.common.media_utils import load_video_preview_frame
 from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
 from src.converter.compiler import export_suggestions_to_atframework_yaml
 from src.recorder.dialogs import AICheckpointDraft, open_ai_checkpoint_dialog, open_ai_checkpoint_editor_dialog, open_comment_dialog
-from src.recorder.models import format_recorded_action
+from src.recorder.models import format_recorded_action, normalize_event_type
 from src.recorder.recorder import RecorderEngine
 from src.recorder.settings import SettingsStore
 from src.recorder.system_info import safe_relpath
@@ -206,11 +206,12 @@ class RecorderViewerWindow:
 
         self.tree = ttk.Treeview(
             left,
-            columns=("idx", "action", "time", "process_name", "comment", "method_suggestion", "module_suggestion", "parameter_suggestion", "ai_note"),
+            columns=("idx", "event_type", "action", "time", "process_name", "comment", "method_suggestion", "module_suggestion", "parameter_suggestion", "ai_note"),
             show="headings",
             selectmode="extended",
         )
         self.tree.heading("idx", text="#")
+        self.tree.heading("event_type", text=self._build_filter_heading_text("type"))
         self.tree.heading("action", text=self._build_filter_heading_text("action"))
         self.tree.heading("time", text="时间")
         self.tree.heading("process_name", text=self._build_filter_heading_text("process"))
@@ -220,6 +221,7 @@ class RecorderViewerWindow:
         self.tree.heading("parameter_suggestion", text="参数建议")
         self.tree.heading("ai_note", text="AI看图")
         self.tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
+        self.tree.column("event_type", width=110, minwidth=92, anchor=tk.W, stretch=False)
         self.tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
         self.tree.column("time", width=132, minwidth=118, anchor=tk.W, stretch=False)
         self.tree.column("process_name", width=150, minwidth=120, anchor=tk.W, stretch=False)
@@ -585,7 +587,7 @@ class RecorderViewerWindow:
 
         tree = ttk.Treeview(
             wrapper,
-            columns=("idx", "action", "time", "process_name", "comment", "method_suggestion", "module_suggestion", "parameter_suggestion", "ai_note"),
+            columns=("idx", "event_type", "action", "time", "process_name", "comment", "method_suggestion", "module_suggestion", "parameter_suggestion", "ai_note"),
             show="headings",
             selectmode="extended",
         )
@@ -613,15 +615,17 @@ class RecorderViewerWindow:
 
     def _configure_event_tree_columns(self, tree: ttk.Treeview) -> None:
         tree.heading("idx", text="#")
+        tree.heading("event_type", text=self._build_filter_heading_text("type"))
         tree.heading("action", text=self._build_filter_heading_text("action"))
         tree.heading("time", text="时间")
-        tree.heading("process_name", text="进程")
+        tree.heading("process_name", text=self._build_filter_heading_text("process"))
         tree.heading("comment", text="Comment")
         tree.heading("method_suggestion", text="方法建议")
         tree.heading("module_suggestion", text="模块建议")
         tree.heading("parameter_suggestion", text="参数建议")
         tree.heading("ai_note", text="AI看图")
         tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
+        tree.column("event_type", width=110, minwidth=92, anchor=tk.W, stretch=False)
         tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
         tree.column("time", width=132, minwidth=118, anchor=tk.W, stretch=False)
         tree.column("process_name", width=150, minwidth=120, anchor=tk.W, stretch=False)
@@ -1148,9 +1152,11 @@ class RecorderViewerWindow:
 
     def _update_filter_headings(self) -> None:
         if hasattr(self, "tree") and self.tree.winfo_exists():
+            self.tree.heading("event_type", text=self._build_filter_heading_text("type"))
             self.tree.heading("process_name", text=self._build_filter_heading_text("process"))
             self.tree.heading("action", text=self._build_filter_heading_text("action"))
         if self.event_list_tree and self.event_list_tree.winfo_exists():
+            self.event_list_tree.heading("event_type", text=self._build_filter_heading_text("type"))
             self.event_list_tree.heading("process_name", text=self._build_filter_heading_text("process"))
             self.event_list_tree.heading("action", text=self._build_filter_heading_text("action"))
 
@@ -1162,7 +1168,7 @@ class RecorderViewerWindow:
         if region != "heading":
             return None
         column_id = tree.identify_column(event.x)
-        column_map = {"#2": "action", "#4": "process"}
+        column_map = {"#2": "type", "#3": "action", "#5": "process"}
         column_name = column_map.get(column_id)
         if not column_name:
             return None
@@ -1245,12 +1251,9 @@ class RecorderViewerWindow:
         return "break"
 
     def _extract_event_type(self, event: dict[str, object]) -> str:
-        return str(event.get("event_type", "")).strip()
+        return normalize_event_type(event.get("event_type", ""), event.get("action", ""))
 
     def _extract_event_action(self, event: dict[str, object]) -> str:
-        combined_action = self._extract_combined_action(event)
-        if combined_action:
-            return combined_action
         return format_recorded_action(event.get("action", "")).strip()
 
     def _extract_combined_action(self, event: dict[str, object]) -> str:
@@ -1266,22 +1269,23 @@ class RecorderViewerWindow:
 
         event_type = self._extract_event_type(event)
         action = format_recorded_action(event.get("action", "")).strip()
+        action_value = action.lower()
         readable_modifiers = [self._clean_key_name(str(item)) for item in modifiers if str(item).strip()]
         readable_modifiers = [item for item in readable_modifiers if item]
         if not readable_modifiers:
             return ""
 
-        if event_type == "mouse_click":
+        if event_type == "controlOperation":
             mouse = event.get("mouse", {}) if isinstance(event.get("mouse", {}), dict) else {}
             button = str(mouse.get("button", action)).strip() or action
             return f"{' + '.join(readable_modifiers)} + {button}"
-        if event_type == "mouse_drag":
+        if event_type == "mouseAction" and action_value != "mouse_scroll":
             mouse = event.get("mouse", {}) if isinstance(event.get("mouse", {}), dict) else {}
             button = str(mouse.get("button", action)).strip() or action
             return f"{' + '.join(readable_modifiers)} + {button}"
-        if event_type == "scroll":
+        if event_type == "mouseAction" and action_value == "mouse_scroll":
             return f"{' + '.join(readable_modifiers)} + mouse_scroll"
-        if event_type == "key_press":
+        if event_type == "input" and action_value == "press":
             keyboard = event.get("keyboard", {}) if isinstance(event.get("keyboard", {}), dict) else {}
             key_name = self._clean_key_name(str(keyboard.get("key_name", "")))
             char = keyboard.get("char")
@@ -1431,7 +1435,7 @@ class RecorderViewerWindow:
 
         self._select_row_index(int(row_id), source_tree=tree)
 
-        if column_id == "#8":
+        if column_id == "#9":
             suggestion = self._find_suggestion_by_row_index(int(row_id))
             if suggestion is None:
                 return
@@ -1442,22 +1446,22 @@ class RecorderViewerWindow:
             self._show_text_dialog(f"步骤 {int(row_id) + 1} 参数建议", self._format_parameter_detail_text(suggestion))
             return
 
-        if column_id == "#9":
+        if column_id == "#10":
             full_text = self._describe_event_for_view(int(row_id), self.event_rows[int(row_id)])
             if full_text:
                 self._show_text_dialog(f"步骤 {int(row_id) + 1} AI看图", full_text)
             return
 
-        if column_id in {"#6", "#7"}:
+        if column_id in {"#7", "#8"}:
             values = tree.item(row_id, "values")
             column_index = int(column_id.replace("#", "")) - 1
             full_text = str(values[column_index]) if column_index < len(values) else ""
             if full_text:
-                title = "方法建议" if column_id == "#6" else "模块建议"
+                title = "方法建议" if column_id == "#7" else "模块建议"
                 self._show_text_dialog(f"步骤 {int(row_id) + 1} {title}", full_text)
             return
 
-        if column_id != "#5":
+        if column_id != "#6":
             return
 
         index = int(row_id)
@@ -1480,6 +1484,7 @@ class RecorderViewerWindow:
         ai_note = self._describe_event_for_view(row_index, event)
         return (
             row_index + 1,
+            self._extract_event_type(event),
             self._extract_event_action(event),
             self._format_timestamp(event.get("timestamp", "")),
             self._extract_process_name(event),
@@ -2473,7 +2478,10 @@ class RecorderViewerWindow:
         engine: RecorderEngine,
     ) -> dict[str, object]:
         cloned_event = copy.deepcopy(event)
-        prefix = self._derive_event_id_prefix(str(event.get("event_id", "")), str(event.get("event_type", "")))
+        prefix = self._derive_event_id_prefix(
+            str(event.get("event_id", "")),
+            self._extract_event_type(event),
+        )
         cloned_event["event_id"] = engine.store.next_event_id(prefix)
         screenshot = cloned_event.get("screenshot")
         if screenshot:
@@ -2595,7 +2603,7 @@ class RecorderViewerWindow:
             return left_event_id == right_event_id
         return (
             str(left.get("timestamp", "")) == str(right.get("timestamp", ""))
-            and str(left.get("event_type", "")) == str(right.get("event_type", ""))
+            and self._extract_event_type(left) == self._extract_event_type(right)
             and format_recorded_action(left.get("action", "")) == format_recorded_action(right.get("action", ""))
             and str(left.get("note", "")) == str(right.get("note", ""))
         )
@@ -3427,7 +3435,8 @@ class RecorderViewerWindow:
         self.ai_var.set(self.analysis_status_base)
 
     def _extract_comment(self, event: dict[str, object]) -> str:
-        if event.get("event_type") in {"comment", "wait"}:
+        event_type = self._extract_event_type(event)
+        if event_type in {"comment", "wait"}:
             return str(event.get("note", ""))
         details = event.get("additional_details", {})
         if isinstance(details, dict):
@@ -3436,7 +3445,7 @@ class RecorderViewerWindow:
 
     def _update_event_comment(self, index: int, comment: str) -> None:
         event = self.event_rows[index]
-        if event.get("event_type") == "comment":
+        if self._extract_event_type(event) == "comment":
             event["note"] = comment
             return
         details = dict(event.get("additional_details", {}))
@@ -4085,7 +4094,7 @@ class RecorderViewerWindow:
         messagebox.showerror("覆盖判断失败", message, parent=self.window)
 
     def _build_event_cn_summary(self, event: dict[str, object]) -> str:
-        event_type = str(event.get("event_type", ""))
+        event_type = self._extract_event_type(event)
         ui_element = event.get("ui_element", {})
         window = event.get("window", {})
         mouse = event.get("mouse", {})
@@ -4093,8 +4102,9 @@ class RecorderViewerWindow:
         scroll = event.get("scroll", {})
         note = self._clean_sentence(str(event.get("note", "")))
         modifier_prefix = self._format_modifier_prefix(event)
+        action_value = format_recorded_action(event.get("action", "")).strip().lower()
 
-        if event_type == "mouse_click":
+        if event_type == "controlOperation":
             target = self._format_click_target_name(ui_element, window)
             if target:
                 return f"{modifier_prefix}单击{target}"
@@ -4103,7 +4113,7 @@ class RecorderViewerWindow:
             if isinstance(x, int) and isinstance(y, int):
                 return f"{modifier_prefix}单击坐标 ({x}, {y})"
             return f"{modifier_prefix}执行鼠标单击"
-        if event_type == "mouse_drag":
+        if event_type == "mouseAction" and action_value != "mouse_scroll":
             target = self._format_target_name(ui_element, window)
             start_x = mouse.get("start_x") if isinstance(mouse, dict) else None
             start_y = mouse.get("start_y") if isinstance(mouse, dict) else None
@@ -4114,7 +4124,7 @@ class RecorderViewerWindow:
             if all(isinstance(value, int) for value in (start_x, start_y, end_x, end_y)):
                 return f"{modifier_prefix}从 ({start_x}, {start_y}) 拖拽到 ({end_x}, {end_y})"
             return f"{modifier_prefix}执行鼠标拖拽"
-        if event_type == "scroll":
+        if event_type == "mouseAction" and action_value == "mouse_scroll":
             target = self._format_target_name(ui_element, window)
             dy = scroll.get("dy") if isinstance(scroll, dict) else None
             direction = "向下滚动" if isinstance(dy, int) and dy < 0 else "向上滚动"
@@ -4124,7 +4134,7 @@ class RecorderViewerWindow:
             if target:
                 return f"{modifier_prefix}在{target}区域{direction}"
             return f"{modifier_prefix}{direction}"
-        if event_type == "key_press":
+        if event_type == "input" and action_value == "press":
             if isinstance(keyboard, dict):
                 char = keyboard.get("char")
                 key_name = self._clean_key_name(str(keyboard.get("key_name", "")))
@@ -4133,7 +4143,7 @@ class RecorderViewerWindow:
                 if key_name:
                     return f"按下“{key_name}”键"
             return "按下按键"
-        if event_type == "type_input":
+        if event_type == "input" and action_value == "type_input":
             if isinstance(keyboard, dict):
                 text = keyboard.get("text", "")
                 if isinstance(text, str) and text != "":

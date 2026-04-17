@@ -132,11 +132,11 @@ def _score_method_heuristics(step: SemanticStep, entry: MethodRegistryEntry) -> 
         score += 2.0
     if any(keyword in description for keyword in ("单击", "点击", "选择")) and "click" in method_name:
         score += 1.3
-    if event_type == "mouse_click" and "click" in method_name:
+    if event_type == "controloperation" and "click" in method_name:
         score += 0.9
-    if event_type == "key_press" and any(token in method_name for token in ("sendkeys", "edit")):
+    if event_type == "input" and any(token in method_name for token in ("sendkeys", "edit")):
         score += 1.1
-    if event_type == "key_press" and all(token not in method_name for token in ("sendkeys", "edit", "null", "wait")):
+    if event_type == "input" and all(token not in method_name for token in ("sendkeys", "edit", "null", "wait")):
         score -= 0.8
     if control_type == "button" and "click" in method_name:
         score += 0.9
@@ -159,9 +159,9 @@ def _build_method_reason(step: SemanticStep, entry: MethodRegistryEntry) -> str:
     matched = _collect_matched_tokens(_build_method_step_text(step), [entry.name, entry.exposed_keyword, *entry.aliases])
     hints: list[str] = []
     method_name = entry.name.lower()
-    if step.event_type.lower() == "mouse_click" and "click" in method_name:
+    if step.event_type.lower() == "controloperation" and "click" in method_name:
         hints.append("事件类型与 Click 类方法匹配")
-    if step.event_type.lower() == "key_press" and any(token in method_name for token in ("sendkeys", "edit")):
+    if step.event_type.lower() == "input" and any(token in method_name for token in ("sendkeys", "edit")):
         hints.append("键盘事件与输入类方法匹配")
     if step.control_type.lower() == "edit" and any(token in method_name for token in ("edit", "sendkeys")):
         hints.append("控件类型为 Edit")

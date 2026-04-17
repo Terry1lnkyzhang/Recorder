@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from src.recorder.models import format_recorded_action, normalize_event_type
 from src.recorder.settings import AISettings
 
 from .client import OpenAICompatibleAIClient
@@ -647,7 +648,7 @@ def _normalize_notes(parsed: dict[str, object]) -> list[str]:
 def _build_fallback_step_observations(batch_events: list[dict[str, object]], step_ids: list[int]) -> list[dict[str, object]]:
     fallback: list[dict[str, object]] = []
     for step_id, event in zip(step_ids, batch_events):
-        event_type = str(event.get("event_type", "")).strip()
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip()
         action = str(event.get("action", "")).strip()
         ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
         label = _pick_ui_element_label(ui_element)
@@ -656,7 +657,7 @@ def _build_fallback_step_observations(batch_events: list[dict[str, object]], ste
             control_type=control_type or event_type,
             label=label,
             relative_position="self" if label else "",
-            need_scroll=True if event_type == "scroll" or action == "scroll" else False,
+            need_scroll=True if event_type == "mouseAction" and format_recorded_action(action).strip().lower() == "mouse_scroll" else False,
             is_table=_infer_is_table_from_batch_event(event),
         )
         fallback.append(
@@ -666,7 +667,7 @@ def _build_fallback_step_observations(batch_events: list[dict[str, object]], ste
                 "control_type": control_type or event_type,
                 "label": label,
                 "relative_position": "self" if label else "",
-                "need_scroll": True if event_type == "scroll" or action == "scroll" else False,
+                "need_scroll": True if event_type == "mouseAction" and format_recorded_action(action).strip().lower() == "mouse_scroll" else False,
                 "is_table": _infer_is_table_from_batch_event(event),
             }
         )

@@ -623,7 +623,7 @@ class RecorderEngine:
         event = RecordedEvent(
             event_id=str(job["event_id"]),
             timestamp=str(job["timestamp"]),
-            event_type="mouse_click",
+            event_type="controlOperation",
             action=self._build_action_payload(str(job["button"]), list(job.get("modifiers", []))),
             screenshot=screenshot,
             mouse={"x": x, "y": y, "button": str(job["button"])} ,
@@ -674,7 +674,7 @@ class RecorderEngine:
         event = RecordedEvent(
             event_id=str(job["event_id"]),
             timestamp=str(job["timestamp"]),
-            event_type="mouse_drag",
+            event_type="mouseAction",
             action=self._build_action_payload(str(job["button"]), list(job.get("modifiers", []))),
             screenshot=screenshot,
             mouse={
@@ -718,7 +718,7 @@ class RecorderEngine:
         event = RecordedEvent(
             event_id=self.store.next_event_id(),
             timestamp=str(job.get("end_timestamp", utc_now_iso())),
-            event_type="scroll",
+            event_type="mouseAction",
             action=self._build_action_payload("mouse_scroll", list(job.get("modifiers", []))),
             mouse={"x": x, "y": y},
             keyboard=self._build_modifier_keyboard_payload(list(job.get("modifiers", []))),
@@ -844,7 +844,7 @@ class RecorderEngine:
         event = RecordedEvent(
             event_id=self.store.next_event_id(),
             timestamp=timestamp or utc_now_iso(),
-            event_type="key_press",
+            event_type="input",
             action="press",
             keyboard={
                 "key_name": key_name,

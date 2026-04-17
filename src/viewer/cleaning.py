@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.common.media_utils import file_md5
+from src.recorder.models import format_recorded_action, normalize_event_type
 
 
 @dataclass(slots=True)
@@ -57,9 +58,9 @@ def _find_noop_mouse_clicks(session_dir: Path, events: list[dict[str, object]]) 
     for index, event in enumerate(events):
         screenshot_path = _resolve_primary_image_path(session_dir, event)
         current_hash = file_md5(screenshot_path) if screenshot_path else None
-        event_type = str(event.get("event_type", ""))
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
 
-        if event_type == "mouse_click" and current_hash and previous_hash and current_hash == previous_hash:
+        if event_type == "controlOperation" and current_hash and previous_hash and current_hash == previous_hash:
             suggestions.append(
                 CleaningSuggestion(
                     kind="drop_noop",
@@ -92,8 +93,8 @@ def _find_key_press_runs(events: list[dict[str, object]]) -> list[CleaningSugges
         merged_text = "".join(run_text_buffer)
         readable_sequence = " ".join(run_sequence_tokens)
         first_event = events[run_indexes[0]].copy()
-        first_event["event_type"] = "type_input"
-        first_event["action"] = "typeinput"
+        first_event["event_type"] = "input"
+        first_event["action"] = "type_input"
         first_event["keyboard"] = {
             "text": merged_text,
             "sequence": run_sequence_tokens[:],
@@ -109,7 +110,7 @@ def _find_key_press_runs(events: list[dict[str, object]]) -> list[CleaningSugges
                 kind="merge_keypress",
                 row_indexes=run_indexes[:],
                 replacement_event=first_event,
-                reason=f"连续 {len(run_indexes)} 个 key_press 可合并为一次输入: {readable_sequence}",
+                reason=f"连续 {len(run_indexes)} 个 input 可合并为一次输入: {readable_sequence}",
             )
         )
         run_indexes = []
@@ -117,7 +118,11 @@ def _find_key_press_runs(events: list[dict[str, object]]) -> list[CleaningSugges
         run_text_buffer = []
 
     for index, event in enumerate(events):
-        if str(event.get("event_type", "")) != "key_press":
+        if normalize_event_type(event.get("event_type", ""), event.get("action", "")) != "input":
+            flush()
+            continue
+
+        if format_recorded_action(event.get("action", "")).strip().lower() != "press":
             flush()
             continue
 
@@ -177,9 +182,10 @@ def _find_noop_scrolls(session_dir: Path, events: list[dict[str, object]]) -> li
     for index, event in enumerate(events):
         screenshot_path = _resolve_primary_image_path(session_dir, event)
         current_hash = file_md5(screenshot_path) if screenshot_path else None
-        event_type = str(event.get("event_type", ""))
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
+        action_value = format_recorded_action(event.get("action", "")).strip().lower()
 
-        if event_type == "scroll" and current_hash and previous_hash and current_hash == previous_hash:
+        if event_type == "mouseAction" and action_value == "mouse_scroll" and current_hash and previous_hash and current_hash == previous_hash:
             suggestions.append(
                 CleaningSuggestion(
                     kind="drop_noop_scroll",
@@ -208,9 +214,9 @@ def _find_reverted_state_pairs(session_dir: Path, events: list[dict[str, object]
         if previous_hash != next_hash or previous_hash == current_hash:
             continue
 
-        current_type = str(events[index].get("event_type", ""))
-        next_type = str(events[index + 1].get("event_type", ""))
-        if current_type not in {"mouse_click", "scroll"} or next_type not in {"mouse_click", "scroll"}:
+        current_type = normalize_event_type(events[index].get("event_type", ""), events[index].get("action", ""))
+        next_type = normalize_event_type(events[index + 1].get("event_type", ""), events[index + 1].get("action", ""))
+        if current_type not in {"controlOperation", "mouseAction"} or next_type not in {"controlOperation", "mouseAction"}:
             continue
 
         suggestions.append(

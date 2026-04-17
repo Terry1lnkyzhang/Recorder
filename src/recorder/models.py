@@ -17,6 +17,26 @@ def format_recorded_action(value: Any, separator: str = " + ") -> str:
     return normalized.strip()
 
 
+def normalize_event_type(value: Any, action: Any = "") -> str:
+    event_type = str(value or "").strip()
+    action_text = format_recorded_action(action).strip().lower()
+    lowered = event_type.lower()
+
+    if action_text == "wait_for_image" or lowered == "wait":
+        return "wait"
+    if lowered in {"key_press", "type_input", "input"}:
+        return "input"
+    if lowered == "comment" or action_text == "manual_comment":
+        return "comment"
+    if lowered == "checkpoint" or action_text == "ai_checkpoint":
+        return "checkpoint"
+    if lowered in {"mouse_drag", "scroll", "mouseaction"}:
+        return "mouseAction"
+    if lowered in {"mouse_click", "controloperation"}:
+        return "controlOperation"
+    return event_type
+
+
 @dataclass(slots=True)
 class SessionMetadata:
     is_prs_recording: bool = True

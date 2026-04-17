@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.recorder.models import format_recorded_action
+from src.recorder.models import format_recorded_action, normalize_event_type
 
 from ..retrieval.models import SemanticStep
 
@@ -31,7 +31,7 @@ class SemanticStepExtractor:
                     tags=_extract_tags(item, event),
                     window_title=str(window.get("title", "")),
                     control_type=str(ui_element.get("control_type", "")),
-                    event_type=str(event.get("event_type", "")),
+                    event_type=normalize_event_type(event.get("event_type", ""), event.get("action", "")),
                     context={
                         "event": event,
                         "ui_element": ui_element,
@@ -46,7 +46,12 @@ def _extract_tags(step_insight: dict[str, Any], event: dict[str, Any]) -> list[s
     tags: list[str] = []
     description = str(step_insight.get("description", ""))
     conclusion = str(step_insight.get("conclusion", ""))
-    for token in [description, conclusion, str(event.get("event_type", "")), format_recorded_action(event.get("action", ""))]:
+    for token in [
+        description,
+        conclusion,
+        normalize_event_type(event.get("event_type", ""), event.get("action", "")),
+        format_recorded_action(event.get("action", "")),
+    ]:
         cleaned = token.strip()
         if cleaned:
             tags.append(cleaned)
