@@ -17,11 +17,10 @@ from .errors import AIClientError
 from .memory import load_carry_memory, save_carry_memory
 from .models import AnalysisBatchRecord, SessionAnalysisResult
 from .prompt_builder import (
-    build_batch_events,
     build_step_observation_prompt,
     build_step_reasoning_prompt,
     build_workflow_aggregation_prompt,
-    collect_batch_images,
+    collect_observation_inputs,
 )
 
 
@@ -86,9 +85,7 @@ class SessionWorkflowAnalyzer:
                     },
                 )
 
-            batch_events = build_batch_events(events, start_index, batch_size)
-            observation_prompt = build_step_observation_prompt(batch_events)
-            image_paths, image_stats = collect_batch_images(
+            batch_events, image_paths, observation_step_ids, image_stats = collect_observation_inputs(
                 session_dir,
                 events,
                 start_index,
@@ -96,6 +93,7 @@ class SessionWorkflowAnalyzer:
                 display_layout=display_layout,
                 send_fullscreen=self.settings.send_fullscreen_screenshots,
             )
+            observation_prompt = build_step_observation_prompt()
 
             if progress_callback:
                 progress_callback(
@@ -112,51 +110,57 @@ class SessionWorkflowAnalyzer:
                     },
                 )
 
-            observation_response = self.client.query(
-                user_prompt=observation_prompt,
-                image_paths=image_paths,
-                system_prompt=self.settings.analysis_system_prompt,
-                progress_callback=(
-                    None
-                    if not progress_callback
-                    else lambda stage, payload, batch_id=batch_id, current_batch=current_batch: progress_callback(
-                        stage,
+            observation_response_text = ""
+            observation_parsed: dict[str, object] = {"step_observations": []}
+            if image_paths:
+                observation_response = self.client.query(
+                    user_prompt=observation_prompt,
+                    image_paths=image_paths,
+                    system_prompt=self.settings.analysis_system_prompt,
+                    progress_callback=(
+                        None
+                        if not progress_callback
+                        else lambda stage, payload, batch_id=batch_id, current_batch=current_batch: progress_callback(
+                            stage,
+                            {
+                                "session_id": session_id,
+                                "batch_id": batch_id,
+                                "current_batch": current_batch,
+                                "total_batches": total_batches,
+                                **payload,
+                            },
+                        )
+                    ),
+                    cancel_callback=self.is_cancelled,
+                )
+
+                if progress_callback:
+                    progress_callback(
+                        "batch_parse",
                         {
                             "session_id": session_id,
                             "batch_id": batch_id,
                             "current_batch": current_batch,
                             "total_batches": total_batches,
-                            **payload,
                         },
                     )
-                ),
-                cancel_callback=self.is_cancelled,
-            )
-
-            if progress_callback:
-                progress_callback(
-                    "batch_parse",
-                    {
-                        "session_id": session_id,
-                        "batch_id": batch_id,
-                        "current_batch": current_batch,
-                        "total_batches": total_batches,
-                    },
-                )
-            observation_response_text = str(observation_response.get("response_text", ""))
-            try:
-                observation_parsed = _parse_ai_json(observation_response_text)
-            except Exception as exc:
-                result.status = "partial_failed" if result.step_insights else "failed"
-                result.failure_message = str(exc)
-                self._persist_partial_result(session_dir, result, carry_memory)
-                self._write_parse_failure_files(session_dir, batch_id, observation_response_text, observation_prompt)
-                raise AIClientError(
-                    f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
-                ) from exc
-            current_step_observations = _normalize_step_observations(observation_parsed, start_index, len(batch_events))
+                observation_response_text = str(observation_response.get("response_text", ""))
+                try:
+                    observation_parsed = _parse_ai_json(observation_response_text)
+                except Exception as exc:
+                    result.status = "partial_failed" if result.step_insights else "failed"
+                    result.failure_message = str(exc)
+                    self._persist_partial_result(session_dir, result, carry_memory)
+                    self._write_parse_failure_files(session_dir, batch_id, observation_response_text, observation_prompt)
+                    raise AIClientError(
+                        f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
+                    ) from exc
+            current_step_observations = _normalize_step_observations(observation_parsed, observation_step_ids)
             if not current_step_observations:
-                current_step_observations = _build_fallback_step_observations(batch_events, start_index)
+                current_step_observations = _build_fallback_step_observations(batch_events, observation_step_ids)
+            if not current_step_observations:
+                continue
+            result.step_observations.extend(current_step_observations)
 
             reasoning_prompt = build_step_reasoning_prompt(
                 session_id,
@@ -203,7 +207,7 @@ class SessionWorkflowAnalyzer:
                 batch_id=batch_id,
                 start_step=start_index + 1,
                 end_step=min(len(events), start_index + batch_size),
-                event_indexes=list(range(start_index + 1, min(len(events), start_index + batch_size) + 1)),
+                event_indexes=list(observation_step_ids),
                 image_paths=[path.relative_to(session_dir).as_posix() for path in image_paths],
                 prompt_preview=(
                     "[Observation Prompt]\n"
@@ -559,26 +563,46 @@ def _normalize_invalid_steps(parsed: dict[str, object]) -> list[dict[str, object
     return [item for item in values if isinstance(item, dict)]
 
 
-def _normalize_step_observations(parsed: dict[str, object], start_index: int, expected_count: int) -> list[dict[str, object]]:
+def _normalize_step_observations(parsed: dict[str, object], step_ids: list[int]) -> list[dict[str, object]]:
     values = parsed.get("step_observations", []) if isinstance(parsed, dict) else []
     if not isinstance(values, list) or not values:
         values = parsed.get("step_insights", []) if isinstance(parsed, dict) else []
     normalized: list[dict[str, object]] = []
     if not isinstance(values, list):
         return normalized
-    for offset, item in enumerate(values[:expected_count], start=1):
+    for offset, item in enumerate(values[: len(step_ids)]):
         if not isinstance(item, dict):
             continue
+        control_type = str(item.get("control_type", "")).strip()
+        label = str(item.get("label", "")).strip()
+        relative_position = _normalize_relative_position(item.get("relative_position"))
+        need_scroll = _normalize_optional_bool(item.get("need_scroll"))
+        is_table = _normalize_optional_bool(item.get("is_table"))
         observation = str(item.get("observation", item.get("description", ""))).strip()
         if not observation:
+            observation = _build_observation_text(
+                control_type=control_type,
+                label=label,
+                relative_position=relative_position,
+                need_scroll=need_scroll,
+                is_table=is_table,
+            )
+        if not observation:
             continue
-        semantic_kind = _normalize_semantic_kind(item.get("semantic_kind"))
         normalized_item = {
-            "step_id": start_index + offset,
+            "step_id": step_ids[offset],
             "observation": observation,
         }
-        if semantic_kind:
-            normalized_item["semantic_kind"] = semantic_kind
+        if control_type:
+            normalized_item["control_type"] = control_type
+        if label:
+            normalized_item["label"] = label
+        if relative_position:
+            normalized_item["relative_position"] = relative_position
+        if need_scroll is not None:
+            normalized_item["need_scroll"] = need_scroll
+        if is_table is not None:
+            normalized_item["is_table"] = is_table
         normalized.append(normalized_item)
     return normalized
 
@@ -620,62 +644,80 @@ def _normalize_notes(parsed: dict[str, object]) -> list[str]:
     return [str(item) for item in values if isinstance(item, str)]
 
 
-def _build_fallback_step_observations(batch_events: list[dict[str, object]], start_index: int) -> list[dict[str, object]]:
+def _build_fallback_step_observations(batch_events: list[dict[str, object]], step_ids: list[int]) -> list[dict[str, object]]:
     fallback: list[dict[str, object]] = []
-    for offset, event in enumerate(batch_events, start=1):
+    for step_id, event in zip(step_ids, batch_events):
         event_type = str(event.get("event_type", "")).strip()
         action = str(event.get("action", "")).strip()
         ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
         label = str(ui_element.get("name", ui_element.get("help_text", ""))).strip()
         control_type = str(ui_element.get("control_type", "")).strip()
-        observation_parts = [part for part in [event_type, action, label, control_type] if part]
+        observation = _build_observation_text(
+            control_type=control_type or event_type,
+            label=label,
+            relative_position="self" if label else "",
+            need_scroll=True if event_type == "scroll" or action == "scroll" else False,
+            is_table=_infer_is_table_from_batch_event(event),
+        )
         fallback.append(
             {
-                "step_id": start_index + offset,
-                "observation": " | ".join(observation_parts) if observation_parts else "未提取到明确观察结果",
-                "semantic_kind": _infer_semantic_kind_from_batch_event(event),
+                "step_id": step_id,
+                "observation": observation or "未提取到明确观察结果",
+                "control_type": control_type or event_type,
+                "label": label,
+                "relative_position": "self" if label else "",
+                "need_scroll": True if event_type == "scroll" or action == "scroll" else False,
+                "is_table": _infer_is_table_from_batch_event(event),
             }
         )
     return fallback
 
 
-def _normalize_semantic_kind(value: object) -> str:
-    candidate = str(value or "").strip()
-    allowed = {"wait", "mouseAction", "tableOperation", "controlOperation", "input", "comment", "checkpoint"}
-    return candidate if candidate in allowed else ""
+def _normalize_relative_position(value: object) -> str:
+    candidate = str(value or "").strip().lower()
+    return candidate if candidate in {"self", "up", "down", "left", "right"} else ""
 
 
-def _infer_semantic_kind_from_batch_event(event: dict[str, object]) -> str:
-    event_type = str(event.get("event_type", "")).strip().lower()
-    action = str(event.get("action", "")).strip().lower()
+def _normalize_optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes"}:
+            return True
+        if lowered in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _infer_is_table_from_batch_event(event: dict[str, object]) -> bool:
     ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
     control_type = str(ui_element.get("control_type", "")).strip().lower()
-    observation_text = " ".join(
-        str(value)
-        for value in [event.get("action", ""), ui_element.get("name", ""), ui_element.get("help_text", ""), control_type]
-        if str(value).strip()
-    ).lower()
+    label = str(ui_element.get("name", ui_element.get("help_text", ""))).strip().lower()
+    observation_text = " ".join(part for part in [control_type, label, str(event.get("action", ""))] if str(part).strip())
+    return any(token in observation_text for token in ["table", "grid", "row", "cell", "list", "表格", "列表"])
 
-    if event_type == "comment":
-        return "comment"
-    if event_type == "checkpoint":
-        return "checkpoint"
-    if event_type in {"key_press", "type_input"}:
-        return "input"
-    if "wait" in observation_text or "等待" in observation_text:
-        return "wait"
-    if any(token in control_type for token in ["table", "grid", "dataitem", "row", "cell"]) or any(
-        token in observation_text for token in ["table", "grid", "row", "cell", "表格", "列表"]
-    ):
-        return "tableOperation"
-    if event_type == "mouse_drag" or action in {"drag", "scroll"} or event_type == "scroll":
-        return "mouseAction"
-    if any(
-        token in control_type
-        for token in ["button", "checkbox", "edit", "combobox", "radio", "tab", "menu", "listitem", "treeitem"]
-    ):
-        return "controlOperation"
-    return "mouseAction"
+
+def _build_observation_text(
+    *,
+    control_type: str,
+    label: str,
+    relative_position: str,
+    need_scroll: bool | None,
+    is_table: bool | None,
+) -> str:
+    parts: list[str] = []
+    if label:
+        parts.append(f"label={label}")
+    if relative_position:
+        parts.append(f"direction={relative_position}")
+    if control_type:
+        parts.append(f"control_type={control_type}")
+    if need_scroll is not None:
+        parts.append(f"scroll={str(need_scroll).lower()}")
+    if is_table is not None:
+        parts.append(f"table={str(is_table).lower()}")
+    return " | ".join(parts)
 
 
 def _merge_unique_dict_items(base_items: list[dict[str, object]], new_items: list[dict[str, object]]) -> list[dict[str, object]]:

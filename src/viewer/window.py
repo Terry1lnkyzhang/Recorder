@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import tkinter as tk
-from collections import defaultdict
 
 import yaml
 from PIL import Image
@@ -216,7 +215,7 @@ class RecorderViewerWindow:
         self.tree.heading("method_suggestion", text="方法建议")
         self.tree.heading("module_suggestion", text="模块建议")
         self.tree.heading("parameter_suggestion", text="参数建议")
-        self.tree.heading("ai_note", text="AI建议")
+        self.tree.heading("ai_note", text="AI看图")
         self.tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
         self.tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
         self.tree.column("time", width=132, minwidth=118, anchor=tk.W, stretch=False)
@@ -257,7 +256,7 @@ class RecorderViewerWindow:
         coverage_tab = ttk.Frame(self.details_notebook)
         self.details_notebook.add(event_tab, text="事件明细")
         self.details_notebook.add(metadata_tab, text="Session 元数据")
-        self.details_notebook.add(self.ai_tab, text="AI建议")
+        self.details_notebook.add(self.ai_tab, text="AI看图")
         self.details_notebook.add(self.ai_chat_tab, text="AI Chat")
         self.details_notebook.add(coverage_tab, text="AI总结/覆盖")
 
@@ -596,7 +595,7 @@ class RecorderViewerWindow:
         tree.heading("method_suggestion", text="方法建议")
         tree.heading("module_suggestion", text="模块建议")
         tree.heading("parameter_suggestion", text="参数建议")
-        tree.heading("ai_note", text="AI建议")
+        tree.heading("ai_note", text="AI看图")
         tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
         tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
         tree.column("time", width=132, minwidth=118, anchor=tk.W, stretch=False)
@@ -1372,7 +1371,7 @@ class RecorderViewerWindow:
         if column_id == "#9":
             full_text = self._describe_event_for_view(int(row_id), self.event_rows[int(row_id)])
             if full_text:
-                self._show_text_dialog(f"步骤 {int(row_id) + 1} AI建议", full_text)
+                self._show_text_dialog(f"步骤 {int(row_id) + 1} AI看图", full_text)
             return
 
         if column_id in {"#6", "#7"}:
@@ -1631,6 +1630,11 @@ class RecorderViewerWindow:
 
     def _remap_analysis_step_ids(self, analysis: dict[str, object], step_id_mapping: dict[int, int]) -> dict[str, object]:
         remapped = copy.deepcopy(analysis)
+        remapped["step_observations"] = [
+            self._remap_analysis_item_step_id(item, step_id_mapping)
+            for item in remapped.get("step_observations", [])
+            if isinstance(item, dict) and self._mapped_step_id(item.get("step_id"), step_id_mapping) is not None
+        ]
         remapped["step_insights"] = [
             self._remap_analysis_item_step_id(item, step_id_mapping)
             for item in remapped.get("step_insights", [])
@@ -1726,6 +1730,7 @@ class RecorderViewerWindow:
                 [item for item in partial_analysis.get("batches", []) if isinstance(item, dict)],
                 selected_step_ids,
             ),
+            "step_observations": [],
             "step_insights": [],
             "invalid_steps": [],
             "reusable_modules": [],
@@ -1733,6 +1738,16 @@ class RecorderViewerWindow:
             "analysis_notes": [item for item in base_analysis.get("analysis_notes", []) if isinstance(item, str)],
             "workflow_report_markdown": "",
         }
+
+        existing_step_observations = [
+            item for item in base_analysis.get("step_observations", [])
+            if isinstance(item, dict) and int(item.get("step_id", 0) or 0) not in selected_step_ids
+        ]
+        partial_step_observations = [item for item in partial_analysis.get("step_observations", []) if isinstance(item, dict)]
+        merged["step_observations"] = sorted(
+            [*existing_step_observations, *partial_step_observations],
+            key=lambda item: int(item.get("step_id", 0) or 0),
+        )
 
         existing_step_insights = [
             item for item in base_analysis.get("step_insights", [])
@@ -3090,73 +3105,65 @@ class RecorderViewerWindow:
         if not analysis:
             return texts
 
-        grouped_conclusions: dict[int, list[str]] = defaultdict(list)
-        for item in analysis.get("step_insights", []):
+        for item in self._extract_analysis_step_observations(analysis):
             if not isinstance(item, dict):
                 continue
             step_id = item.get("step_id")
             if not isinstance(step_id, int) or step_id < 1:
                 continue
-            description = self._clean_sentence(str(item.get("description", "")))
-            conclusion = self._clean_sentence(str(item.get("conclusion", "")))
-            parts = [part for part in [description, conclusion] if part]
-            if parts:
-                texts[step_id - 1] = "；".join(parts)
-
-        for item in analysis.get("invalid_steps", []):
-            if not isinstance(item, dict):
-                continue
-            decision = self._decision_text(str(item.get("decision", "review")))
-            reason = self._clean_sentence(str(item.get("reason", "")))
-            step_ids = item.get("step_ids", [])
-            if not isinstance(step_ids, list):
-                continue
-            for step_id in step_ids:
-                if isinstance(step_id, int) and step_id >= 1:
-                    grouped_conclusions[step_id - 1].append(f"AI结论：{decision}{('，' + reason) if reason else ''}")
-
-        for item in analysis.get("wait_suggestions", []):
-            if not isinstance(item, dict):
-                continue
-            step_id = item.get("step_id")
-            if not isinstance(step_id, int) or step_id < 1:
-                continue
-            wait_type = self._clean_sentence(str(item.get("wait_type", "")))
-            wait_target = self._clean_sentence(str(item.get("wait_target", "")))
-            reason = self._clean_sentence(str(item.get("reason", "")))
-            sentence = "AI建议："
-            if wait_target:
-                sentence += f"此处可等待 {wait_target}"
-            elif wait_type:
-                sentence += f"此处可增加 {wait_type} 等待"
-            else:
-                sentence += "此处建议增加等待条件"
-            if reason:
-                sentence += f"，{reason}"
-            grouped_conclusions[step_id - 1].append(sentence)
-
-        for item in analysis.get("reusable_modules", []):
-            if not isinstance(item, dict):
-                continue
-            start_step = item.get("start_step")
-            end_step = item.get("end_step")
-            if not isinstance(start_step, int) or not isinstance(end_step, int):
-                continue
-            module_name = self._clean_sentence(str(item.get("module_name", "")))
-            reason = self._clean_sentence(str(item.get("reason", "")))
-            for row_index in range(start_step - 1, end_step):
-                sentence = f"AI判断：该步骤属于可复用模块“{module_name or '未命名模块'}”"
-                if reason:
-                    sentence += f"，{reason}"
-                grouped_conclusions[row_index].append(sentence)
-
-        for row_index, conclusions in grouped_conclusions.items():
-            merged = "；".join(self._deduplicate_texts(conclusions))
-            if row_index in texts and merged:
-                texts[row_index] = f"{texts[row_index]}；{merged}"
-            elif merged:
-                texts[row_index] = merged
+            observation = self._clean_sentence(str(item.get("observation", "")))
+            if observation:
+                texts[step_id - 1] = observation
         return texts
+
+    def _extract_analysis_step_observations(self, analysis: dict[str, object]) -> list[dict[str, object]]:
+        explicit_values = analysis.get("step_observations", [])
+        if isinstance(explicit_values, list) and explicit_values:
+            return [item for item in explicit_values if isinstance(item, dict)]
+
+        extracted: list[dict[str, object]] = []
+        for batch in analysis.get("batches", []):
+            if not isinstance(batch, dict):
+                continue
+            parsed_result = batch.get("parsed_result", {}) if isinstance(batch.get("parsed_result", {}), dict) else {}
+            observation_round = parsed_result.get("observation_round", {}) if isinstance(parsed_result.get("observation_round", {}), dict) else {}
+            values = observation_round.get("step_observations", [])
+            event_indexes = batch.get("event_indexes", []) if isinstance(batch.get("event_indexes", []), list) else []
+            if not isinstance(values, list):
+                continue
+            for offset, item in enumerate(values):
+                if not isinstance(item, dict):
+                    continue
+                step_id = item.get("step_id")
+                if not isinstance(step_id, int) and offset < len(event_indexes) and isinstance(event_indexes[offset], int):
+                    step_id = event_indexes[offset]
+                if not isinstance(step_id, int) or step_id < 1:
+                    continue
+                observation = str(item.get("observation", item.get("description", ""))).strip()
+                if not observation:
+                    control_type = str(item.get("control_type", "")).strip()
+                    label = str(item.get("label", "")).strip()
+                    relative_position = str(item.get("relative_position", "")).strip()
+                    need_scroll = item.get("need_scroll")
+                    is_table = item.get("is_table")
+                    parts: list[str] = []
+                    if label:
+                        parts.append(f"label={label}")
+                    if relative_position:
+                        parts.append(f"direction={relative_position}")
+                    if control_type:
+                        parts.append(f"control_type={control_type}")
+                    if isinstance(need_scroll, bool):
+                        parts.append(f"scroll={str(need_scroll).lower()}")
+                    if isinstance(is_table, bool):
+                        parts.append(f"table={str(is_table).lower()}")
+                    observation = " | ".join(parts)
+                if not observation:
+                    continue
+                extracted.append({"step_id": step_id, "observation": observation})
+
+        extracted.sort(key=lambda item: int(item.get("step_id", 0) or 0))
+        return extracted
 
     def _build_ai_summary_text(self, analysis: dict[str, object] | None) -> str:
         if not analysis:

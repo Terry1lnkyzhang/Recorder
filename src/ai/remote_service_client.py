@@ -232,6 +232,7 @@ def _session_analysis_result_from_dict(payload: dict[str, Any]) -> SessionAnalys
         failure_message=str(payload.get("failure_message", "")),
         carry_memory=[item for item in payload.get("carry_memory", []) if isinstance(item, dict)],
         batches=batches,
+        step_observations=[item for item in payload.get("step_observations", []) if isinstance(item, dict)],
         step_insights=[item for item in payload.get("step_insights", []) if isinstance(item, dict)],
         invalid_steps=[item for item in payload.get("invalid_steps", []) if isinstance(item, dict)],
         reusable_modules=[item for item in payload.get("reusable_modules", []) if isinstance(item, dict)],

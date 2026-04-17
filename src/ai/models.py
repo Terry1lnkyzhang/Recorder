@@ -27,6 +27,7 @@ class SessionAnalysisResult:
     failure_message: str = ""
     carry_memory: list[dict[str, Any]] = field(default_factory=list)
     batches: list[AnalysisBatchRecord] = field(default_factory=list)
+    step_observations: list[dict[str, Any]] = field(default_factory=list)
     step_insights: list[dict[str, Any]] = field(default_factory=list)
     invalid_steps: list[dict[str, Any]] = field(default_factory=list)
     reusable_modules: list[dict[str, Any]] = field(default_factory=list)
@@ -42,6 +43,7 @@ class SessionAnalysisResult:
             "failure_message": self.failure_message,
             "carry_memory": self.carry_memory,
             "batches": [batch.to_dict() for batch in self.batches],
+            "step_observations": self.step_observations,
             "step_insights": self.step_insights,
             "invalid_steps": self.invalid_steps,
             "reusable_modules": self.reusable_modules,
