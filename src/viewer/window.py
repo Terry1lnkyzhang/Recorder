@@ -23,8 +23,16 @@ from src.common.display_utils import prepare_image_path_for_ai
 from src.common.image_widgets import ZoomableImageView
 from src.common.media_utils import load_video_preview_frame
 from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
+from src.common.session_discovery import find_latest_session_dir, scan_session_candidates
 from src.converter.compiler import export_suggestions_to_atframework_yaml
-from src.recorder.dialogs import AICheckpointDraft, open_ai_checkpoint_dialog, open_ai_checkpoint_editor_dialog, open_comment_dialog
+from src.recorder.dialogs import (
+    AICheckpointDraft,
+    capture_manual_screenshot,
+    open_ai_checkpoint_dialog,
+    open_ai_checkpoint_editor_dialog,
+    open_comment_dialog,
+    open_wait_for_image_dialog,
+)
 from src.recorder.models import format_recorded_action, normalize_event_type
 from src.recorder.recorder import RecorderEngine
 from src.recorder.settings import SettingsStore
@@ -715,72 +723,14 @@ class RecorderViewerWindow:
         self.popup_process_filter_combo = None
 
     def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False) -> list[dict[str, object]]:
-        if not base_dir.exists():
-            return []
-
-        candidates: list[dict[str, object]] = []
-        for session_json in self._iter_session_json_paths(base_dir):
-            session_dir = session_json.parent
-            try:
-                session_stat = session_json.stat()
-                dir_stat = session_dir.stat()
-            except OSError:
-                continue
-
-            cache_key = str(session_json.resolve())
-            cache_stamp = (session_stat.st_mtime_ns, session_stat.st_size)
-            cached = None if force_refresh else self._session_candidate_cache.get(cache_key)
-
-            if cached and cached.get("stamp") == cache_stamp:
-                event_count = cached.get("events", "")
-            else:
-                event_count: object = ""
-                try:
-                    payload = json.loads(session_json.read_text(encoding="utf-8"))
-                    if isinstance(payload, dict):
-                        events = payload.get("events", [])
-                        if isinstance(events, list):
-                            event_count = len(events)
-                except Exception:
-                    event_count = "?"
-                self._session_candidate_cache[cache_key] = {
-                    "stamp": cache_stamp,
-                    "events": event_count,
-                }
-
-            candidates.append(
-                {
-                    "name": self._format_session_candidate_name(base_dir, session_dir),
-                    "modified": datetime.fromtimestamp(dir_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "modified_ts": dir_stat.st_mtime,
-                    "events": event_count,
-                    "path": str(session_dir),
-                }
-            )
-
-        candidates.sort(key=lambda item: float(item.get("modified_ts", 0.0) or 0.0), reverse=True)
-        for item in candidates:
-            item.pop("modified_ts", None)
-        return candidates
+        return scan_session_candidates(
+            base_dir,
+            cache=self._session_candidate_cache,
+            force_refresh=force_refresh,
+        )
 
     def _find_latest_session(self, base_dir: Path) -> Path | None:
-        candidates = [item.parent for item in self._iter_session_json_paths(base_dir)]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: item.stat().st_mtime)
-
-    def _iter_session_json_paths(self, base_dir: Path):
-        for root, _dirs, files in os.walk(base_dir):
-            if "session.json" not in files:
-                continue
-            yield Path(root) / "session.json"
-
-    @staticmethod
-    def _format_session_candidate_name(base_dir: Path, item: Path) -> str:
-        try:
-            return item.relative_to(base_dir).as_posix()
-        except ValueError:
-            return item.name
+        return find_latest_session_dir(base_dir)
 
     def load_session(self, session_dir: Path) -> None:
         session_path = session_dir / "session.json"
@@ -2125,7 +2075,7 @@ class RecorderViewerWindow:
             return
         should_start = messagebox.askyesno(
             "插入步骤 - 录制",
-            "将开始一段临时录制。\n\n完成操作后，请在弹出的控制窗口中点击“停止并插入”。\n临时录制过程中也支持添加 Comment / AI Checkpoint，它们会一起插入事件列表。\n\n是否继续？",
+            "将开始一段临时录制。\n\n完成操作后，请在弹出的控制窗口中点击“停止并插入”。\n临时录制过程中也支持添加 Comment / 等待事件 / 记录截图 / AI Checkpoint，它们会一起插入事件列表。\n\n是否继续？",
             parent=self.window,
         )
         if not should_start:
@@ -2363,7 +2313,7 @@ class RecorderViewerWindow:
         container.pack(fill=tk.BOTH, expand=True)
         ttk.Label(
             container,
-            text="临时录制已开始。\n可直接执行真实操作，也可以在这里补充 Comment / AI Checkpoint。\n完成后点击“停止并插入”；若放弃本次录制，点击“取消”。",
+            text="临时录制已开始。\n可直接执行真实操作，也可以在这里补充 Comment / 等待事件 / 记录截图 / AI Checkpoint。\n完成后点击“停止并插入”；若放弃本次录制，点击“取消”。",
             justify=tk.LEFT,
             wraplength=480,
         ).pack(anchor=tk.W)
@@ -2398,6 +2348,18 @@ class RecorderViewerWindow:
             text="添加 Comment",
             command=lambda: with_engine_suspended(lambda: open_comment_dialog(dialog, temp_engine)),
         ).pack(side=tk.LEFT)
+        ttk.Button(
+            action_bar,
+            text="添加等待事件",
+            command=lambda: with_engine_suspended(lambda: open_wait_for_image_dialog(dialog, temp_engine)),
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(
+            action_bar,
+            text="记录截图",
+            command=lambda: with_engine_suspended(
+                lambda: capture_manual_screenshot(dialog, temp_engine, "选择要插入到临时录制中的截图区域")
+            ),
+        ).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(
             action_bar,
             text="添加 AI Checkpoint",

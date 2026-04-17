@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import json
 import re
 import threading
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from src.common.app_logging import configure_app_logging, get_logger, install_global_exception_logging
 from src.common.runtime_paths import get_recordings_dir, get_settings_path
+from src.common.session_discovery import scan_session_candidates
 from .dialogs import (
     AICheckpointDraft,
     SessionMetadataDraft,
@@ -340,6 +339,8 @@ class RecorderApp:
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
         self._manual_screenshot_in_progress = False
+        self._session_picker_scan_token = 0
+        self._session_candidate_cache: dict[str, dict[str, object]] = {}
         self.design_steps_overlay = DesignStepsOverlay(self.root)
 
         self._build_ui()
@@ -720,11 +721,6 @@ class RecorderApp:
 
     def _prompt_session_to_continue(self) -> Path | None:
         recordings_root = Path(self.output_var.get())
-        sessions = self._find_session_candidates(recordings_root)
-        if not sessions:
-            messagebox.showinfo("提示", f"未在以下目录找到可继续录制的 session:\n{recordings_root}", parent=self.root)
-            return None
-
         dialog = tk.Toplevel(self.root)
         dialog.title("选择要继续录制的 Session")
         dialog.geometry("760x520")
@@ -747,20 +743,48 @@ class RecorderApp:
         tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
         tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
 
+        status_var = tk.StringVar(value="正在扫描 Session...")
+        ttk.Label(dialog, textvariable=status_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
+
         button_bar = ttk.Frame(dialog, padding=(16, 0, 16, 16))
         button_bar.pack(fill=tk.X)
 
-        for index, item in enumerate(sessions):
-            tree.insert(
-                "",
-                tk.END,
-                iid=str(index),
-                values=(item["name"], item["modified"], item["events"]),
-            )
+        sessions: list[dict[str, object]] = []
 
-        if sessions:
-            tree.selection_set("0")
-            tree.focus("0")
+        def populate(force_refresh: bool = False) -> None:
+            self._session_picker_scan_token += 1
+            token = self._session_picker_scan_token
+            status_var.set("正在扫描 Session...")
+            for item_id in tree.get_children():
+                tree.delete(item_id)
+
+            def worker() -> None:
+                try:
+                    items = self._find_session_candidates(recordings_root, force_refresh=force_refresh)
+                except Exception as exc:
+                    self.root.after(0, lambda: status_var.set(f"扫描 Session 失败: {exc}"))
+                    return
+
+                def apply_results() -> None:
+                    if not dialog.winfo_exists() or token != self._session_picker_scan_token:
+                        return
+                    sessions.clear()
+                    sessions.extend(items)
+                    status_var.set(f"共找到 {len(sessions)} 个 Session")
+                    for index, item in enumerate(sessions):
+                        tree.insert(
+                            "",
+                            tk.END,
+                            iid=str(index),
+                            values=(item["name"], item["modified"], item["events"]),
+                        )
+                    if sessions:
+                        tree.selection_set("0")
+                        tree.focus("0")
+
+                self.root.after(0, apply_results)
+
+            threading.Thread(target=worker, daemon=True).start()
 
         def confirm() -> None:
             nonlocal selected_path
@@ -771,84 +795,25 @@ class RecorderApp:
             selected_path = Path(str(sessions[int(selection[0])]["path"]))
             dialog.destroy()
 
+        ttk.Button(button_bar, text="刷新", command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
         ttk.Button(button_bar, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
         ttk.Button(button_bar, text="继续录制所选 Session", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
 
         tree.bind("<Double-1>", lambda _event: confirm())
+        populate()
         dialog.lift()
         dialog.focus_force()
         self.root.wait_window(dialog)
+        if selected_path is None and not sessions:
+            messagebox.showinfo("提示", f"未在以下目录找到可继续录制的 session:\n{recordings_root}", parent=self.root)
         return selected_path
 
-    def _find_session_candidates(self, base_dir: Path) -> list[dict[str, object]]:
-        if not base_dir.exists():
-            return []
-
-        candidates: list[dict[str, object]] = []
-        session_dirs: list[Path] = []
-        try:
-            testcase_dirs = [item for item in base_dir.iterdir() if item.is_dir()]
-        except Exception:
-            testcase_dirs = []
-
-        for testcase_dir in testcase_dirs:
-            try:
-                child_dirs = [item for item in testcase_dir.iterdir() if item.is_dir()]
-            except Exception:
-                continue
-
-            for child_dir in child_dirs:
-                session_json = child_dir / "session.json"
-                events_log = child_dir / "events.jsonl"
-                if session_json.exists() or events_log.exists():
-                    session_dirs.append(child_dir)
-                    continue
-
-                try:
-                    project_session_dirs = [item for item in child_dir.iterdir() if item.is_dir()]
-                except Exception:
-                    continue
-                session_dirs.extend(project_session_dirs)
-
-        session_dirs.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        for item in session_dirs:
-            if not item.is_dir():
-                continue
-            session_json = item / "session.json"
-            events_log = item / "events.jsonl"
-            if not session_json.exists() and not events_log.exists():
-                continue
-
-            event_count: str | int = ""
-            try:
-                if session_json.exists():
-                    payload = json.loads(session_json.read_text(encoding="utf-8"))
-                    if isinstance(payload, dict):
-                        events = payload.get("events", [])
-                        if isinstance(events, list):
-                            event_count = len(events)
-                elif events_log.exists():
-                    with events_log.open("r", encoding="utf-8") as handle:
-                        event_count = sum(1 for line in handle if line.strip())
-            except Exception:
-                event_count = "?"
-
-            candidates.append(
-                {
-                    "name": self._format_session_candidate_name(base_dir, item),
-                    "modified": datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "events": event_count,
-                    "path": str(item),
-                }
-            )
-        return candidates
-
-    @staticmethod
-    def _format_session_candidate_name(base_dir: Path, item: Path) -> str:
-        try:
-            return item.relative_to(base_dir).as_posix()
-        except ValueError:
-            return item.name
+    def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False) -> list[dict[str, object]]:
+        return scan_session_candidates(
+            base_dir,
+            cache=self._session_candidate_cache,
+            force_refresh=force_refresh,
+        )
 
     def _refresh_controls(self) -> None:
         is_recording = self.engine.is_recording
