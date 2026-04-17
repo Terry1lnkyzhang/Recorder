@@ -126,7 +126,12 @@ class SessionStore:
         self._write_session_files()
         return self.session_dir
 
-    def capture_screenshot(self, prefix: str, highlight_rect: dict[str, int] | None = None) -> str | None:
+    def capture_screenshot(
+        self,
+        prefix: str,
+        highlight_rect: dict[str, int] | None = None,
+        focus_point: tuple[int, int] | None = None,
+    ) -> str | None:
         if not self.screenshots_dir or not self.session_dir:
             return None
 
@@ -136,15 +141,20 @@ class SessionStore:
         screenshot_path = self.screenshots_dir / file_name
         try:
             image = ImageGrab.grab(all_screens=True)
+            image, origin = self._prepare_event_image(image, highlight_rect, focus_point)
             if highlight_rect:
-                self._draw_highlight_rect(image, highlight_rect)
+                self._draw_highlight_rect(image, highlight_rect, origin)
             image.save(screenshot_path)
             return safe_relpath(screenshot_path, self.session_dir)
         except Exception:
             return None
 
     @staticmethod
-    def _draw_highlight_rect(image: Image.Image, highlight_rect: dict[str, int]) -> None:
+    def _draw_highlight_rect(
+        image: Image.Image,
+        highlight_rect: dict[str, int],
+        origin: tuple[int, int] | None = None,
+    ) -> None:
         left = int(highlight_rect.get("left", 0) or 0)
         top = int(highlight_rect.get("top", 0) or 0)
         right = int(highlight_rect.get("right", 0) or 0)
@@ -156,8 +166,11 @@ class SessionStore:
         virtual_screen = layout.get("virtual_screen", {}) if isinstance(layout, dict) else {}
         if not isinstance(virtual_screen, dict):
             return
-        screen_left = int(virtual_screen.get("left", 0) or 0)
-        screen_top = int(virtual_screen.get("top", 0) or 0)
+        if origin is None:
+            screen_left = int(virtual_screen.get("left", 0) or 0)
+            screen_top = int(virtual_screen.get("top", 0) or 0)
+        else:
+            screen_left, screen_top = origin
         padding = 4
         translated = (
             left - screen_left - padding,
@@ -185,6 +198,7 @@ class SessionStore:
         prefix: str,
         folder_name: str = "screenshots",
         highlight_rect: dict[str, int] | None = None,
+        focus_point: tuple[int, int] | None = None,
     ) -> str | None:
         if not self.session_dir:
             return None
@@ -195,12 +209,74 @@ class SessionStore:
             file_name = f"{prefix}_{self._screenshot_counter:04d}.png"
         output_path = target_dir / file_name
         try:
+            image, origin = self._prepare_event_image(image, highlight_rect, focus_point)
             if highlight_rect:
-                self._draw_highlight_rect(image, highlight_rect)
+                self._draw_highlight_rect(image, highlight_rect, origin)
             image.save(output_path)
             return safe_relpath(output_path, self.session_dir)
         except Exception:
             return None
+
+    @staticmethod
+    def _prepare_event_image(
+        image: Image.Image,
+        highlight_rect: dict[str, int] | None,
+        focus_point: tuple[int, int] | None,
+    ) -> tuple[Image.Image, tuple[int, int]]:
+        layout = get_display_layout_snapshot()
+        virtual_screen = layout.get("virtual_screen", {}) if isinstance(layout, dict) else {}
+        monitors = layout.get("monitors", []) if isinstance(layout, dict) else []
+        if not isinstance(virtual_screen, dict):
+            return image, (0, 0)
+
+        origin = (
+            int(virtual_screen.get("left", 0) or 0),
+            int(virtual_screen.get("top", 0) or 0),
+        )
+
+        if not focus_point and isinstance(highlight_rect, dict):
+            left = highlight_rect.get("left")
+            top = highlight_rect.get("top")
+            right = highlight_rect.get("right")
+            bottom = highlight_rect.get("bottom")
+            if all(isinstance(value, int) for value in [left, top, right, bottom]):
+                focus_point = (int((left + right) / 2), int((top + bottom) / 2))
+
+        if not focus_point or not isinstance(monitors, list) or len(monitors) <= 1:
+            return image, origin
+
+        monitor = SessionStore._find_monitor_for_point(focus_point[0], focus_point[1], monitors)
+        if not isinstance(monitor, dict):
+            return image, origin
+
+        monitor_left = int(monitor.get("left", 0) or 0)
+        monitor_top = int(monitor.get("top", 0) or 0)
+        monitor_width = int(monitor.get("width", 0) or 0)
+        monitor_height = int(monitor.get("height", 0) or 0)
+        virtual_left = origin[0]
+        virtual_top = origin[1]
+        crop_box = (
+            monitor_left - virtual_left,
+            monitor_top - virtual_top,
+            monitor_left - virtual_left + monitor_width,
+            monitor_top - virtual_top + monitor_height,
+        )
+        if crop_box == (0, 0, image.width, image.height):
+            return image, origin
+        return image.crop(crop_box), (monitor_left, monitor_top)
+
+    @staticmethod
+    def _find_monitor_for_point(x: int, y: int, monitors: list[dict[str, object]]) -> dict[str, object] | None:
+        for monitor in monitors:
+            left = monitor.get("left")
+            top = monitor.get("top")
+            width = monitor.get("width")
+            height = monitor.get("height")
+            if not all(isinstance(value, int) for value in [left, top, width, height]):
+                continue
+            if left <= x < left + width and top <= y < top + height:
+                return monitor
+        return None
 
     def allocate_media_path(self, prefix: str, extension: str, folder_name: str = "media") -> Path:
         if not self.session_dir:

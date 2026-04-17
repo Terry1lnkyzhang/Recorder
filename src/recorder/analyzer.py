@@ -5,26 +5,28 @@ from pathlib import Path
 
 import yaml
 
-from .models import RecordedEvent, RecordingSessionData, format_recorded_action
+from .models import RecordedEvent, RecordingSessionData, format_recorded_action, normalize_event_type
 
 
 def _event_signature(event: RecordedEvent) -> str:
-    if event.event_type == "mouse_click":
+    event_type = normalize_event_type(event.event_type, event.action)
+    action_value = format_recorded_action(event.action).strip().lower()
+    if event_type == "controlOperation":
         control = event.ui_element.control_type or "unknown_control"
         window = event.window.title or "unknown_window"
         return f"click::{window}::{control}::{format_recorded_action(event.action)}"
-    if event.event_type == "mouse_drag":
+    if event_type == "mouseAction" and action_value != "mouse_scroll":
         control = event.ui_element.control_type or "unknown_control"
         window = event.window.title or "unknown_window"
         return f"drag::{window}::{control}::{format_recorded_action(event.action)}"
-    if event.event_type == "key_press":
+    if event_type == "input" and action_value == "press":
         key_name = event.keyboard.get("key_name", "unknown_key")
         return f"key::{key_name}"
-    if event.event_type == "scroll":
+    if event_type == "mouseAction" and action_value == "mouse_scroll":
         dy = event.scroll.get("dy") if isinstance(event.scroll, dict) else None
         direction = "down" if isinstance(dy, int) and dy < 0 else "up"
         return f"scroll::{direction}"
-    return f"{event.event_type}::{format_recorded_action(event.action)}"
+    return f"{event_type}::{format_recorded_action(event.action)}"
 
 
 def build_reuse_suggestions(session: RecordingSessionData) -> dict[str, object]:

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from src.common.display_utils import prepare_image_path_for_ai
+from src.recorder.models import format_recorded_action, normalize_event_type
 
 
 def build_step_observation_prompt() -> str:
@@ -125,9 +126,9 @@ def build_batch_events(events: list[dict[str, object]], start_index: int, batch_
     rows = []
     sliced = events[start_index : start_index + batch_size]
     for event in sliced:
-        event_type = str(event.get("event_type", ""))
-        keyboard = event.get("keyboard", {}) if event_type == "key_press" else {}
-        mouse = event.get("mouse", {}) if event_type == "mouse_click" else {}
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
+        keyboard = event.get("keyboard", {}) if event_type == "input" else {}
+        mouse = event.get("mouse", {}) if event_type == "controlOperation" else {}
         row: dict[str, object] = {
             "event_type": event_type,
             "action": event.get("action", ""),
@@ -168,14 +169,15 @@ def collect_observation_inputs(
         if not path.exists():
             continue
         row: dict[str, object] = {
-            "event_type": str(event.get("event_type", "")),
+            "event_type": normalize_event_type(event.get("event_type", ""), event.get("action", "")),
             "action": event.get("action", ""),
         }
         ui_element = _build_prompt_ui_element(event)
         if ui_element:
             row["ui_element"] = ui_element
-        keyboard = event.get("keyboard", {}) if str(event.get("event_type", "")) == "key_press" else {}
-        mouse = event.get("mouse", {}) if str(event.get("event_type", "")) == "mouse_click" else {}
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
+        keyboard = event.get("keyboard", {}) if event_type == "input" else {}
+        mouse = event.get("mouse", {}) if event_type == "controlOperation" else {}
         if keyboard:
             row["keyboard"] = keyboard
         if mouse:
@@ -222,12 +224,18 @@ def _build_prompt_ui_element(event: dict[str, object]) -> dict[str, object]:
     name = str(ui_element.get("name", "")).strip()
     control_type = str(ui_element.get("control_type", "")).strip()
     help_text = str(ui_element.get("help_text", "")).strip()
+    help_text_fallback = str(ui_element.get("help_text_fallback", "")).strip()
+    name_fallbacks = [str(item).strip() for item in ui_element.get("name_fallbacks", []) if str(item).strip()] if isinstance(ui_element.get("name_fallbacks", []), list) else []
 
     prompt_ui_element: dict[str, object] = {}
     if name:
         prompt_ui_element["name"] = name
-    elif help_text:
+    elif name_fallbacks:
+        prompt_ui_element["name_fallbacks"] = name_fallbacks
+    if help_text:
         prompt_ui_element["help_text"] = help_text
+    elif help_text_fallback:
+        prompt_ui_element["help_text_fallback"] = help_text_fallback
     if control_type:
         prompt_ui_element["control_type"] = control_type
     return prompt_ui_element
@@ -248,10 +256,10 @@ def _resolve_primary_image(session_dir: Path, event: dict[str, object]) -> str |
 
 
 def _should_send_event_to_observation(event: dict[str, object]) -> bool:
-    event_type = str(event.get("event_type", "")).strip().lower()
-    action = str(event.get("action", "")).strip().lower()
+    event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip().lower()
+    action = format_recorded_action(event.get("action", "")).strip().lower()
     if event_type in {"comment", "checkpoint"}:
         return False
-    if action in {"manual_comment", "ai_checkpoint"}:
+    if event_type == "wait" or action in {"manual_comment", "ai_checkpoint"}:
         return False
     return True

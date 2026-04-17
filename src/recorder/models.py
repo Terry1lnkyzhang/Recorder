@@ -17,6 +17,26 @@ def format_recorded_action(value: Any, separator: str = " + ") -> str:
     return normalized.strip()
 
 
+def normalize_event_type(value: Any, action: Any = "") -> str:
+    event_type = str(value or "").strip()
+    action_text = format_recorded_action(action).strip().lower()
+    lowered = event_type.lower()
+
+    if action_text == "wait_for_image" or lowered == "wait":
+        return "wait"
+    if lowered in {"key_press", "type_input", "input"}:
+        return "input"
+    if lowered == "comment" or action_text == "manual_comment":
+        return "comment"
+    if lowered == "checkpoint" or action_text == "ai_checkpoint":
+        return "checkpoint"
+    if lowered in {"mouse_drag", "scroll", "mouseaction"}:
+        return "mouseAction"
+    if lowered in {"mouse_click", "controloperation"}:
+        return "controlOperation"
+    return event_type
+
+
 @dataclass(slots=True)
 class SessionMetadata:
     is_prs_recording: bool = True
@@ -97,6 +117,8 @@ class UIElementInfo:
     automation_id: str = ""
     class_name: str = ""
     help_text: str = ""
+    help_text_fallback: str = ""
+    name_fallbacks: list[str] = field(default_factory=list)
     rectangle: dict[str, int] = field(default_factory=dict)
 
     @classmethod
@@ -109,6 +131,8 @@ class UIElementInfo:
             automation_id=str(data.get("automation_id", "")),
             class_name=str(data.get("class_name", "")),
             help_text=str(data.get("help_text", "")),
+            help_text_fallback=str(data.get("help_text_fallback", "")),
+            name_fallbacks=[str(item) for item in data.get("name_fallbacks", []) if str(item).strip()] if isinstance(data.get("name_fallbacks", []), list) else [],
             rectangle=rectangle if isinstance(rectangle, dict) else {},
         )
 
