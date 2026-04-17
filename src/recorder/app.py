@@ -18,6 +18,7 @@ from .dialogs import (
     open_comment_dialog,
     open_session_metadata_dialog,
     open_settings_dialog,
+    open_wait_for_image_dialog,
 )
 from .recorder import RecorderEngine
 from .settings import SettingsStore
@@ -387,6 +388,9 @@ class RecorderApp:
         self.comment_button = ttk.Button(button_frame, text="添加 Comment", command=self.add_comment, state=tk.DISABLED)
         self.comment_button.pack(side=tk.LEFT, padx=(10, 0))
 
+        self.wait_button = ttk.Button(button_frame, text="添加等待图片", command=self.add_wait_for_image, state=tk.DISABLED)
+        self.wait_button.pack(side=tk.LEFT, padx=(10, 0))
+
         self.screenshot_button = ttk.Button(button_frame, text="记录截图", command=self.capture_manual_screenshot, state=tk.DISABLED)
         self.screenshot_button.pack(side=tk.LEFT, padx=(10, 0))
 
@@ -409,12 +413,13 @@ class RecorderApp:
         notes_text = (
             "1. 点击开始录制后，会先填写本次录制的 Session 元数据，再开始监听键盘、鼠标点击和滚轮事件。\n"
             "2. Comment 通过鼠标拖拽选择截图区域，再填写大文本说明。\n"
-            "3. 记录截图支持手动选区并保存到当前 Session 的 screenshots，可通过 Ctrl+F4 快捷键快速触发。\n"
-            "4. AI Checkpoint 支持两张截图、区域视频录制、Query 调模型并保存返回内容，也支持 Ctrl+F5 快捷键快速打开。\n"
-            "5. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
-            "6. 支持暂停/继续录制，以及导入已有 session 后继续录制。\n"
-            "7. 停止录制会在后台收尾，不再阻塞整个窗口。\n"
-            "8. Session 元数据在录制完成后也可以在 Session Viewer 中继续修改。"
+            "3. 等待图片支持框选等待区域并自动保存截图，当前第一版用于记录等待图片出现的步骤。\n"
+            "4. 记录截图支持手动选区并保存到当前 Session 的 screenshots，可通过 Ctrl+F4 快捷键快速触发。\n"
+            "5. AI Checkpoint 支持两张截图、区域视频录制、Query 调模型并保存返回内容，也支持 Ctrl+F5 快捷键快速打开。\n"
+            "6. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
+            "7. 支持暂停/继续录制，以及导入已有 session 后继续录制。\n"
+            "8. 停止录制会在后台收尾，不再阻塞整个窗口。\n"
+            "9. Session 元数据在录制完成后也可以在 Session Viewer 中继续修改。"
         )
         ttk.Label(notes_frame, text=notes_text, justify=tk.LEFT, wraplength=760).pack(anchor=tk.W, padx=12, pady=12)
 
@@ -550,6 +555,18 @@ class RecorderApp:
         finally:
             self.engine.resume()
             self.logger.info("Add comment dialog closed")
+
+    def add_wait_for_image(self) -> None:
+        if not self.engine.is_recording:
+            self.logger.info("Add wait-for-image ignored because recorder is not running")
+            return
+        self.logger.info("Add wait-for-image dialog opened")
+        self.engine.suspend()
+        try:
+            open_wait_for_image_dialog(self.root, self.engine)
+        finally:
+            self.engine.resume()
+            self.logger.info("Add wait-for-image dialog closed")
 
     def add_checkpoint(self) -> None:
         if not self.engine.is_recording:
@@ -812,6 +829,7 @@ class RecorderApp:
         self.pause_resume_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.pause_resume_button.configure(text="继续录制" if self.engine.is_paused else "暂停录制")
         self.comment_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
+        self.wait_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.screenshot_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.checkpoint_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
 

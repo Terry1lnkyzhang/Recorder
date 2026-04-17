@@ -1116,6 +1116,8 @@ class CommentDialog:
 
         self._build_ui()
         self.window.protocol("WM_DELETE_WINDOW", self._close)
+        self.window.bind("<Control-s>", lambda _event: self.save(), add="+")
+        self.window.bind("<Control-Return>", lambda _event: self.save(), add="+")
         self.window.lift()
         self.window.focus_force()
         self.window.after(0, self.capture_region)
@@ -1170,6 +1172,119 @@ class CommentDialog:
             return
 
         self.engine.add_comment_with_media(note, self.selection.image, self.selection.to_region_dict())
+        self._close()
+
+    def _close(self) -> None:
+        if not self._parent_was_iconic_on_open:
+            self.parent.deiconify()
+            self.parent.lift()
+        self.window.destroy()
+
+
+class WaitForImageDialog:
+    def __init__(self, parent: tk.Misc, engine: RecorderEngine) -> None:
+        self.parent = parent
+        self.engine = engine
+        self.selection = None
+        self._parent_was_iconic_on_open = self.parent.wm_state() == "iconic"
+
+        self.window = tk.Toplevel(parent)
+        self.window.title("添加等待图片")
+        self.window.geometry("900x720")
+        self.window.minsize(760, 620)
+        self.window.transient(parent)
+        self.window.grab_set()
+        self.timeout_seconds_var = tk.StringVar(value="120")
+
+        self._build_ui()
+        self.window.protocol("WM_DELETE_WINDOW", self._close)
+        self.window.bind("<Control-s>", lambda _event: self.save(), add="+")
+        self.window.bind("<Control-Return>", lambda _event: self.save(), add="+")
+        self.window.lift()
+        self.window.focus_force()
+        self.window.after(0, self.capture_region)
+
+    def _build_ui(self) -> None:
+        wrapper = ttk.Frame(self.window, padding=16)
+        wrapper.pack(fill=tk.BOTH, expand=True)
+        wrapper.columnconfigure(0, weight=1)
+        wrapper.rowconfigure(1, weight=3)
+        wrapper.rowconfigure(3, weight=2)
+
+        top = ttk.Frame(wrapper)
+        top.grid(row=0, column=0, sticky="ew")
+        top.columnconfigure(1, weight=1)
+        ttk.Button(top, text="选择等待区域", command=self.capture_region).pack(side=tk.LEFT)
+        self.selection_var = tk.StringVar(value="尚未选择区域")
+        ttk.Label(top, textvariable=self.selection_var, wraplength=560, justify=tk.LEFT).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12)
+
+        preview_frame = ttk.LabelFrame(wrapper, text="等待区域截图预览")
+        preview_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 12))
+        self.preview_view = ZoomableImageView(preview_frame, empty_text="请先选择等待区域")
+        self.preview_view.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+
+        form_frame = ttk.LabelFrame(wrapper, text="等待配置")
+        form_frame.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        form_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(form_frame, text="最大等待时间").grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 6))
+        timeout_input = ttk.Frame(form_frame)
+        timeout_input.grid(row=0, column=1, sticky="w", padx=12, pady=(12, 6))
+        ttk.Entry(timeout_input, textvariable=self.timeout_seconds_var, width=10).pack(side=tk.LEFT)
+        ttk.Label(timeout_input, text="秒").pack(side=tk.LEFT, padx=(6, 0))
+
+        ttk.Label(form_frame, text="等待说明").grid(row=1, column=0, sticky=tk.NW, padx=12, pady=(4, 12))
+        self.note_text = tk.Text(form_frame, height=5, wrap=tk.WORD, font=("Segoe UI", 11))
+        self.note_text.grid(row=1, column=1, sticky="nsew", padx=(12, 12), pady=(4, 12))
+        self.note_text.insert("1.0", "等待此区域中的目标图片出现")
+        form_frame.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            wrapper,
+            text="说明: 当前第一版仅记录等待图片步骤，会保存框选范围、截图和最大等待时间，用于后续人工审查或转换。",
+            wraplength=760,
+            justify=tk.LEFT,
+        ).grid(row=3, column=0, sticky="nw")
+
+        buttons = ttk.Frame(wrapper)
+        buttons.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(buttons, text="保存", command=self.save).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="取消", command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def capture_region(self) -> None:
+        self.selection = _select_region_with_window_management(
+            self.parent,
+            self.window,
+            "选择等待图片区域",
+            dialog_hide_mode="withdraw",
+            parent_restore_mode="keep_iconified",
+        )
+
+        if not self.selection:
+            return
+
+        region = self.selection.to_region_dict()
+        self.selection_var.set(f"区域: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})")
+        self.preview_view.set_image(self.selection.image)
+
+    def save(self) -> None:
+        note = self.note_text.get("1.0", tk.END).strip()
+        if not self.selection:
+            messagebox.showerror("保存失败", "请先选择等待区域。", parent=self.window)
+            return
+        if not note:
+            messagebox.showerror("保存失败", "请输入等待说明。", parent=self.window)
+            return
+        try:
+            timeout_seconds = int(self.timeout_seconds_var.get().strip())
+        except ValueError:
+            messagebox.showerror("保存失败", "最大等待时间必须是整数秒。", parent=self.window)
+            return
+        if timeout_seconds <= 0:
+            messagebox.showerror("保存失败", "最大等待时间必须大于 0 秒。", parent=self.window)
+            return
+
+        self.engine.add_wait_for_image_with_media(note, self.selection.image, self.selection.to_region_dict(), timeout_seconds=timeout_seconds)
         self._close()
 
     def _close(self) -> None:
@@ -1916,6 +2031,11 @@ def open_settings_dialog(parent: tk.Misc, settings_store: SettingsStore) -> None
 
 def open_comment_dialog(parent: tk.Misc, engine: RecorderEngine) -> None:
     dialog = CommentDialog(parent, engine)
+    parent.wait_window(dialog.window)
+
+
+def open_wait_for_image_dialog(parent: tk.Misc, engine: RecorderEngine) -> None:
+    dialog = WaitForImageDialog(parent, engine)
     parent.wait_window(dialog.window)
 
 

@@ -98,6 +98,20 @@ def _normalize_display_layout(raw_layout: dict[str, object] | None) -> dict[str,
 
 
 def _extract_event_focus_point(event: dict[str, object]) -> tuple[int, int] | None:
+    media = event.get("media", {})
+    if isinstance(media, list):
+        for item in media:
+            if not isinstance(item, dict):
+                continue
+            region = item.get("region")
+            if isinstance(region, dict):
+                left = region.get("left")
+                top = region.get("top")
+                width = region.get("width")
+                height = region.get("height")
+                if all(isinstance(value, int) for value in [left, top, width, height]):
+                    return int(left + width / 2), int(top + height / 2)
+
     additional = event.get("additional_details", {})
     if isinstance(additional, dict):
         region = additional.get("selection_region")
