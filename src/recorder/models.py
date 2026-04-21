@@ -1,7 +1,27 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+
+_VK_CODE_NAME_MAP = {
+    96: "0",
+    97: "1",
+    98: "2",
+    99: "3",
+    100: "4",
+    101: "5",
+    102: "6",
+    103: "7",
+    104: "8",
+    105: "9",
+    106: "*",
+    107: "+",
+    109: "-",
+    110: ".",
+    111: "/",
+}
 
 
 def normalize_recorded_action(value: Any) -> str | list[str]:
@@ -17,6 +37,21 @@ def format_recorded_action(value: Any, separator: str = " + ") -> str:
     return normalized.strip()
 
 
+def normalize_keyboard_key_name(value: Any) -> str:
+    key_name = str(value or "").strip()
+    if not key_name:
+        return ""
+    if key_name.startswith("Key."):
+        key_name = key_name.split(".", 1)[1]
+    match = re.fullmatch(r"<(\d+)>", key_name)
+    if match:
+        vk_code = int(match.group(1))
+        mapped = _VK_CODE_NAME_MAP.get(vk_code)
+        if mapped is not None:
+            return mapped
+    return key_name
+
+
 def normalize_event_type(value: Any, action: Any = "") -> str:
     event_type = str(value or "").strip()
     action_text = format_recorded_action(action).strip().lower()
@@ -24,6 +59,8 @@ def normalize_event_type(value: Any, action: Any = "") -> str:
 
     if action_text == "wait_for_image" or lowered == "wait":
         return "wait"
+    if lowered == "getscreenshot" or action_text in {"getscreenshot", "manual_screenshot"}:
+        return "getScreenshot"
     if lowered in {"key_press", "type_input", "input"}:
         return "input"
     if lowered == "comment" or action_text == "manual_comment":

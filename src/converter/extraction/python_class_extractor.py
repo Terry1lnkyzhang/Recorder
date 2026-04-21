@@ -40,7 +40,7 @@ class PythonClassMethodExtractor:
                     summary=summary or node.name,
                     description=docstring,
                     source_line=node.lineno,
-                    param_names=[arg.arg for arg in node.args.args if arg.arg != "self"],
+                    param_names=self._build_preview_param_names(node),
                     has_docstring=bool(docstring.strip()),
                     decorator_names=[_safe_unparse(item) for item in node.decorator_list if _safe_unparse(item)],
                     is_public=not node.name.startswith("_"),
@@ -126,19 +126,30 @@ class PythonClassMethodExtractor:
         )
 
     def _extract_parameters(self, node: ast.FunctionDef, args_doc: dict[str, _ParsedDocArg]) -> list[MethodParameter]:
-        positional_args = list(node.args.args)
+        positional_args = list(node.args.posonlyargs) + list(node.args.args)
+        filtered_positional_args = [arg for arg in positional_args if arg.arg != "self"]
         defaults = list(node.args.defaults)
-        default_offset = len(positional_args) - len(defaults)
+        default_offset = len(filtered_positional_args) - len(defaults)
         default_map: dict[str, Any] = {}
-        for index, arg in enumerate(positional_args):
+        for index, arg in enumerate(filtered_positional_args):
             if index >= default_offset:
                 default_node = defaults[index - default_offset]
                 default_map[arg.arg] = _safe_literal(default_node)
 
-        parameters: list[MethodParameter] = []
-        for arg in positional_args:
+        kw_defaults = list(node.args.kw_defaults)
+        kw_default_map: dict[str, Any] = {}
+        kw_required_map: dict[str, bool] = {}
+        for arg, default_node in zip(node.args.kwonlyargs, kw_defaults):
             if arg.arg == "self":
                 continue
+            if default_node is None:
+                kw_required_map[arg.arg] = True
+            else:
+                kw_required_map[arg.arg] = False
+                kw_default_map[arg.arg] = _safe_literal(default_node)
+
+        parameters: list[MethodParameter] = []
+        for arg in filtered_positional_args:
             annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
             parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
             schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
@@ -152,7 +163,68 @@ class PythonClassMethodExtractor:
                     schema_fields=schema_fields,
                 )
             )
+
+        for arg in node.args.kwonlyargs:
+            if arg.arg == "self":
+                continue
+            annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
+            parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
+            parameters.append(
+                MethodParameter(
+                    name=arg.arg,
+                    type=parsed_arg.declared_type or annotation,
+                    required=kw_required_map.get(arg.arg, True),
+                    description=parsed_arg.description,
+                    default=kw_default_map.get(arg.arg),
+                    schema_fields=schema_fields,
+                )
+            )
+
+        if node.args.vararg is not None and node.args.vararg.arg != "self":
+            arg = node.args.vararg
+            annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
+            parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
+            parameters.append(
+                MethodParameter(
+                    name=f"*{arg.arg}",
+                    type=parsed_arg.declared_type or f"*{annotation}",
+                    required=False,
+                    description=parsed_arg.description,
+                    schema_fields=schema_fields,
+                )
+            )
+
+        if node.args.kwarg is not None and node.args.kwarg.arg != "self":
+            arg = node.args.kwarg
+            annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
+            parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
+            parameters.append(
+                MethodParameter(
+                    name=f"**{arg.arg}",
+                    type=parsed_arg.declared_type or f"**{annotation}",
+                    required=False,
+                    description=parsed_arg.description,
+                    schema_fields=schema_fields,
+                )
+            )
         return parameters
+
+    def _build_preview_param_names(self, node: ast.FunctionDef) -> list[str]:
+        names: list[str] = []
+        for arg in [*node.args.posonlyargs, *node.args.args]:
+            if arg.arg != "self":
+                names.append(arg.arg)
+        if node.args.vararg is not None and node.args.vararg.arg != "self":
+            names.append(f"*{node.args.vararg.arg}")
+        for arg in node.args.kwonlyargs:
+            if arg.arg != "self":
+                names.append(arg.arg)
+        if node.args.kwarg is not None and node.args.kwarg.arg != "self":
+            names.append(f"**{node.args.kwarg.arg}")
+        return names
 
 
 def extract_method_registry_from_python_class(
@@ -258,35 +330,58 @@ def _parse_args_section(lines: list[str]) -> dict[str, _ParsedDocArg]:
 
 def _parse_nested_schema_fields(lines: list[str]) -> list[ParameterSchemaField]:
     fields: list[ParameterSchemaField] = []
-    current: ParameterSchemaField | None = None
+    current_fields: list[ParameterSchemaField] = []
+
+    def flush_current() -> None:
+        nonlocal current_fields
+        if current_fields:
+            fields.extend(current_fields)
+            current_fields = []
+
     for raw_line in lines:
         stripped = raw_line.strip()
         if not stripped:
             continue
         if stripped.lower().startswith(("supported keys:", "common keys include:", "common keys:", "options:")):
             continue
-        match = re.match(r"^[-*]\s*([A-Za-z_][\w]*)\s*(?:\(([^)]+)\))?\s*:\s*(.*)$", stripped)
+        match = re.match(r"^[-*]\s*(.+?)\s*(?:\(([^)]+)\))?\s*:\s*(.*)$", stripped)
         if match:
-            if current is not None:
-                fields.append(current)
+            flush_current()
             parsed_type, required = _parse_field_type(match.group(2) or "")
-            current = ParameterSchemaField(
-                name=match.group(1),
-                type=parsed_type,
-                description=match.group(3).strip(),
-                required=required,
-            )
+            field_names = _split_schema_field_names(match.group(1))
+            if not field_names:
+                continue
+            current_fields = [
+                ParameterSchemaField(
+                    name=field_name,
+                    type=parsed_type,
+                    description=match.group(3).strip(),
+                    required=required,
+                )
+                for field_name in field_names
+            ]
             continue
-        if current is not None and stripped.lower().startswith("example:"):
+        if current_fields and stripped.lower().startswith("example:"):
             example_text = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
-            current.example = example_text
-            current.description = f"{current.description} Example: {example_text}".strip()
+            for current in current_fields:
+                current.example = example_text
+                current.description = f"{current.description} Example: {example_text}".strip()
             continue
-        if current is not None:
-            current.description = f"{current.description} {stripped}".strip()
-    if current is not None:
-        fields.append(current)
+        if stripped.endswith(":"):
+            flush_current()
+            continue
+        if current_fields:
+            for current in current_fields:
+                current.description = f"{current.description} {stripped}".strip()
+    flush_current()
     return fields
+
+
+def _split_schema_field_names(raw_name: str) -> list[str]:
+    cleaned = raw_name.replace("`", " ").replace("'", " ").replace('"', " ")
+    parts = re.split(r"\s*/\s*|\s*,\s*", cleaned)
+    names = [re.sub(r"\s+", " ", part).strip() for part in parts]
+    return [name for name in names if name]
 
 
 def _parse_field_type(raw_type: str) -> tuple[str, bool]:

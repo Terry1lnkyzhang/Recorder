@@ -21,41 +21,43 @@ from .dialogs import (
     open_wait_for_image_dialog,
 )
 from .recorder import RecorderEngine
-from .settings import SettingsStore
+from .settings import Settings, SettingsStore
 from src.viewer.window import open_viewer_window
 
 
 class DesignStepsOverlay:
-    def __init__(self, parent: tk.Misc) -> None:
+    def __init__(self, parent: tk.Misc, settings: Settings) -> None:
         self.parent = parent
         self._expanded_size = (520, 220)
         self._all_steps_size = (520, 360)
-        self._collapsed_size = (420, 44)
+        self._collapsed_size = (520, 44)
         self._collapsed = False
         self._show_all_steps = False
+        self._enabled = True
         self._manual_position: tuple[int, int] | None = None
         self._drag_offset = (0, 0)
         self._steps: list[str] = []
         self._current_step_index = 0
+        self._base_bg = "#d7caa3"
+        self._header_bg = "#efe4bd"
+        self._body_bg = "#fffaf0"
+        self._text_fg = "#2f2a1f"
+        self._muted_fg = "#7a6c4d"
         self.window = tk.Toplevel(parent)
         self.window.withdraw()
         self.window.overrideredirect(True)
         self.window.attributes("-topmost", True)
         try:
-            self.window.attributes("-alpha", 0.88)
-        except tk.TclError:
-            pass
-        try:
             self.window.wm_attributes("-toolwindow", True)
         except tk.TclError:
             pass
-        self.window.configure(bg="#d7caa3")
+        self.window.configure(bg=self._base_bg)
 
-        outer = tk.Frame(self.window, bg="#d7caa3", bd=1, relief=tk.SOLID)
+        outer = tk.Frame(self.window, bg=self._base_bg, bd=1, relief=tk.SOLID)
         outer.pack(fill=tk.BOTH, expand=True)
         self.outer = outer
 
-        header = tk.Frame(outer, bg="#efe4bd", height=36)
+        header = tk.Frame(outer, bg=self._header_bg, height=36)
         header.pack(fill=tk.X)
         header.pack_propagate(False)
         self.header = header
@@ -63,8 +65,8 @@ class DesignStepsOverlay:
         title = tk.Label(
             header,
             text="Design Steps",
-            bg="#efe4bd",
-            fg="#2f2a1f",
+            bg=self._header_bg,
+            fg=self._text_fg,
             font=("Segoe UI", 11, "bold"),
             anchor=tk.W,
             padx=12,
@@ -72,14 +74,30 @@ class DesignStepsOverlay:
         title.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.title_label = title
 
+        self.close_button = tk.Button(
+            header,
+            text="x",
+            command=self.hide,
+            bg=self._header_bg,
+            fg=self._text_fg,
+            activebackground=self._header_bg,
+            activeforeground=self._text_fg,
+            relief=tk.FLAT,
+            borderwidth=0,
+            font=("Segoe UI", 10, "bold"),
+            width=3,
+            cursor="hand2",
+        )
+        self.close_button.pack(side=tk.RIGHT, padx=(0, 4), pady=4)
+
         self.toggle_button = tk.Button(
             header,
             text="－",
             command=self.toggle_collapsed,
-            bg="#efe4bd",
-            fg="#2f2a1f",
-            activebackground="#e5d8aa",
-            activeforeground="#2f2a1f",
+            bg=self._header_bg,
+            fg=self._text_fg,
+            activebackground=self._header_bg,
+            activeforeground=self._text_fg,
             relief=tk.FLAT,
             borderwidth=0,
             font=("Segoe UI", 11, "bold"),
@@ -92,10 +110,10 @@ class DesignStepsOverlay:
             header,
             text="All Steps",
             command=self.toggle_steps_mode,
-            bg="#efe4bd",
-            fg="#2f2a1f",
-            activebackground="#e5d8aa",
-            activeforeground="#2f2a1f",
+            bg=self._header_bg,
+            fg=self._text_fg,
+            activebackground=self._header_bg,
+            activeforeground=self._text_fg,
             relief=tk.FLAT,
             borderwidth=0,
             font=("Segoe UI", 9, "bold"),
@@ -108,7 +126,7 @@ class DesignStepsOverlay:
             widget.bind("<ButtonPress-1>", self._start_drag, add="+")
             widget.bind("<B1-Motion>", self._drag_window, add="+")
 
-        body = tk.Frame(outer, bg="#fffaf0")
+        body = tk.Frame(outer, bg=self._body_bg)
         body.pack(fill=tk.BOTH, expand=True)
         self.body = body
         body.columnconfigure(1, weight=1)
@@ -117,10 +135,10 @@ class DesignStepsOverlay:
             body,
             text="◀",
             command=self.show_previous_step,
-            bg="#fffaf0",
-            fg="#2f2a1f",
-            activebackground="#f2ead8",
-            activeforeground="#2f2a1f",
+            bg=self._body_bg,
+            fg=self._text_fg,
+            activebackground=self._body_bg,
+            activeforeground=self._text_fg,
             relief=tk.FLAT,
             borderwidth=0,
             font=("Segoe UI", 16, "bold"),
@@ -129,7 +147,7 @@ class DesignStepsOverlay:
         )
         self.previous_button.grid(row=0, column=0, sticky="ns", padx=(8, 0), pady=8)
 
-        content = tk.Frame(body, bg="#fffaf0")
+        content = tk.Frame(body, bg=self._body_bg)
         content.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
         content.columnconfigure(0, weight=1)
         content.rowconfigure(1, weight=1)
@@ -141,8 +159,8 @@ class DesignStepsOverlay:
         self.step_index_label = tk.Label(
             content,
             textvariable=self.step_index_var,
-            bg="#fffaf0",
-            fg="#7a6c4d",
+            bg=self._body_bg,
+            fg=self._muted_fg,
             font=("Segoe UI", 9, "bold"),
             anchor=tk.CENTER,
         )
@@ -151,8 +169,8 @@ class DesignStepsOverlay:
         self.step_message = tk.Message(
             content,
             textvariable=self.step_text_var,
-            bg="#fffaf0",
-            fg="#2f2a1f",
+            bg=self._body_bg,
+            fg=self._text_fg,
             font=("Segoe UI", 11),
             width=360,
             justify=tk.LEFT,
@@ -166,10 +184,10 @@ class DesignStepsOverlay:
             body,
             text="▶",
             command=self.show_next_step,
-            bg="#fffaf0",
-            fg="#2f2a1f",
-            activebackground="#f2ead8",
-            activeforeground="#2f2a1f",
+            bg=self._body_bg,
+            fg=self._text_fg,
+            activebackground=self._body_bg,
+            activeforeground=self._text_fg,
             relief=tk.FLAT,
             borderwidth=0,
             font=("Segoe UI", 16, "bold"),
@@ -177,8 +195,50 @@ class DesignStepsOverlay:
             cursor="hand2",
         )
         self.next_button.grid(row=0, column=2, sticky="ns", padx=(0, 8), pady=8)
+        self.apply_settings(settings)
+
+    def apply_settings(self, settings: Settings) -> None:
+        self._enabled = bool(settings.show_design_steps_overlay)
+        width = max(320, int(settings.design_steps_overlay_width or 520))
+        height = max(160, int(settings.design_steps_overlay_height or 220))
+        self._expanded_size = (width, height)
+        self._all_steps_size = (width, max(height + 140, int(height * 1.6)))
+        self._collapsed_size = (width, 44)
+        self.step_message.configure(width=max(220, width - 160))
+
+        self._base_bg = settings.design_steps_overlay_bg_color or "#d7caa3"
+        self._header_bg = self._adjust_color(self._base_bg, 0.12)
+        self._body_bg = self._adjust_color(self._base_bg, 0.28)
+        self._text_fg = "#2f2a1f"
+        self._muted_fg = "#7a6c4d"
+
+        try:
+            self.window.attributes("-alpha", max(0.1, min(1.0, float(settings.design_steps_overlay_opacity))))
+        except tk.TclError:
+            pass
+
+        self.window.configure(bg=self._base_bg)
+        self.outer.configure(bg=self._base_bg)
+        self.header.configure(bg=self._header_bg)
+        self.title_label.configure(bg=self._header_bg, fg=self._text_fg)
+        self.close_button.configure(bg=self._header_bg, fg=self._text_fg, activebackground=self._header_bg, activeforeground=self._text_fg)
+        self.toggle_button.configure(bg=self._header_bg, fg=self._text_fg, activebackground=self._header_bg, activeforeground=self._text_fg)
+        self.mode_button.configure(bg=self._header_bg, fg=self._text_fg, activebackground=self._header_bg, activeforeground=self._text_fg)
+        self.body.configure(bg=self._body_bg)
+        self.content_frame.configure(bg=self._body_bg)
+        self.step_index_label.configure(bg=self._body_bg, fg=self._muted_fg)
+        self.step_message.configure(bg=self._body_bg, fg=self._text_fg)
+        self.previous_button.configure(bg=self._body_bg, fg=self._text_fg, activebackground=self._body_bg, activeforeground=self._text_fg)
+        self.next_button.configure(bg=self._body_bg, fg=self._text_fg, activebackground=self._body_bg, activeforeground=self._text_fg)
+
+        if not self._enabled:
+            self.hide()
+        elif self.window.winfo_viewable():
+            self._position_window()
 
     def show(self, design_steps: str) -> None:
+        if not self._enabled:
+            return
         self._steps = self._split_design_steps(design_steps)
         self._current_step_index = 0
         self._render_current_step()
@@ -310,6 +370,15 @@ class DesignStepsOverlay:
             y = margin_y
         self.window.geometry(f"{width}x{height}+{x}+{y}")
 
+    @staticmethod
+    def _adjust_color(color: str, amount: float) -> str:
+        color = color.strip().lstrip("#")
+        if len(color) != 6:
+            return "#d7caa3"
+        channels = [int(color[index:index + 2], 16) for index in range(0, 6, 2)]
+        adjusted = [min(255, max(0, int(channel + (255 - channel) * amount))) for channel in channels]
+        return f"#{adjusted[0]:02x}{adjusted[1]:02x}{adjusted[2]:02x}"
+
 
 class RecorderApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -340,7 +409,8 @@ class RecorderApp:
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
         self._manual_screenshot_in_progress = False
-        self.design_steps_overlay = DesignStepsOverlay(self.root)
+        self.current_settings = self.settings_store.load()
+        self.design_steps_overlay = DesignStepsOverlay(self.root, self.current_settings)
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._handle_root_close)
@@ -633,8 +703,15 @@ class RecorderApp:
     def open_settings(self) -> None:
         self.logger.info("Open settings requested")
         open_settings_dialog(self.root, self.settings_store)
+        self.current_settings = self.settings_store.load()
+        self.design_steps_overlay.apply_settings(self.current_settings)
         self.engine.reload_capture_filters()
         if self.engine.is_recording:
+            metadata = self.engine.store.data.metadata if self.engine.store.data else None
+            if self.current_settings.show_design_steps_overlay and metadata is not None:
+                self._show_design_steps_overlay(metadata.design_steps)
+            elif not self.current_settings.show_design_steps_overlay:
+                self._hide_design_steps_overlay()
             self._set_status("已更新录制排除规则")
         self.logger.info("Settings dialog closed")
 

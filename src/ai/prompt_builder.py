@@ -14,7 +14,7 @@ def build_step_observation_prompt() -> str:
             "你只能基于截图和红色框选区域判断，不要假设还能看到历史步骤、结构化事件数据或其他上下文。",
             "请针对每一步输出 5 个字段：control_type、label、relative_position、need_scroll、is_table。不要输出其他字段。",
             "红框就是当前操作目标区域。control_type 表示红框对应控件的类型，例如 button、editbox、combobox、checkbox、radiobutton、tab、menuitem、table、row、cell、list、listitem、dialog、panel；无法确定时可用 unknown。",
-            "label 表示红框目标控件自身的文字标签，或与该控件最直接对应的字段标签。对于 combobox 和 editbox，label 不应取控件内部当前显示的值或输入内容，而应优先取距离最近、最直接对应的字段标签。必须准确使用截图原文，不要猜测、改写、翻译、缩写或替换成其他近似词；没有明确 label 时返回空字符串。",
+            "label 表示红框目标控件自身的文字标签，或与该控件最直接对应的字段标签。对于 combobox 和 editbox，label 不应取控件内部当前显示的值或输入内容，而应优先取最直接对应的字段标签。必须准确使用截图原文，不要猜测、改写、翻译、缩写或替换成其他近似词；没有明确 label 时返回空字符串。",
             "relative_position 只能是 self、up、down、left、right 之一，表示目标控件位于 label 的哪个方向。例如控件在 label 右边时返回 right，在 label 左边时返回 left，在 label 上方时返回 up，在 label 下方时返回 down；若 label 就在目标控件自身上，则返回 self。",
             "若按钮、复选框、单选框、tab、菜单项等控件自身已带明确 label，则 label 直接写该控件文字，relative_position 必须为 self，不要再借用附近字段标签。",
             "need_scroll 只能是 true 或 false。只要从截图中可以判断，红框目标控件所属的容器支持通过滚动来调整显示内容，例如位于可滚动列表、表格、滚动面板或下拉项区域中，就返回 true；否则返回 false。",
@@ -258,8 +258,8 @@ def _resolve_primary_image(session_dir: Path, event: dict[str, object]) -> str |
 def _should_send_event_to_observation(event: dict[str, object]) -> bool:
     event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip().lower()
     action = format_recorded_action(event.get("action", "")).strip().lower()
-    if event_type in {"comment", "checkpoint"}:
+    if event_type in {"comment", "checkpoint", "getscreenshot"}:
         return False
-    if event_type == "wait" or action in {"manual_comment", "ai_checkpoint"}:
+    if event_type == "wait" or action in {"manual_comment", "ai_checkpoint", "getscreenshot", "manual_screenshot"}:
         return False
     return True

@@ -8,7 +8,7 @@ from tkinter import filedialog, messagebox, ttk
 from ..extraction import ExposureFilterConfig, PythonClassMethodExtractor, apply_exposure_filters
 from ..pipeline import build_retrieval_preview_from_files
 from ..registry.loader import load_method_registry
-from ..registry.models import MethodRegistry, MethodRegistryEntry
+from ..registry.models import MethodParameter, MethodRegistry, MethodRegistryEntry
 
 
 class ConverterRegistryWindow:
@@ -674,7 +674,21 @@ class ConverterRegistryWindow:
             messagebox.showinfo("提示", "请先在方法预览中选择一个方法。", parent=self.window)
             return
         self.manual_metadata_overrides[method_name] = self._collect_metadata_from_editor()
-        self.status_var.set(f"已保存方法元数据: {method_name}")
+        wrote_registry = False
+        if self.loaded_methods_registry:
+            entry = next((item for item in self.loaded_methods_registry.entries if item.name == method_name), None)
+            if entry is not None:
+                self._apply_manual_metadata_to_registry([entry])
+                try:
+                    self._write_loaded_methods_registry()
+                except Exception as exc:
+                    messagebox.showerror("写回失败", str(exc), parent=self.window)
+                    return
+                wrote_registry = True
+        if wrote_registry:
+            self.status_var.set(f"已保存方法元数据并写回 registry: {method_name}")
+        else:
+            self.status_var.set(f"已保存方法元数据: {method_name}")
         self.show_selected_method_details(None)
 
     def clear_selected_method_metadata(self) -> None:
@@ -867,40 +881,37 @@ class ConverterRegistryWindow:
             return
         source_path = self._get_source_path()
         class_name = self.class_name_var.get().strip()
-        method_name = self.selected_registry_entry_var.get().strip()
-        if not source_path or not class_name or not method_name:
+        target_entry_name = self.selected_registry_entry_var.get().strip()
+        source_method_name = self._get_active_method_name() or target_entry_name
+        if not source_path or not class_name or not target_entry_name:
             messagebox.showinfo("提示", "请先选择 Python 文件、类名和现有 entry 名称。", parent=self.window)
             return
-        active_method_name = self._get_active_method_name()
-        if active_method_name:
-            self.manual_metadata_overrides[active_method_name] = self._collect_metadata_from_editor()
-        existing_entry = next((item for item in self.loaded_methods_registry.entries if item.name == method_name), None)
+        if source_method_name:
+            self.manual_metadata_overrides[source_method_name] = self._collect_metadata_from_editor()
+        existing_entry = next((item for item in self.loaded_methods_registry.entries if item.name == target_entry_name), None)
         if not existing_entry:
-            messagebox.showerror("更新失败", f"现有 registry 中未找到 entry: {method_name}", parent=self.window)
+            messagebox.showerror("更新失败", f"现有 registry 中未找到 entry: {target_entry_name}", parent=self.window)
             return
         try:
-            extracted_registry = self.extractor.extract_method_registry(
-                source_path=source_path,
-                class_name=class_name,
-                registry_name=self.loaded_methods_registry.metadata.name,
-                description=self.loaded_methods_registry.metadata.description,
-                filter_config=self._build_filter_config(),
-                manual_overrides={**self.manual_overrides, method_name: True},
-            )
+            updated_entry = self._extract_method_entry_from_source(source_path, class_name, source_method_name)
         except Exception as exc:
             messagebox.showerror("更新失败", str(exc), parent=self.window)
             return
-        updated_entry = next((item for item in extracted_registry.entries if item.name == method_name), None)
-        if not updated_entry:
-            messagebox.showerror("更新失败", f"在源码类 {class_name} 中未找到可提取的方法: {method_name}", parent=self.window)
-            return
         preserved_metadata = self._entry_to_metadata_dict(existing_entry)
-        if method_name in self.manual_metadata_overrides:
-            preserved_metadata = self._get_method_metadata(method_name)
-        self.manual_metadata_overrides[method_name] = preserved_metadata
+        if source_method_name in self.manual_metadata_overrides:
+            preserved_metadata = self._get_method_metadata(source_method_name)
+        self.manual_metadata_overrides[target_entry_name] = preserved_metadata
+        updated_entry.name = target_entry_name
+        updated_entry.exposed_keyword = existing_entry.exposed_keyword or updated_entry.exposed_keyword
+        if target_entry_name != source_method_name:
+            updated_entry.source = {
+                **updated_entry.source,
+                "method": source_method_name,
+            }
+        updated_entry.parameters = self._merge_method_parameters(existing_entry, updated_entry)
         self._apply_manual_metadata_to_registry([updated_entry])
         for index, entry in enumerate(self.loaded_methods_registry.entries):
-            if entry.name == method_name:
+            if entry.name == target_entry_name:
                 self.loaded_methods_registry.entries[index] = updated_entry
                 break
         try:
@@ -908,9 +919,12 @@ class ConverterRegistryWindow:
         except Exception as exc:
             messagebox.showerror("更新失败", str(exc), parent=self.window)
             return
-        self._load_selected_method_metadata(method_name)
-        self._show_registry_entry_details(method_name)
-        self.status_var.set(f"已更新现有 registry entry: {method_name}")
+        self._load_selected_method_metadata(target_entry_name)
+        self._show_registry_entry_details(target_entry_name)
+        if target_entry_name == source_method_name:
+            self.status_var.set(f"已更新现有 registry entry: {target_entry_name}")
+        else:
+            self.status_var.set(f"已更新现有 registry entry: {target_entry_name} <- {source_method_name}")
 
     def delete_selected_registry_entry(self) -> None:
         if not self.loaded_methods_registry:
@@ -963,6 +977,27 @@ class ConverterRegistryWindow:
             "when_to_use": list(entry.when_to_use),
             "when_not_to_use": list(entry.when_not_to_use),
         }
+
+    def _merge_method_parameters(self, existing_entry: MethodRegistryEntry, updated_entry: MethodRegistryEntry) -> list[MethodParameter]:
+        existing_by_name = {item.name: item for item in existing_entry.parameters}
+        merged: list[MethodParameter] = []
+        for parameter in updated_entry.parameters:
+            existing = existing_by_name.get(parameter.name)
+            if existing is None:
+                merged.append(parameter)
+                continue
+            merged.append(
+                MethodParameter(
+                    name=parameter.name,
+                    type=parameter.type or existing.type,
+                    required=parameter.required,
+                    description=parameter.description or existing.description,
+                    default=parameter.default if parameter.default is not None else existing.default,
+                    example=parameter.example if parameter.example is not None else existing.example,
+                    schema_fields=parameter.schema_fields or list(existing.schema_fields),
+                )
+            )
+        return merged
 
     def _show_registry_entry_details(self, method_name: str) -> None:
         if not self.loaded_methods_registry:

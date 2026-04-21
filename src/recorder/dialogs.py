@@ -740,6 +740,11 @@ class SettingsDialog:
         self.remote_ai_service_url_var = tk.StringVar(value=self.settings.remote_ai_service_url)
         self.remote_ai_service_api_key_var = tk.StringVar(value=self.settings.remote_ai_service_api_key)
         self.remote_ai_service_timeout_var = tk.StringVar(value=str(self.settings.remote_ai_service_timeout_seconds))
+        self.show_design_steps_overlay_var = tk.BooleanVar(value=self.settings.show_design_steps_overlay)
+        self.design_steps_overlay_width_var = tk.StringVar(value=str(self.settings.design_steps_overlay_width))
+        self.design_steps_overlay_height_var = tk.StringVar(value=str(self.settings.design_steps_overlay_height))
+        self.design_steps_overlay_bg_color_var = tk.StringVar(value=self.settings.design_steps_overlay_bg_color)
+        self.design_steps_overlay_opacity_var = tk.StringVar(value=str(self.settings.design_steps_overlay_opacity))
         self.connection_status_var = tk.StringVar(value="AI 连接状态: 未检测")
         self.prompt_db_connection_var = tk.StringVar(value=self.settings.prompt_db_connection_string)
         self.checkpoint_prompt_table_var = tk.StringVar(value=self.settings.checkpoint_prompt_table)
@@ -906,6 +911,30 @@ class SettingsDialog:
             justify=tk.LEFT,
         ).grid(row=len(database_rows), column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
+        overlay_frame = ttk.LabelFrame(parent, text="Design Steps 悬浮窗", padding=12)
+        overlay_frame.pack(fill=tk.X, pady=(12, 0))
+        overlay_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            overlay_frame,
+            text="录制时显示 Design Steps 悬浮窗",
+            variable=self.show_design_steps_overlay_var,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        overlay_rows = [
+            ("宽度", self.design_steps_overlay_width_var),
+            ("高度", self.design_steps_overlay_height_var),
+            ("背景色", self.design_steps_overlay_bg_color_var),
+            ("透明度(0-1)", self.design_steps_overlay_opacity_var),
+        ]
+        for row_index, (label, variable) in enumerate(overlay_rows, start=1):
+            ttk.Label(overlay_frame, text=label).grid(row=row_index, column=0, sticky=tk.W, pady=6)
+            ttk.Entry(overlay_frame, textvariable=variable).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(
+            overlay_frame,
+            text="背景色支持 #RRGGBB；宽高为像素；透明度范围为 0 到 1。",
+            wraplength=820,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
         exclusion_frame = ttk.LabelFrame(parent, text="录制排除规则", padding=12)
         exclusion_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         ttk.Checkbutton(
@@ -1006,6 +1035,11 @@ class SettingsDialog:
                 remote_ai_service_url=self.remote_ai_service_url_var.get().strip(),
                 remote_ai_service_api_key=self.remote_ai_service_api_key_var.get().strip(),
                 remote_ai_service_timeout_seconds=int(self.remote_ai_service_timeout_var.get().strip()),
+                show_design_steps_overlay=self.show_design_steps_overlay_var.get(),
+                design_steps_overlay_width=int(self.design_steps_overlay_width_var.get().strip()),
+                design_steps_overlay_height=int(self.design_steps_overlay_height_var.get().strip()),
+                design_steps_overlay_bg_color=self.design_steps_overlay_bg_color_var.get().strip(),
+                design_steps_overlay_opacity=float(self.design_steps_overlay_opacity_var.get().strip()),
                 prompt_db_connection_string=self.prompt_db_connection_var.get().strip(),
                 checkpoint_prompt_table=self.checkpoint_prompt_table_var.get().strip() or "agentprompt",
                 checkpoint_prompt_key_column=self.checkpoint_prompt_key_column_var.get().strip(),
@@ -1015,6 +1049,13 @@ class SettingsDialog:
             SettingsStore.parse_extra_headers(settings.extra_headers_json)
             SettingsStore.parse_pattern_list(settings.excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_window_keywords)
+            if settings.design_steps_overlay_width < 320:
+                raise ValueError("Design Steps 悬浮窗宽度不能小于 320")
+            if settings.design_steps_overlay_height < 160:
+                raise ValueError("Design Steps 悬浮窗高度不能小于 160")
+            if not 0.1 <= settings.design_steps_overlay_opacity <= 1.0:
+                raise ValueError("Design Steps 悬浮窗透明度必须在 0.1 到 1 之间")
+            self.window.winfo_rgb(settings.design_steps_overlay_bg_color)
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc), parent=self.window)
             return
@@ -1454,7 +1495,7 @@ class AICheckpointDialog:
         form = ttk.Frame(wrapper)
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="标题").grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text="期望结果").grid(row=0, column=0, sticky=tk.W, pady=6)
         ttk.Entry(form, textvariable=self.title_var).grid(row=0, column=1, sticky=tk.EW, pady=6)
 
         controls = ttk.Frame(wrapper)
@@ -2148,7 +2189,7 @@ def capture_manual_screenshot(parent: tk.Misc, engine: RecorderEngine, prompt: s
     if not selection:
         return None
 
-    relative_path = engine.save_manual_image(selection.image, "manual")
+    relative_path = engine.add_manual_screenshot_with_media(selection.image, selection.to_region_dict())
     if not relative_path:
         messagebox.showerror("保存失败", "截图保存失败。", parent=parent)
         return None

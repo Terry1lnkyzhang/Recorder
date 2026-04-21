@@ -25,7 +25,7 @@ from src.common.media_utils import load_video_preview_frame
 from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
 from src.converter.compiler import export_suggestions_to_atframework_yaml
 from src.recorder.dialogs import AICheckpointDraft, open_ai_checkpoint_dialog, open_ai_checkpoint_editor_dialog, open_comment_dialog
-from src.recorder.models import format_recorded_action, normalize_event_type
+from src.recorder.models import format_recorded_action, normalize_event_type, normalize_keyboard_key_name
 from src.recorder.recorder import RecorderEngine
 from src.recorder.settings import SettingsStore
 from src.recorder.system_info import safe_relpath
@@ -52,6 +52,8 @@ class RecorderViewerWindow:
         self._tree_reload_after_id: str | None = None
         self._pending_tree_rows: list[tuple[int, dict[str, object]]] = []
         self._tree_batch_size = 200
+        self._pending_tree_selection: list[int] = []
+        self._pending_tree_focus: int | None = None
         self.event_list_window: tk.Toplevel | None = None
         self.event_list_tree: ttk.Treeview | None = None
         self.event_list_status_var: tk.StringVar | None = None
@@ -79,6 +81,7 @@ class RecorderViewerWindow:
         self.analysis_running = False
         self.coverage_query_running = False
         self.parameter_recommendation_running = False
+        self.suggestion_generation_running = False
         self.analysis_started_at = 0.0
         self.analysis_status_base = "未执行 AI 分析"
         self.analysis_status_token = 0
@@ -146,6 +149,8 @@ class RecorderViewerWindow:
         self.load_ai_button.pack(side=tk.LEFT, padx=(8, 0))
         self.cancel_ai_button = ttk.Button(toolbar, text="终止AI分析", command=self.cancel_ai_analysis, state=tk.DISABLED)
         self.cancel_ai_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.generate_suggestion_button = ttk.Button(toolbar, text="生成方法建议", command=self.run_method_suggestion_generation)
+        self.generate_suggestion_button.pack(side=tk.LEFT, padx=(8, 0))
         self.parameter_recommend_button = ttk.Button(toolbar, text="为当前步骤生成参数推荐", command=self.run_parameter_recommendation)
         self.parameter_recommend_button.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text="转成ATFramework YAML", command=self.export_atframework_yaml).pack(side=tk.LEFT, padx=(8, 0))
@@ -1353,6 +1358,7 @@ class RecorderViewerWindow:
         self.ai_step_texts = self._build_ai_step_texts(analysis)
         self.ai_var.set(f"已加载历史 AI 分析结果 | {self._build_ai_summary_text(analysis)}")
         self._try_load_historical_suggestions()
+        self._refresh_ai_panels()
         self._refresh_selected_suggestion_panel()
         self._refresh_coverage_summary()
         self._reload_tree()
@@ -1363,6 +1369,8 @@ class RecorderViewerWindow:
 
     def _reload_tree(self) -> None:
         self._cancel_tree_reload()
+        self._pending_tree_selection = self._get_selected_row_indexes()
+        self._pending_tree_focus = self._get_primary_selected_row_index()
         for item_id in self.tree.get_children():
             self.tree.delete(item_id)
 
@@ -1419,10 +1427,21 @@ class RecorderViewerWindow:
                 self.load_status_var.set(f"大 Session 模式: 已加载 {total} 条事件")
             else:
                 self.load_status_var.set("")
-            visible_indexes = self._visible_row_indexes()
-            if visible_indexes and self.tree.exists(str(visible_indexes[0])):
-                self.tree.selection_set(str(visible_indexes[0]))
+            preferred_selection = [row_index for row_index in self._pending_tree_selection if self.tree.exists(str(row_index))]
+            if preferred_selection:
+                preferred_ids = [str(row_index) for row_index in preferred_selection]
+                self.tree.selection_set(preferred_ids)
+                focus_index = self._pending_tree_focus if self._pending_tree_focus in preferred_selection else preferred_selection[0]
+                self.tree.focus(str(focus_index))
+                self.tree.see(str(focus_index))
                 self.on_select_event(None)
+            else:
+                visible_indexes = self._visible_row_indexes()
+                if visible_indexes and self.tree.exists(str(visible_indexes[0])):
+                    self.tree.selection_set(str(visible_indexes[0]))
+                    self.on_select_event(None)
+            self._pending_tree_selection = []
+            self._pending_tree_focus = None
             return
 
         self._tree_reload_after_id = self.window.after(1, lambda: self._load_next_tree_batch(inserted_count))
@@ -1573,15 +1592,16 @@ class RecorderViewerWindow:
         self.step_parameter_summaries = {}
         self._clear_parameter_chat_history()
         self.ai_var.set("AI 分析结果已过期，请重新执行 AI 分析")
-        self.suggestion_var.set("调用建议结果已过期，请重新执行 AI 分析或重新生成建议")
+        self.suggestion_var.set("调用建议结果已过期，请点击“生成方法建议”，或重新应用清洗自动生成")
         self.parameter_progress_var.set("参数推荐批处理结果已过期，请重新生成")
-        self.parameter_status_var.set("参数推荐结果已过期，请重新执行 AI 分析或重新生成建议")
+        self.parameter_status_var.set("参数推荐结果已过期，请先重新生成方法建议；如需参数推荐也要重新执行 AI 分析")
         self._set_text_widget(self.parameter_result_text, "")
         self._refresh_coverage_summary()
         self._persist_session()
         self.cleaning_var.set(f"已应用 {len(self.cleaning_suggestions)} 条清洗建议")
         self.cleaning_suggestions = []
         self._reload_tree()
+        self._generate_method_suggestions_async(status_message="数据清洗完成，正在生成方法建议...")
 
     def clear_cleaning_highlight(self) -> None:
         for item_id in self.tree.get_children():
@@ -1592,6 +1612,9 @@ class RecorderViewerWindow:
 
     def run_ai_analysis(self) -> None:
         self._start_ai_analysis()
+
+    def run_method_suggestion_generation(self) -> None:
+        self._generate_method_suggestions_async(status_message="正在生成方法建议...", interactive=True)
 
     def run_selected_ai_analysis(self) -> None:
         if not self.session_dir or not self.session_data:
@@ -1799,6 +1822,7 @@ class RecorderViewerWindow:
         self.ai_var.set(f"已完成选中 {len(selected_rows)} 行 AI 分析 | {self._build_ai_summary_text(merged_analysis)}")
         self._invalidate_suggestion_outputs(message="局部 AI 分析已更新，调用建议需重新全量生成")
         self._refresh_coverage_summary()
+        self._refresh_ai_panels()
         self._refresh_selected_suggestion_panel()
         self._reload_tree()
         messagebox.showinfo("AI 分析完成", f"已更新所选 {len(selected_rows)} 行的 AI 建议。", parent=self.window)
@@ -1866,10 +1890,6 @@ class RecorderViewerWindow:
         merged["wait_suggestions"] = sorted(
             merged["wait_suggestions"],
             key=lambda item: int(item.get("step_id", 0) or 0),
-        )
-
-        merged["analysis_notes"].append(
-            f"局部刷新步骤: {', '.join(str(step_id) for step_id in sorted(selected_step_ids))}"
         )
         merged["analysis_notes"] = self._deduplicate_texts(merged["analysis_notes"])
         return merged
@@ -2753,7 +2773,10 @@ class RecorderViewerWindow:
     def _find_step_analysis_batch(self, step_id: int) -> dict[str, object] | None:
         if not self.ai_analysis:
             return None
-        for item in self.ai_analysis.get("batches", []):
+        batches = self.ai_analysis.get("batches", [])
+        if not isinstance(batches, list):
+            return None
+        for item in reversed(batches):
             if not isinstance(item, dict):
                 continue
             batch_id = str(item.get("batch_id", ""))
@@ -3135,9 +3158,9 @@ class RecorderViewerWindow:
         self.step_parameter_summaries = {}
         self._clear_parameter_chat_history()
         self.ai_var.set("AI 分析结果已过期，请重新执行 AI 分析")
-        self.suggestion_var.set("调用建议结果已过期，请重新执行 AI 分析或重新生成建议")
+        self.suggestion_var.set("调用建议结果已过期，请点击“生成方法建议”，或重新应用清洗自动生成")
         self.parameter_progress_var.set("参数推荐批处理结果已过期，请重新生成")
-        self.parameter_status_var.set("参数推荐结果已过期，请重新执行 AI 分析或重新生成建议")
+        self.parameter_status_var.set("参数推荐结果已过期，请先重新生成方法建议；如需参数推荐也要重新执行 AI 分析")
         self._set_text_widget(self.parameter_result_text, "")
         suggestion_path = self.session_dir / "conversion_suggestions.json" if self.session_dir else None
         if suggestion_path and suggestion_path.exists():
@@ -3209,6 +3232,26 @@ class RecorderViewerWindow:
             observation = self._clean_sentence(str(item.get("observation", "")))
             if observation:
                 texts[step_id - 1] = observation
+
+        step_insights = analysis.get("step_insights", [])
+        if isinstance(step_insights, list):
+            for item in step_insights:
+                if not isinstance(item, dict):
+                    continue
+                step_id = item.get("step_id")
+                if not isinstance(step_id, int) or step_id < 1:
+                    continue
+                if step_id - 1 in texts:
+                    continue
+                description = self._clean_sentence(str(item.get("description", "")))
+                conclusion = self._clean_sentence(str(item.get("conclusion", "")))
+                display_text = description
+                if description and conclusion:
+                    display_text = f"{description}；{conclusion}"
+                elif not display_text:
+                    display_text = conclusion
+                if display_text:
+                    texts[step_id - 1] = display_text
         return texts
 
     def _extract_analysis_step_observations(self, analysis: dict[str, object]) -> list[dict[str, object]]:
@@ -3282,7 +3325,7 @@ class RecorderViewerWindow:
     def _build_initial_suggestion_status_text(self, session_dir: Path) -> str:
         suggestion_path = session_dir / "conversion_suggestions.json"
         if suggestion_path.exists():
-            return "检测到历史调用建议结果，可在加载 AI 结果后直接使用。"
+            return "检测到历史调用建议结果，可直接使用，也可点击“生成方法建议”重新生成。"
         return "未生成调用建议"
 
     def _on_ai_analysis_success(self, analysis: dict[str, object]) -> None:
@@ -3297,15 +3340,13 @@ class RecorderViewerWindow:
         self.ai_step_tags = self._build_ai_step_tags(analysis)
         self.ai_step_texts = self._build_ai_step_texts(analysis)
         self.ai_var.set(self._build_ai_summary_text(analysis))
-        self.suggestion_var.set("AI 分析完成，正在生成调用建议...")
-        self.parameter_progress_var.set("等待调用建议生成完成后再执行参数推荐")
-        self.parameter_status_var.set("请等待调用建议生成完成。")
+        self.parameter_progress_var.set("参数推荐批处理未执行")
+        self.parameter_status_var.set("如需最新方法建议，可点击“生成方法建议”；应用清洗后也会自动生成。")
         self._set_text_widget(self.parameter_result_text, "")
         self.step_parameter_summaries = {}
         self._clear_parameter_chat_history()
         self._refresh_coverage_summary()
         self._reload_tree()
-        self._generate_method_suggestions_async(analysis)
         messagebox.showinfo("AI 分析完成", "已输出 ai_analysis.json 和 ai_analysis.yaml，并更新 viewer 高亮。", parent=self.window)
 
     def _on_ai_analysis_failed(self, message: str) -> None:
@@ -3708,42 +3749,35 @@ class RecorderViewerWindow:
         self.suggestion_var.set(self._build_suggestion_summary_text(result))
         self._refresh_selected_suggestion_panel()
 
-    def _generate_method_suggestions_async(self, analysis: dict[str, object]) -> None:
+    def _generate_method_suggestions_async(self, status_message: str | None = None, interactive: bool = False) -> None:
+        if self.suggestion_generation_running:
+            if interactive:
+                messagebox.showinfo("提示", "方法建议正在生成中，请稍候。", parent=self.window)
+            return
         if not self.session_dir or not self.session_data:
             self.suggestion_var.set("未生成调用建议")
+            if interactive:
+                messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
             return
         registry_paths = self._resolve_suggestion_registry_paths()
         if not registry_paths:
             self.suggestion_var.set("未找到可用 registry，跳过调用建议生成")
+            if interactive:
+                messagebox.showerror("生成失败", "未找到可用 registry。", parent=self.window)
             return
-        methods_path, scripts_path = registry_paths
-        ai_analysis_path = self.session_dir / "ai_analysis.json"
-        session_path = self.session_dir / "session.json"
+        methods_path, _scripts_path = registry_paths
+        self.suggestion_generation_running = True
+        self.generate_suggestion_button.configure(state=tk.DISABLED)
+        if status_message:
+            self.suggestion_var.set(status_message)
 
         def worker() -> None:
             try:
-                settings = self.settings_store.load()
-                if settings.use_remote_ai_service:
-                    result = RemoteAIServiceClient(settings).build_method_suggestions(
-                        session_dir=self.session_dir,
-                        session_data=self.session_data,
-                        ai_analysis_path=ai_analysis_path,
-                        session_path=session_path if session_path.exists() else None,
-                        methods_registry_path=methods_path,
-                        scripts_registry_path=scripts_path,
-                        top_k_methods=3,
-                        top_k_scripts=2,
-                    )
-                else:
-                    result = self.suggestion_service.build_method_selection_from_files(
-                        session_id=str(self.session_data.get("session_id", self.session_dir.name)),
-                        ai_analysis_path=ai_analysis_path,
-                        session_path=session_path if session_path.exists() else None,
-                        methods_registry_path=methods_path,
-                        scripts_registry_path=scripts_path,
-                        top_k_methods=3,
-                        top_k_scripts=2,
-                    )
+                result = self.suggestion_service.build_method_selection_from_session_data(
+                    session_id=str(self.session_data.get("session_id", self.session_dir.name)),
+                    session_data=self.session_data,
+                    methods_registry_path=methods_path,
+                )
                 self.suggestion_service.write_result_file(self.session_dir / "conversion_suggestions.json", result)
             except Exception as exc:
                 message = str(exc)
@@ -3754,6 +3788,8 @@ class RecorderViewerWindow:
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_suggestion_generation_success(self, result) -> None:
+        self.suggestion_generation_running = False
+        self.generate_suggestion_button.configure(state=tk.NORMAL)
         self.suggestion_result = result
         self.step_method_suggestions = self._build_method_suggestion_map(result)
         self.step_module_suggestions = self._build_module_suggestion_map(result)
@@ -3763,6 +3799,8 @@ class RecorderViewerWindow:
         self._reload_tree()
 
     def _on_suggestion_generation_failed(self, message: str) -> None:
+        self.suggestion_generation_running = False
+        self.generate_suggestion_button.configure(state=tk.NORMAL)
         self.suggestion_result = None
         self.step_method_suggestions = {}
         self.step_module_suggestions = {}
@@ -4165,6 +4203,8 @@ class RecorderViewerWindow:
                 if isinstance(sequence, list) and sequence:
                     return f"输入序列：{' '.join(str(item) for item in sequence)}"
             return "输入文本"
+        if event_type == "getScreenshot":
+            return "记录截图"
         if event_type == "comment":
             return f"添加 Comment：“{note}”" if note else "添加 Comment"
         if event_type == "checkpoint":
@@ -4281,8 +4321,7 @@ class RecorderViewerWindow:
     def _clean_key_name(self, key_name: str) -> str:
         if not key_name:
             return ""
-        if key_name.startswith("Key."):
-            key_name = key_name.split(".", 1)[1]
+        key_name = normalize_keyboard_key_name(key_name)
         mapping = {
             "enter": "Enter",
             "tab": "Tab",

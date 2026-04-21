@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import json
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,10 @@ from typing import Any
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.errors import AIClientError
 from src.converter.pipeline.method_candidates import build_retrieval_preview_from_files
+from src.converter.registry.loader import load_method_registry
+from src.converter.retrieval.models import SemanticStep
+from src.converter.retrieval.scoring import score_method_candidate
+from src.recorder.models import normalize_event_type
 
 from .method_selection import build_method_selection_result
 from .models import MethodSelectionSuggestion, SuggestionGenerationResult
@@ -52,6 +57,65 @@ class AISuggestionService:
             top_k_scripts=top_k_scripts,
         )
         return build_method_selection_result(session_id=session_id, retrieval_preview=preview)
+
+    def build_method_selection_from_session_data(
+        self,
+        session_id: str,
+        session_data: dict[str, Any],
+        methods_registry_path: Path,
+    ) -> SuggestionGenerationResult:
+        events = session_data.get("events", []) if isinstance(session_data.get("events", []), list) else []
+        registry = load_method_registry(methods_registry_path)
+        suggestions: list[MethodSelectionSuggestion] = []
+
+        for index, event in enumerate(events, start=1):
+            if not isinstance(event, dict):
+                continue
+            step = SemanticStep(
+                step_id=index,
+                description="",
+                conclusion="",
+                raw_text="",
+                tags=[],
+                window_title="",
+                control_type="",
+                event_type=normalize_event_type(event.get("event_type", ""), event.get("action", "")),
+                context={"event": event},
+            )
+            top_entry = None
+            top_score = 0.0
+            top_reason = ""
+            for entry in registry.entries:
+                score, reason = score_method_candidate(step, entry)
+                if score > top_score:
+                    top_entry = entry
+                    top_score = score
+                    top_reason = reason
+
+            suggestions.append(
+                MethodSelectionSuggestion(
+                    step_id=index,
+                    method_name=top_entry.name if top_entry else "",
+                    score=top_score,
+                    confidence=1.0 if top_entry else 0.0,
+                    reason=top_reason,
+                    step_description="",
+                    step_conclusion="",
+                    method_summary=top_entry.summary if top_entry else "",
+                    script_name="",
+                    script_summary="",
+                    candidate_payload=asdict(top_entry) if top_entry else {},
+                )
+            )
+
+        return SuggestionGenerationResult(
+            session_id=session_id,
+            suggestions=suggestions,
+            notes=[
+                "方法建议来源于清洗后事件。",
+                "当前规则仅按 event_type 匹配 methods registry aliases。",
+            ],
+        )
 
     def build_parameter_prompt_for_step_from_files(
         self,

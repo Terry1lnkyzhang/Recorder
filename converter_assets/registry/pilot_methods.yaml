@@ -44,7 +44,8 @@ entries:
   - button
   - label
   - text
-  aliases: []
+  aliases:
+  - controlOperation
   parameters:
   - name: uiControl
     type: auto.Control
@@ -125,6 +126,7 @@ entries:
   - 'Turn on a checkbox near a located row:'
   - '``{"Name": "Enable Feature", "cellValue": "on", "controlTypeList": ["CheckBoxControl"]}``'
   exposed_keyword: FindControlByName
+  domain: Action
 - name: SendKeys
   summary: Simulates sending keyboard input, including complex sequences.
   description: 'This method can operate in two modes: sending a rich text string with
@@ -135,7 +137,10 @@ entries:
     class: ControlAction
     method: SendKeys
     line: '622'
-  aliases: []
+  tags:
+  - type_input
+  aliases:
+  - input
   parameters:
   - name: uiControl
     type: auto.Control
@@ -208,6 +213,7 @@ entries:
     Ctrl.'
   - '`{''text'': ''{{}Hello{}}''}`: Sends the literal string "{Hello}".'
   exposed_keyword: SendKeys
+  domain: Action
 - name: MouseAction
   summary: Executes a normalized mouse action with optional modifier keys.
   description: 'This method provides a single entry point for mouse interactions over
@@ -231,7 +237,8 @@ entries:
   - wheel
   - scoll
   - drag
-  aliases: []
+  aliases:
+  - mouseAction
   parameters:
   - name: uiControl
     type: auto.Control
@@ -373,25 +380,22 @@ entries:
   returns: True when the mouse action is executed, otherwise False.
   examples: []
   exposed_keyword: MouseAction
+  domain: Action
 - name: AgentInterface
   summary: Runs an AI-only Agent flow.
-  description: '<<<<<<< HEAD
+  description: 'When `query` is provided, this method upgrades the step into an AI-assisted
+    vision check. It accepts one or more input images (`image` / `imageList`), or
+    captures a screenshot from `rect`. If neither image nor region is provided but
+    `uiControl` is available, the control bounding rectangle is captured automatically.
 
-    When `query` is provided, this method performs an AI-assisted vision check or
+    When `returnValue=True`, the AI call switches from judge mode to value-extraction
+    mode. In this mode the model is guided to return a single structured value, and
+    `returnValueType` controls the local conversion target (for example: `str`, `int`,
+    `float`, `bool`, `json`). The extracted value is returned by this method when
+    successful.
 
-    value extraction. It accepts one or more input images (`image` / `imageList` /
-
-    `images`), or captures a screenshot from `rect` / `area`. If neither image nor
-
-    region is provided but `uiControl` is available, the control bounding rectangle
-
-    is captured automatically.
-
-    If `returnValue` is enabled, the method returns the extracted result directly.
-
-    Otherwise, it writes the AI judgment back into `paramDict`, marks the report
-
-    status source as `agent`, and continues with Agent-specific report handling.'
+    If `query` is not provided, the method keeps the legacy behavior: it copies `Expect`
+    into the actual result field and sets `compareResult` to the sentinel value `''null''`.'
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
     class: ControlCheck
@@ -402,7 +406,159 @@ entries:
   - check
   - checkpoint
   - AICheckpoint
-  aliases: []
+  aliases:
+  - checkpoint
+  - AICheckpoint
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: A placeholder for interface consistency; this parameter is ignored.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: 'A dictionary of parameters. It should contain:'
+    default: null
+    example: null
+    schema_fields:
+    - name: query
+      type: str
+      description: AI vision prompt that describes what needs to be checked.
+      required: false
+      default: null
+      example: null
+    - name: returnValue
+      type: bool
+      description: If True, treat the prompt as a value-extraction task instead of
+        a judge task. Defaults to False.
+      required: false
+      default: null
+      example: null
+    - name: returnValueType
+      type: str
+      description: Target type for extracted value. Supported values include `str`,
+        `int`, `float`, `bool`, `json`.
+      required: false
+      default: null
+      example: null
+    - name: image
+      type: string
+      description: One or multiple image paths, or PIL images.
+      required: false
+      default: null
+      example: null
+    - name: imageList
+      type: string
+      description: One or multiple image paths, or PIL images.
+      required: false
+      default: null
+      example: null
+    - name: rect
+      type: string
+      description: Screen capture region `[left, top, right, bottom]`.
+      required: false
+      default: null
+      example: null
+  returns: 'Any | None: Returns the extracted value in value-extraction mode; otherwise
+    returns None after writing report-related fields back into `paramDict`.'
+  examples: []
+  exposed_keyword: AgentInterface
+- name: WaitForExists
+  summary: Waits for a target control or image to appear, while interacting with other
+    controls.
+  description: 'This complex method waits for a primary target (`waitControlKey` or
+
+    `sourcePath`) to exist. While waiting, it can repeatedly click a list
+
+    of secondary controls (`keyList`), which is useful for dismissing pop-ups
+
+    or keeping a session alive.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: WaitForExists
+    line: '3202'
+  tags:
+  - wait
+  aliases:
+  - wait
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: The primary UI control context.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of parameters for the wait operation.
+    default: null
+    example: null
+    schema_fields:
+    - name: keyList
+      type: list[str]
+      description: A list of control keys or image paths to click repeatedly during
+        the wait.
+      required: true
+      default: null
+      example: null
+    - name: waitControlKey
+      type: str
+      description: The key of the primary control to wait for.
+      required: true
+      default: null
+      example: null
+    - name: sourcePath
+      type: str or list
+      description: An image path (or list of paths) to wait for using pattern matching.
+      required: true
+      default: null
+      example: null
+    - name: exist
+      type: bool
+      description: If True (default), waits for the target to appear. If False, waits
+        for it to disappear.
+      required: true
+      default: null
+      example: null
+    - name: timeout
+      type: float
+      description: The maximum time in seconds to wait.
+      required: true
+      default: null
+      example: null
+    - name: interval
+      type: float
+      description: The delay between checks.
+      required: true
+      default: null
+      example: null
+  returns: True if the target is found (or disappears, if `exist=False`) within the
+    timeout, otherwise False.
+  examples: []
+  exposed_keyword: WaitForExists
+  domain: Check
+- name: ManualCheck
+  summary: Marks a step as requiring manual (human) verification.
+  description: 'This method now keeps only the legacy manual-check behavior. AI-only
+    operations
+
+    should use `AgentInterface()` instead.'
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlCheck.py
+    class: ControlCheck
+    method: ManualCheck
+    line: '2530'
+  tags:
+  - comment
+  aliases:
+  - comment
+  - comments
   parameters:
   - name: uiControl
     type: auto.Control
@@ -418,7 +574,53 @@ entries:
     default: null
     example: null
     schema_fields: []
-  returns: 'Any | None: Returns the extracted value in value-extraction mode; otherwise
-    returns None after writing report-related fields back into `paramDict`.'
+  returns: None
   examples: []
-  exposed_keyword: AgentInterface
+  exposed_keyword: ManualCheck
+  domain: Check
+- name: GetScreenShot
+  summary: Captures a screenshot of the entire screen or a specified region.
+  description: This method saves a screenshot as a PNG file. The screenshot can be
+    of the full screen, a specific rectangular area, or the area of a given UI control.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: GetScreenShot
+    line: '4405'
+  aliases:
+  - getScreenshot
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: true
+    description: A UI control object. If 'rect' is not provided, this control's bounding
+      rectangle will be used as the capture area.
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of parameters for the screenshot.
+    default: null
+    example: null
+    schema_fields:
+    - name: filePath
+      type: str
+      description: Target save path. When only a file name is provided, the image
+        is saved under `ConfigManager().resultDirectory`.
+      required: true
+      default: null
+      example: null
+    - name: rect
+      type: list[int]
+      description: A list of four integers [left, top, right, bottom] defining the
+        region to capture. If provided, this takes precedence over the uiControl's
+        area. If not provided, the full screen is captured unless a valid uiControl
+        is passed.
+      required: false
+      default: null
+      example: null
+  returns: The captured screenshot as a PIL Image object.
+  examples: []
+  exposed_keyword: GetScreenShot

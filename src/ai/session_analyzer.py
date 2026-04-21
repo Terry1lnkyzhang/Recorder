@@ -156,7 +156,7 @@ class SessionWorkflowAnalyzer:
                     raise AIClientError(
                         f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
                     ) from exc
-            current_step_observations = _normalize_step_observations(observation_parsed, observation_step_ids)
+            current_step_observations = _normalize_step_observations(observation_parsed, observation_step_ids, batch_events)
             if not current_step_observations:
                 current_step_observations = _build_fallback_step_observations(batch_events, observation_step_ids)
             if not current_step_observations:
@@ -564,7 +564,11 @@ def _normalize_invalid_steps(parsed: dict[str, object]) -> list[dict[str, object
     return [item for item in values if isinstance(item, dict)]
 
 
-def _normalize_step_observations(parsed: dict[str, object], step_ids: list[int]) -> list[dict[str, object]]:
+def _normalize_step_observations(
+    parsed: dict[str, object],
+    step_ids: list[int],
+    batch_events: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
     values = parsed.get("step_observations", []) if isinstance(parsed, dict) else []
     if not isinstance(values, list) or not values:
         values = parsed.get("step_insights", []) if isinstance(parsed, dict) else []
@@ -574,20 +578,26 @@ def _normalize_step_observations(parsed: dict[str, object], step_ids: list[int])
     for offset, item in enumerate(values[: len(step_ids)]):
         if not isinstance(item, dict):
             continue
+        event = batch_events[offset] if isinstance(batch_events, list) and offset < len(batch_events) and isinstance(batch_events[offset], dict) else {}
         control_type = str(item.get("control_type", "")).strip()
         label = str(item.get("label", "")).strip()
         relative_position = _normalize_relative_position(item.get("relative_position"))
         need_scroll = _normalize_optional_bool(item.get("need_scroll"))
         is_table = _normalize_optional_bool(item.get("is_table"))
+        override_label, override_control_type = _pick_ai_analysis_override_fields(event)
+        if override_label:
+            label = override_label
+            relative_position = "self"
+            if override_control_type:
+                control_type = override_control_type
         observation = str(item.get("observation", item.get("description", ""))).strip()
-        if not observation:
-            observation = _build_observation_text(
-                control_type=control_type,
-                label=label,
-                relative_position=relative_position,
-                need_scroll=need_scroll,
-                is_table=is_table,
-            )
+        observation = _build_observation_text(
+            control_type=control_type,
+            label=label,
+            relative_position=relative_position,
+            need_scroll=need_scroll,
+            is_table=is_table,
+        )
         if not observation:
             continue
         normalized_item = {
@@ -700,22 +710,146 @@ def _infer_is_table_from_batch_event(event: dict[str, object]) -> bool:
 
 
 def _pick_ui_element_label(ui_element: dict[str, object]) -> str:
-    name = str(ui_element.get("name", "")).strip()
-    if name:
-        return name
+    help_text = str(ui_element.get("help_text", "")).strip()
+    if _is_meaningful_ui_label(help_text):
+        return help_text
+
+    help_text_fallback = str(ui_element.get("help_text_fallback", "")).strip()
+    if _is_meaningful_ui_label(help_text_fallback):
+        return help_text_fallback
 
     name_fallbacks = ui_element.get("name_fallbacks", [])
     if isinstance(name_fallbacks, list):
         for item in name_fallbacks:
             text = str(item).strip()
-            if text:
+            if _is_meaningful_ui_label(text):
                 return text
 
-    help_text = str(ui_element.get("help_text", "")).strip()
-    if help_text:
-        return help_text
+    name = str(ui_element.get("name", "")).strip()
+    return name if _is_meaningful_ui_label(name) else ""
 
-    return str(ui_element.get("help_text_fallback", "")).strip()
+
+def _pick_ai_analysis_override_fields(event: dict[str, object]) -> tuple[str, str]:
+    ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
+    label = _pick_ui_element_label(ui_element)
+    control_type = str(ui_element.get("control_type", "")).strip()
+    return label, control_type
+
+
+def _is_meaningful_ui_label(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+
+    if len(text) == 1 and not text.isalnum() and not _contains_cjk(text):
+        return False
+
+    if all(not char.isalnum() and not _contains_cjk(char) for char in text):
+        return False
+
+    if len(text) >= 32 and _looks_like_noisy_technical_label(text):
+        return False
+
+    return True
+
+
+def _looks_like_noisy_technical_label(text: str) -> bool:
+    if _contains_embedded_technical_descriptor(text):
+        return True
+
+    if _looks_like_namespace_identifier(text):
+        return True
+
+    if _looks_like_internal_key(text):
+        return True
+
+    if _looks_like_guid_or_identifier(text):
+        return True
+
+    separator_count = sum(text.count(separator) for separator in [".", "_", "-", "/", "\\", ":"])
+    if separator_count < 2:
+        return False
+
+    if " " in text or _contains_cjk(text):
+        return False
+
+    alnum_count = sum(1 for char in text if char.isalnum())
+    if not alnum_count:
+        return True
+
+    punctuation_ratio = 1 - (alnum_count / max(len(text), 1))
+    return punctuation_ratio >= 0.18
+
+
+def _looks_like_namespace_identifier(text: str) -> bool:
+    if " " in text or _contains_cjk(text):
+        return False
+
+    parts = [part for part in text.split(".") if part]
+    if len(parts) < 2:
+        return False
+
+    if not all(part.replace("_", "").isalnum() for part in parts):
+        return False
+
+    if max(len(part) for part in parts) < 6:
+        return False
+
+    capitalized_parts = sum(1 for part in parts if part[:1].isupper())
+    if len(parts) >= 3:
+        return capitalized_parts >= 2
+    return capitalized_parts >= 2 and len(text) >= 16
+
+
+def _looks_like_internal_key(text: str) -> bool:
+    if " " in text or _contains_cjk(text):
+        return False
+
+    for separator in ["_", "-"]:
+        parts = [part for part in text.split(separator) if part]
+        if len(parts) < 3:
+            continue
+        if not all(part.isalnum() for part in parts):
+            continue
+        if len(text) >= 24:
+            return True
+    return False
+
+
+def _contains_embedded_technical_descriptor(text: str) -> bool:
+    normalized = text.strip()
+    if not normalized or _contains_cjk(normalized):
+        return False
+
+    if re.search(r"\bColumn\s+Display\s+Index\s*:", normalized, flags=re.IGNORECASE):
+        return True
+
+    technical_match = re.search(r"\b(?:[A-Z][A-Za-z0-9_]*\.){2,}[A-Z][A-Za-z0-9_]*\b", normalized)
+    if technical_match:
+        return True
+
+    if re.search(r"\bItem\s*:\s*(?:[A-Z][A-Za-z0-9_]*\.){2,}[A-Z][A-Za-z0-9_]*\b", normalized, flags=re.IGNORECASE):
+        return True
+
+    return False
+
+
+def _looks_like_guid_or_identifier(text: str) -> bool:
+    guid_pattern = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    if re.fullmatch(guid_pattern, text):
+        return True
+
+    if " " in text or _contains_cjk(text):
+        return False
+
+    if len(text) >= 32 and text.isalnum() and not any(char.islower() for char in text):
+        return True
+
+    return False
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
 
 
 def _build_observation_text(

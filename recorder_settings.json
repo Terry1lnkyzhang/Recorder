@@ -19,5 +19,10 @@
   "checkpoint_prompt_table": "agentprompt",
   "checkpoint_prompt_key_column": "PromptTemplate",
   "checkpoint_prompt_label_column": "PromptTemplate",
-  "checkpoint_prompt_content_column": "PromptContent"
+  "checkpoint_prompt_content_column": "PromptContent",
+  "show_design_steps_overlay": true,
+  "design_steps_overlay_width": 520,
+  "design_steps_overlay_height": 220,
+  "design_steps_overlay_bg_color": "#d7caa3",
+  "design_steps_overlay_opacity": 0.88
 }
