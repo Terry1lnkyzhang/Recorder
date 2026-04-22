@@ -810,11 +810,17 @@ class SettingsDialog:
         self.send_video_directly_var = tk.BooleanVar(value=self.settings.send_video_directly)
         self.analysis_batch_size_var = tk.StringVar(value=str(self.settings.analysis_batch_size))
         self.send_fullscreen_var = tk.BooleanVar(value=self.settings.send_fullscreen_screenshots)
+        self.ai_observation_excluded_process_var = tk.StringVar(value=self.settings.ai_observation_excluded_process_names)
         self.exclude_recorder_windows_var = tk.BooleanVar(value=self.settings.exclude_recorder_process_windows)
         self.use_remote_ai_service_var = tk.BooleanVar(value=self.settings.use_remote_ai_service)
         self.remote_ai_service_url_var = tk.StringVar(value=self.settings.remote_ai_service_url)
         self.remote_ai_service_api_key_var = tk.StringVar(value=self.settings.remote_ai_service_api_key)
         self.remote_ai_service_timeout_var = tk.StringVar(value=str(self.settings.remote_ai_service_timeout_seconds))
+        self.show_design_steps_overlay_var = tk.BooleanVar(value=self.settings.show_design_steps_overlay)
+        self.design_steps_overlay_width_var = tk.StringVar(value=str(self.settings.design_steps_overlay_width))
+        self.design_steps_overlay_height_var = tk.StringVar(value=str(self.settings.design_steps_overlay_height))
+        self.design_steps_overlay_bg_color_var = tk.StringVar(value=self.settings.design_steps_overlay_bg_color)
+        self.design_steps_overlay_opacity_var = tk.StringVar(value=str(self.settings.design_steps_overlay_opacity))
         self.connection_status_var = tk.StringVar(value="AI 连接状态: 未检测")
         self.prompt_db_connection_var = tk.StringVar(value=self.settings.prompt_db_connection_string)
         self.checkpoint_prompt_table_var = tk.StringVar(value=self.settings.checkpoint_prompt_table)
@@ -934,6 +940,18 @@ class SettingsDialog:
             wraplength=860,
         ).pack(anchor=tk.W, pady=(8, 0))
 
+        observation_filter_frame = ttk.LabelFrame(parent, text="AI看图发送过滤", padding=12)
+        observation_filter_frame.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(
+            observation_filter_frame,
+            text="以下进程名命中时，对应步骤截图不会发送给 AI看图。每行一个，默认排除 explorer 和 msedge。",
+            wraplength=820,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+        self.ai_observation_excluded_process_text = tk.Text(observation_filter_frame, height=4, wrap=tk.WORD, font=("Consolas", 10))
+        self.ai_observation_excluded_process_text.pack(fill=tk.X, pady=(8, 0))
+        _set_text(self.ai_observation_excluded_process_text, self.settings.ai_observation_excluded_process_names)
+
         remote_service_frame = ttk.LabelFrame(parent, text="远端共享 AI 服务", padding=12)
         remote_service_frame.pack(fill=tk.X, pady=(12, 0))
         remote_service_frame.columnconfigure(1, weight=1)
@@ -980,6 +998,30 @@ class SettingsDialog:
             wraplength=820,
             justify=tk.LEFT,
         ).grid(row=len(database_rows), column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
+        overlay_frame = ttk.LabelFrame(parent, text="Design Steps 悬浮窗", padding=12)
+        overlay_frame.pack(fill=tk.X, pady=(12, 0))
+        overlay_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            overlay_frame,
+            text="录制时显示 Design Steps 悬浮窗",
+            variable=self.show_design_steps_overlay_var,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        overlay_rows = [
+            ("宽度", self.design_steps_overlay_width_var),
+            ("高度", self.design_steps_overlay_height_var),
+            ("背景色", self.design_steps_overlay_bg_color_var),
+            ("透明度(0-1)", self.design_steps_overlay_opacity_var),
+        ]
+        for row_index, (label, variable) in enumerate(overlay_rows, start=1):
+            ttk.Label(overlay_frame, text=label).grid(row=row_index, column=0, sticky=tk.W, pady=6)
+            ttk.Entry(overlay_frame, textvariable=variable).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(
+            overlay_frame,
+            text="背景色支持 #RRGGBB；宽高为像素；透明度范围为 0 到 1。",
+            wraplength=820,
+            justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
         exclusion_frame = ttk.LabelFrame(parent, text="录制排除规则", padding=12)
         exclusion_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
@@ -1074,6 +1116,7 @@ class SettingsDialog:
                 send_video_directly=self.send_video_directly_var.get(),
                 analysis_batch_size=int(self.analysis_batch_size_var.get().strip()),
                 send_fullscreen_screenshots=self.send_fullscreen_var.get(),
+                ai_observation_excluded_process_names=self.ai_observation_excluded_process_text.get("1.0", tk.END).strip(),
                 exclude_recorder_process_windows=self.exclude_recorder_windows_var.get(),
                 excluded_process_names=self.excluded_process_text.get("1.0", tk.END).strip(),
                 excluded_window_keywords=self.excluded_window_text.get("1.0", tk.END).strip(),
@@ -1081,6 +1124,11 @@ class SettingsDialog:
                 remote_ai_service_url=self.remote_ai_service_url_var.get().strip(),
                 remote_ai_service_api_key=self.remote_ai_service_api_key_var.get().strip(),
                 remote_ai_service_timeout_seconds=int(self.remote_ai_service_timeout_var.get().strip()),
+                show_design_steps_overlay=self.show_design_steps_overlay_var.get(),
+                design_steps_overlay_width=int(self.design_steps_overlay_width_var.get().strip()),
+                design_steps_overlay_height=int(self.design_steps_overlay_height_var.get().strip()),
+                design_steps_overlay_bg_color=self.design_steps_overlay_bg_color_var.get().strip(),
+                design_steps_overlay_opacity=float(self.design_steps_overlay_opacity_var.get().strip()),
                 prompt_db_connection_string=self.prompt_db_connection_var.get().strip(),
                 checkpoint_prompt_table=self.checkpoint_prompt_table_var.get().strip() or "agentprompt",
                 checkpoint_prompt_key_column=self.checkpoint_prompt_key_column_var.get().strip(),
@@ -1088,8 +1136,16 @@ class SettingsDialog:
                 checkpoint_prompt_content_column=self.checkpoint_prompt_content_column_var.get().strip() or "PromptContent",
             )
             SettingsStore.parse_extra_headers(settings.extra_headers_json)
+            SettingsStore.parse_pattern_list(settings.ai_observation_excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_window_keywords)
+            if settings.design_steps_overlay_width < 320:
+                raise ValueError("Design Steps 悬浮窗宽度不能小于 320")
+            if settings.design_steps_overlay_height < 160:
+                raise ValueError("Design Steps 悬浮窗高度不能小于 160")
+            if not 0.1 <= settings.design_steps_overlay_opacity <= 1.0:
+                raise ValueError("Design Steps 悬浮窗透明度必须在 0.1 到 1 之间")
+            self.window.winfo_rgb(settings.design_steps_overlay_bg_color)
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc), parent=self.window)
             return
@@ -1208,6 +1264,7 @@ class SettingsDialog:
             send_video_directly=self.send_video_directly_var.get(),
             analysis_batch_size=int(self.analysis_batch_size_var.get().strip()),
             send_fullscreen_screenshots=self.send_fullscreen_var.get(),
+            ai_observation_excluded_process_names=self.ai_observation_excluded_process_text.get("1.0", tk.END).strip(),
             exclude_recorder_process_windows=self.exclude_recorder_windows_var.get(),
             excluded_process_names=self.excluded_process_text.get("1.0", tk.END).strip(),
             excluded_window_keywords=self.excluded_window_text.get("1.0", tk.END).strip(),
@@ -1529,7 +1586,7 @@ class AICheckpointDialog:
         form = ttk.Frame(wrapper)
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="标题").grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text="期望结果:").grid(row=0, column=0, sticky=tk.W, pady=6)
         ttk.Entry(form, textvariable=self.title_var).grid(row=0, column=1, sticky=tk.EW, pady=6)
 
         controls = ttk.Frame(wrapper)
@@ -1981,7 +2038,17 @@ class AICheckpointDialog:
             messagebox.showerror("保存失败", str(exc), parent=self.window)
 
     def _build_checkpoint_payload(self) -> dict[str, object] | None:
-        title = self.title_var.get().strip() or "AI Checkpoint"
+        title = self.title_var.get().strip()
+        step_description = self._get_step_comment_text()
+        missing_fields: list[str] = []
+        if not title:
+            missing_fields.append("期望结果")
+        if not step_description:
+            missing_fields.append("Step Description")
+        if missing_fields:
+            messagebox.showerror("保存失败", f"请填写: {'、'.join(missing_fields)}。", parent=self.window)
+            return None
+
         prompt = self.last_effective_prompt or self._build_prompt_from_selection()
         response_text = self.response_text.get("1.0", tk.END).strip()
         if self.video_recorder and self.video_recorder.is_recording:
@@ -2023,8 +2090,8 @@ class AICheckpointDialog:
             "query_payload": self.query_result,
             "prompt_template_key": self.prompt_template_var.get().strip() or "ct_validation",
             "design_steps": self._get_design_steps_text(),
-            "step_description": self._get_step_comment_text(),
-            "step_comment": self._get_step_comment_text(),
+            "step_description": step_description,
+            "step_comment": step_description,
         }
 
     def _refresh_media_summary(self) -> None:
@@ -2223,7 +2290,7 @@ def capture_manual_screenshot(parent: tk.Misc, engine: RecorderEngine, prompt: s
     if not selection:
         return None
 
-    relative_path = engine.save_manual_image(selection.image, "manual")
+    relative_path = engine.add_manual_screenshot_with_media(selection.image, selection.to_region_dict())
     if not relative_path:
         messagebox.showerror("保存失败", "截图保存失败。", parent=parent)
         return None

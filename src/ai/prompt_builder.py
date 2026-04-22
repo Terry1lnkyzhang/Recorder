@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from src.ai.method_mapping import resolve_method_name_for_event
 from src.common.display_utils import prepare_image_path_for_ai
 from src.recorder.models import format_recorded_action, normalize_event_type
 
@@ -12,13 +13,14 @@ def build_step_observation_prompt() -> str:
         "task": "观察当前桌面自动化步骤，仅基于截图提取事实层描述",
         "requirements": [
             "你只能基于截图和红色框选区域判断，不要假设还能看到历史步骤、结构化事件数据或其他上下文。",
-            "请针对每一步输出 5 个字段：control_type、label、relative_position、need_scroll、is_table。不要输出其他字段。",
+            "请针对每一步输出 6 个字段：control_type、label、relative_position、need_scroll、is_table、action。不要输出其他字段。",
             "红框就是当前操作目标区域。control_type 表示红框对应控件的类型，例如 button、editbox、combobox、checkbox、radiobutton、tab、menuitem、table、row、cell、list、listitem、dialog、panel；无法确定时可用 unknown。",
-            "label 表示红框目标控件自身的文字标签，或与该控件最直接对应的字段标签。对于 combobox 和 editbox，label 不应取控件内部当前显示的值或输入内容，而应优先取距离最近、最直接对应的字段标签。必须准确使用截图原文，不要猜测、改写、翻译、缩写或替换成其他近似词；没有明确 label 时返回空字符串。",
+            "label 表示红框目标控件自身的文字标签，或与该控件最直接对应的字段标签。对于 combobox 和 editbox，label 不应取控件内部当前显示的值或输入内容，而应优先取最直接对应的字段标签。必须准确使用截图原文，不要猜测、改写、翻译、缩写或替换成其他近似词；没有明确 label 时返回空字符串。",
             "relative_position 只能是 self、up、down、left、right 之一，表示目标控件位于 label 的哪个方向。例如控件在 label 右边时返回 right，在 label 左边时返回 left，在 label 上方时返回 up，在 label 下方时返回 down；若 label 就在目标控件自身上，则返回 self。",
             "若按钮、复选框、单选框、tab、菜单项等控件自身已带明确 label，则 label 直接写该控件文字，relative_position 必须为 self，不要再借用附近字段标签。",
             "need_scroll 只能是 true 或 false。只要从截图中可以判断，红框目标控件所属的容器支持通过滚动来调整显示内容，例如位于可滚动列表、表格、滚动面板或下拉项区域中，就返回 true；否则返回 false。",
             "is_table 只能是 true 或 false。只有当从截图中可以明确看出，红框目标位于具有明显行列结构的表格区域中，并且各列有清晰列名或表头时，才返回 true；普通列表、菜单、树、下拉项、无明确列表头的成组项目都返回 false。",
+            "action 表示当前步骤对红框目标的动作。普通点击统一返回 click；若红框目标是 checkbox，如果截图中该 checkbox 当前已勾选，返回off， checkbox 当前未勾选，返回 on",
             "不要输出分析过程，不要输出自然语言总结，只输出 JSON。",
             "只输出 JSON。",
         ],
@@ -29,7 +31,8 @@ def build_step_observation_prompt() -> str:
                 "label": "Save",
                 "relative_position": "self",
                 "need_scroll": False,
-                "is_table": False
+                "is_table": False,
+                "action": "click"
             }
         ]
         },
@@ -49,7 +52,7 @@ def build_step_reasoning_prompt(
         "requirements": [
             "你只能基于 current_step_observations、recent_step_observations 和 previous_memory 推理，不要假设能再次看到截图。",
             "step_insights 只针对 current_step_observations 中的步骤输出，数组顺序必须与 current_step_observations 一致。",
-            "current_step_observations 中已经包含 control_type、label、relative_position、need_scroll、is_table 以及基于这些字段生成的 observation。step_insights.description 应优先基于这些结构化字段生成最终语义。",
+            "current_step_observations 中已经包含 control_type、label、relative_position、need_scroll、is_table、action 以及基于这些字段生成的 observation。step_insights.description 应优先基于这些结构化字段生成最终语义。",
             "若按钮、复选框、单选框、tab、菜单项等控件自身有 label，应直接写点击该控件，不要再写成某字段右侧的按钮。若是下拉值选择，应优先归一为选中某字段右侧combobox中的某值。",
             "recent_step_observations 提供当前步骤前最多 20 步的局部上下文，可据此判断当前步骤是否属于某个可组合模块。",
             "previous_memory 提供更早步骤的摘要，只用于补充历史阶段和状态变化，不要把它误当成当前步骤。",
@@ -151,6 +154,7 @@ def collect_observation_inputs(
     batch_size: int,
     display_layout: dict[str, object] | None = None,
     send_fullscreen: bool = False,
+    excluded_process_names: list[str] | None = None,
 ) -> tuple[list[dict[str, object]], list[Path], list[int], dict[str, int]]:
     rows: list[dict[str, object]] = []
     image_paths: list[Path] = []
@@ -158,9 +162,10 @@ def collect_observation_inputs(
     seen: set[Path] = set()
     cropped_count = 0
     cache_dir = session_dir / "ai_preprocessed" / "monitors"
+    normalized_excluded_process_names = {str(item).strip().lower() for item in (excluded_process_names or []) if str(item).strip()}
     sliced = events[start_index : start_index + batch_size]
     for offset, event in enumerate(sliced, start=start_index + 1):
-        if not _should_send_event_to_observation(event):
+        if not _should_send_event_to_observation(event, normalized_excluded_process_names):
             continue
         primary = _resolve_primary_image(session_dir, event)
         if not primary:
@@ -207,6 +212,7 @@ def collect_batch_images(
     batch_size: int,
     display_layout: dict[str, object] | None = None,
     send_fullscreen: bool = False,
+    excluded_process_names: list[str] | None = None,
 ) -> tuple[list[Path], dict[str, int]]:
     _, image_paths, _, image_stats = collect_observation_inputs(
         session_dir,
@@ -215,6 +221,7 @@ def collect_batch_images(
         batch_size,
         display_layout=display_layout,
         send_fullscreen=send_fullscreen,
+        excluded_process_names=excluded_process_names,
     )
     return image_paths, image_stats
 
@@ -255,11 +262,21 @@ def _resolve_primary_image(session_dir: Path, event: dict[str, object]) -> str |
     return None
 
 
-def _should_send_event_to_observation(event: dict[str, object]) -> bool:
+def _should_send_event_to_observation(event: dict[str, object], excluded_process_names: set[str] | None = None) -> bool:
     event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip().lower()
     action = format_recorded_action(event.get("action", "")).strip().lower()
-    if event_type in {"comment", "checkpoint"}:
+    if event_type in {"comment", "checkpoint", "getscreenshot"}:
         return False
-    if event_type == "wait" or action in {"manual_comment", "ai_checkpoint"}:
+    if event_type == "wait" or action in {"manual_comment", "ai_checkpoint", "getscreenshot", "manual_screenshot"}:
         return False
+
+    method_name = resolve_method_name_for_event(event)
+    if method_name != "FindControlByName":
+        return False
+
+    window = event.get("window", {}) if isinstance(event.get("window", {}), dict) else {}
+    process_name = str(window.get("process_name", "")).strip().lower()
+    if process_name in (excluded_process_names or set()):
+        return False
+
     return True

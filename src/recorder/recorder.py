@@ -14,7 +14,7 @@ from pynput import keyboard, mouse
 
 from .analyzer import build_reuse_suggestions, write_suggestions
 from src.common.app_logging import get_logger
-from .models import RecordedEvent, UIElementInfo, WindowInfo
+from .models import RecordedEvent, UIElementInfo, WindowInfo, normalize_keyboard_key_name
 from .settings import AISettings, SettingsStore
 from .session import SessionStore
 from .system_info import get_active_window_info, get_ui_element_at_point, get_window_info_at_point, utc_now_iso
@@ -247,6 +247,33 @@ class RecorderEngine:
         self.store.append_event(event)
         self.logger.info("Wait-for-image added | event_id=%s | region=%s | timeout=%s", event.event_id, region, timeout_seconds)
         self.status_callback("Wait step added.")
+
+    def add_manual_screenshot_with_media(
+        self,
+        image: Image.Image,
+        region: dict[str, int],
+    ) -> str | None:
+        if not self.is_recording:
+            raise RuntimeError("Recorder is not running.")
+
+        screenshot = self.store.save_image(image, "manual")
+        if not screenshot:
+            return None
+
+        event = RecordedEvent(
+            event_id=self.store.next_event_id("screenshot"),
+            timestamp=utc_now_iso(),
+            event_type="getScreenshot",
+            action="getScreenshot",
+            screenshot=screenshot,
+            window=get_active_window_info(),
+            media=[{"type": "image", "path": screenshot, "region": region}],
+            additional_details={"source": "user", "selection_region": region},
+        )
+        self.store.append_event(event)
+        self.logger.info("Manual screenshot added | event_id=%s | region=%s", event.event_id, region)
+        self.status_callback("Screenshot recorded.")
+        return screenshot
 
     def add_checkpoint(self, title: str, expectation: str) -> None:
         if not self.is_recording:
@@ -801,7 +828,7 @@ class RecorderEngine:
     def _normalize_key(key: keyboard.Key | keyboard.KeyCode) -> str:
         if hasattr(key, "char") and key.char:
             return str(key.char)
-        return str(key)
+        return normalize_keyboard_key_name(str(key))
 
     @staticmethod
     def _normalize_modifier_key(key_name: str) -> str | None:
@@ -911,7 +938,7 @@ class RecorderEngine:
     def _normalize_display_key_name(self, key_name: str, key_char: object) -> str:
         if isinstance(key_char, str) and len(key_char) == 1 and key_char.isprintable():
             return key_char.upper()
-        normalized = key_name.split(".", 1)[1] if key_name.startswith("Key.") else key_name
+        normalized = normalize_keyboard_key_name(key_name)
         modifier_name = self._normalize_modifier_key(normalized)
         if modifier_name:
             return self._normalize_display_modifier_name(modifier_name)

@@ -25,6 +25,7 @@ class Settings:
     send_video_directly: bool = True
     analysis_batch_size: int = 1
     send_fullscreen_screenshots: bool = False
+    ai_observation_excluded_process_names: str = "explorer\nmsedge"
     analysis_system_prompt: str = (
         "你是桌面自动化操作分析助手。"
     )
@@ -40,6 +41,11 @@ class Settings:
     remote_ai_service_url: str = "http://127.0.0.1:8010"
     remote_ai_service_api_key: str = ""
     remote_ai_service_timeout_seconds: int = 180
+    show_design_steps_overlay: bool = True
+    design_steps_overlay_width: int = 520
+    design_steps_overlay_height: int = 220
+    design_steps_overlay_bg_color: str = "#d7caa3"
+    design_steps_overlay_opacity: float = 0.88
 
 
 AISettings = Settings
