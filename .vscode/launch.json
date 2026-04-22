@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Recorder App",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\recorder_app.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Session Viewer",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\session_viewer_app.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "AI Analysis Service",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\ai_analysis_service_app.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Converter Registry App",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\converter_registry_app.py",
+      "cwd": "${workspaceFolder}",
+      "python": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "console": "integratedTerminal"
+    }
+  ]
+}
