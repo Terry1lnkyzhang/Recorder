@@ -261,3 +261,4 @@ testcase_id
  现在改成
 testcase_id_version_number_recorder_person_时间戳
 Recordings根目录/testcase_id/project/testcase_id_version_number_recorder_person_时间戳
+test
