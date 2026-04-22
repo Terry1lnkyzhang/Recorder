@@ -253,6 +253,8 @@ class SessionMetadataDialog:
         self.settings_store = settings_store or SettingsStore(Path("recorder_settings.json"))
         self.result: SessionMetadataDraft | None = None
         self.ai_running = False
+        self._metadata_canvas: tk.Canvas | None = None
+        self._metadata_canvas_window: int | None = None
         self._testcase_lookup_after_id: str | None = None
         self._testcase_lookup_token = 0
         self._baseline_lookup_token = 0
@@ -261,8 +263,8 @@ class SessionMetadataDialog:
 
         self.window = tk.Toplevel(parent)
         self.window.title("录制元数据")
-        self.window.geometry("800x820")
-        self.window.minsize(740, 720)
+        self.window.geometry("860x980")
+        self.window.minsize(780, 820)
         self.window.transient(parent)
         self.window.grab_set()
 
@@ -286,13 +288,29 @@ class SessionMetadataDialog:
         self.window.after(0, self._load_baseline_names)
 
     def _build_ui(self) -> None:
-        wrapper = ttk.Frame(self.window, padding=16)
-        wrapper.pack(fill=tk.BOTH, expand=True)
+        outer = ttk.Frame(self.window, padding=0)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._metadata_canvas = canvas
+
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        wrapper = ttk.Frame(canvas, padding=16)
         wrapper.columnconfigure(1, weight=1)
         wrapper.rowconfigure(7, weight=1)
         wrapper.rowconfigure(9, weight=1)
         wrapper.rowconfigure(10, weight=1)
         wrapper.rowconfigure(11, weight=1)
+        self._metadata_canvas_window = canvas.create_window((0, 0), window=wrapper, anchor=tk.NW)
+
+        wrapper.bind("<Configure>", self._on_metadata_wrapper_configure)
+        canvas.bind("<Configure>", self._on_metadata_canvas_configure)
+        canvas.bind_all("<MouseWheel>", self._on_metadata_mousewheel, add="+")
+        self.window.bind("<Destroy>", self._on_metadata_window_destroy, add="+")
 
         ttk.Label(
             wrapper,
@@ -406,6 +424,41 @@ class SessionMetadataDialog:
 
         self._refresh_prs_mode()
         self.primary_id_entry.focus_set()
+
+    def _on_metadata_wrapper_configure(self, _event: tk.Event | None = None) -> None:
+        if self._metadata_canvas is None:
+            return
+        self._metadata_canvas.configure(scrollregion=self._metadata_canvas.bbox("all"))
+
+    def _on_metadata_canvas_configure(self, event: tk.Event) -> None:
+        if self._metadata_canvas is None or self._metadata_canvas_window is None:
+            return
+        self._metadata_canvas.itemconfigure(self._metadata_canvas_window, width=event.width)
+
+    def _on_metadata_mousewheel(self, event: tk.Event) -> None:
+        if self._metadata_canvas is None or not self.window.winfo_exists():
+            return
+        if self.window.focus_displayof() is None:
+            return
+        try:
+            widget = self.window.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            widget = None
+        if widget is None:
+            return
+        if not str(widget).startswith(str(self.window)):
+            return
+        delta = int(-event.delta / 120) if event.delta else 0
+        if delta:
+            self._metadata_canvas.yview_scroll(delta, "units")
+
+    def _on_metadata_window_destroy(self, _event: tk.Event | None = None) -> None:
+        if self._metadata_canvas is None:
+            return
+        try:
+            self._metadata_canvas.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
 
     def _is_prs_recording_selected(self) -> bool:
         return self.is_prs_recording_var.get().strip() != "否"
