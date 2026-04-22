@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from src.recorder.models import format_recorded_action, normalize_event_type
-from src.recorder.settings import AISettings
+from src.recorder.settings import AISettings, SettingsStore
 
 from .client import OpenAICompatibleAIClient
 from .errors import AIClientError
@@ -93,6 +93,7 @@ class SessionWorkflowAnalyzer:
                 batch_size,
                 display_layout=display_layout,
                 send_fullscreen=self.settings.send_fullscreen_screenshots,
+                excluded_process_names=SettingsStore.parse_pattern_list(self.settings.ai_observation_excluded_process_names),
             )
             observation_prompt = build_step_observation_prompt()
 
@@ -581,12 +582,15 @@ def _normalize_step_observations(
         event = batch_events[offset] if isinstance(batch_events, list) and offset < len(batch_events) and isinstance(batch_events[offset], dict) else {}
         control_type = str(item.get("control_type", "")).strip()
         label = str(item.get("label", "")).strip()
+        label_kind = str(item.get("label_kind", "label")).strip().lower() or "label"
         relative_position = _normalize_relative_position(item.get("relative_position"))
         need_scroll = _normalize_optional_bool(item.get("need_scroll"))
         is_table = _normalize_optional_bool(item.get("is_table"))
-        override_label, override_control_type = _pick_ai_analysis_override_fields(event)
+        action = _normalize_step_action(item.get("action"), control_type=control_type, event=event)
+        override_label, override_control_type, override_label_kind = _pick_ai_analysis_override_fields(event)
         if override_label:
             label = override_label
+            label_kind = override_label_kind or "label"
             relative_position = "self"
             if override_control_type:
                 control_type = override_control_type
@@ -594,9 +598,11 @@ def _normalize_step_observations(
         observation = _build_observation_text(
             control_type=control_type,
             label=label,
+            label_kind=label_kind,
             relative_position=relative_position,
             need_scroll=need_scroll,
             is_table=is_table,
+            action=action,
         )
         if not observation:
             continue
@@ -608,12 +614,15 @@ def _normalize_step_observations(
             normalized_item["control_type"] = control_type
         if label:
             normalized_item["label"] = label
+            normalized_item["label_kind"] = label_kind
         if relative_position:
             normalized_item["relative_position"] = relative_position
         if need_scroll is not None:
             normalized_item["need_scroll"] = need_scroll
         if is_table is not None:
             normalized_item["is_table"] = is_table
+        if action:
+            normalized_item["action"] = action
         normalized.append(normalized_item)
     return normalized
 
@@ -661,14 +670,17 @@ def _build_fallback_step_observations(batch_events: list[dict[str, object]], ste
         event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip()
         action = str(event.get("action", "")).strip()
         ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
-        label = _pick_ui_element_label(ui_element)
+        label, label_kind = _pick_ui_element_label_info(ui_element)
         control_type = str(ui_element.get("control_type", "")).strip()
+        normalized_action = _infer_step_action_from_event(event, control_type=control_type)
         observation = _build_observation_text(
             control_type=control_type or event_type,
             label=label,
+            label_kind=label_kind,
             relative_position="self" if label else "",
             need_scroll=True if event_type == "mouseAction" and format_recorded_action(action).strip().lower() == "mouse_scroll" else False,
             is_table=_infer_is_table_from_batch_event(event),
+            action=normalized_action,
         )
         fallback.append(
             {
@@ -676,9 +688,11 @@ def _build_fallback_step_observations(batch_events: list[dict[str, object]], ste
                 "observation": observation or "未提取到明确观察结果",
                 "control_type": control_type or event_type,
                 "label": label,
+                "label_kind": label_kind,
                 "relative_position": "self" if label else "",
                 "need_scroll": True if event_type == "mouseAction" and format_recorded_action(action).strip().lower() == "mouse_scroll" else False,
                 "is_table": _infer_is_table_from_batch_event(event),
+                "action": normalized_action,
             }
         )
     return fallback
@@ -701,6 +715,32 @@ def _normalize_optional_bool(value: object) -> bool | None:
     return None
 
 
+def _normalize_step_action(value: object, *, control_type: str = "", event: dict[str, object] | None = None) -> str:
+    candidate = str(value or "").strip().lower()
+    normalized_control_type = str(control_type or "").strip().lower()
+    if candidate in {"click", "on", "off"}:
+        return candidate
+    if normalized_control_type == "checkbox":
+        if candidate in {"checked", "check", "true", "selected"}:
+            return "on"
+        if candidate in {"unchecked", "uncheck", "false", "unselected"}:
+            return "off"
+    return _infer_step_action_from_event(event or {}, control_type=control_type)
+
+
+def _infer_step_action_from_event(event: dict[str, object], *, control_type: str = "") -> str:
+    action_text = format_recorded_action(event.get("action", "")).strip().lower()
+    normalized_control_type = str(control_type or "").strip().lower()
+    if normalized_control_type == "checkbox":
+        if any(token in action_text for token in {"uncheck", "unchecked", "toggle_off", "set_off", "off"}):
+            return "off"
+        if any(token in action_text for token in {"check", "checked", "toggle_on", "set_on", "on"}):
+            return "on"
+    if normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip().lower() == "controloperation":
+        return "click"
+    return ""
+
+
 def _infer_is_table_from_batch_event(event: dict[str, object]) -> bool:
     ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
     control_type = str(ui_element.get("control_type", "")).strip().lower()
@@ -710,30 +750,37 @@ def _infer_is_table_from_batch_event(event: dict[str, object]) -> bool:
 
 
 def _pick_ui_element_label(ui_element: dict[str, object]) -> str:
+    label, _label_kind = _pick_ui_element_label_info(ui_element)
+    return label
+
+
+def _pick_ui_element_label_info(ui_element: dict[str, object]) -> tuple[str, str]:
     help_text = str(ui_element.get("help_text", "")).strip()
     if _is_meaningful_ui_label(help_text):
-        return help_text
+        return help_text, "helptext"
 
     help_text_fallback = str(ui_element.get("help_text_fallback", "")).strip()
     if _is_meaningful_ui_label(help_text_fallback):
-        return help_text_fallback
+        return help_text_fallback, "helptext"
 
     name_fallbacks = ui_element.get("name_fallbacks", [])
     if isinstance(name_fallbacks, list):
         for item in name_fallbacks:
             text = str(item).strip()
             if _is_meaningful_ui_label(text):
-                return text
+                return text, "label"
 
     name = str(ui_element.get("name", "")).strip()
-    return name if _is_meaningful_ui_label(name) else ""
+    if _is_meaningful_ui_label(name):
+        return name, "label"
+    return "", "label"
 
 
-def _pick_ai_analysis_override_fields(event: dict[str, object]) -> tuple[str, str]:
+def _pick_ai_analysis_override_fields(event: dict[str, object]) -> tuple[str, str, str]:
     ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
-    label = _pick_ui_element_label(ui_element)
+    label, label_kind = _pick_ui_element_label_info(ui_element)
     control_type = str(ui_element.get("control_type", "")).strip()
-    return label, control_type
+    return label, control_type, label_kind
 
 
 def _is_meaningful_ui_label(value: str) -> bool:
@@ -856,13 +903,16 @@ def _build_observation_text(
     *,
     control_type: str,
     label: str,
+    label_kind: str = "label",
     relative_position: str,
     need_scroll: bool | None,
     is_table: bool | None,
+    action: str = "",
 ) -> str:
     parts: list[str] = []
     if label:
-        parts.append(f"label={label}")
+        key = "helptext" if str(label_kind).strip().lower() == "helptext" else "label"
+        parts.append(f"{key}={label}")
     if relative_position:
         parts.append(f"direction={relative_position}")
     if control_type:
@@ -871,6 +921,8 @@ def _build_observation_text(
         parts.append(f"scroll={str(need_scroll).lower()}")
     if is_table is not None:
         parts.append(f"table={str(is_table).lower()}")
+    if action:
+        parts.append(f"action={action}")
     return " | ".join(parts)
 
 

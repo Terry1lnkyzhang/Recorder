@@ -3281,12 +3281,14 @@ class RecorderViewerWindow:
                 if not observation:
                     control_type = str(item.get("control_type", "")).strip()
                     label = str(item.get("label", "")).strip()
+                    label_kind = str(item.get("label_kind", "label")).strip().lower() or "label"
                     relative_position = str(item.get("relative_position", "")).strip()
                     need_scroll = item.get("need_scroll")
                     is_table = item.get("is_table")
                     parts: list[str] = []
                     if label:
-                        parts.append(f"label={label}")
+                        key = "helptext" if label_kind == "helptext" else "label"
+                        parts.append(f"{key}={label}")
                     if relative_position:
                         parts.append(f"direction={relative_position}")
                     if control_type:
@@ -3881,8 +3883,13 @@ class RecorderViewerWindow:
     def run_parameter_recommendation(self) -> None:
         if self.parameter_recommendation_running:
             return
-        if not self.session_dir or not self.session_data or not self.ai_analysis or not self.suggestion_result:
-            messagebox.showinfo("提示", "请先执行 AI 分析并生成调用建议。", parent=self.window)
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        if not self.suggestion_result:
+            self._try_load_historical_suggestions()
+        if not self.suggestion_result:
+            messagebox.showinfo("提示", "请先生成调用建议。", parent=self.window)
             return
         row_indexes = self._get_selected_row_indexes()
         if not row_indexes:
@@ -3892,13 +3899,27 @@ class RecorderViewerWindow:
         if not suggestion_rows:
             messagebox.showinfo("提示", "所选步骤里没有可用的方法建议。", parent=self.window)
             return
-        registry_paths = self._resolve_suggestion_registry_paths()
-        if not registry_paths:
-            messagebox.showerror("参数推荐失败", "未找到可用 registry。", parent=self.window)
+
+        find_control_rows: list[int] = []
+        for row_index in suggestion_rows:
+            suggestion = self._find_suggestion_by_row_index(row_index)
+            if suggestion is None:
+                continue
+            if str(suggestion.method_name or "").strip() == "FindControlByName":
+                find_control_rows.append(row_index)
+
+        if find_control_rows and not self.ai_analysis:
+            preview_text = ", ".join(str(row_index + 1) for row_index in find_control_rows[:8])
+            suffix = "..." if len(find_control_rows) > 8 else ""
+            messagebox.showinfo(
+                "提示",
+                f"所选步骤中包含 FindControlByName（步骤 {preview_text}{suffix}），请先执行 AI 分析后再生成参数推荐。",
+                parent=self.window,
+            )
             return
-        methods_path, scripts_path = registry_paths
-        ai_analysis_path = self.session_dir / "ai_analysis.json"
-        session_path = self.session_dir / "session.json"
+
+        self.parameter_prompt_by_step = {}
+        self.parameter_response_by_step = {}
         self.parameter_recommendation_running = True
         self.parameter_recommend_button.configure(state=tk.DISABLED)
         total = len(suggestion_rows)
@@ -3909,57 +3930,22 @@ class RecorderViewerWindow:
             completed_rows: list[int] = []
             failed_rows: list[str] = []
             try:
-                settings = self.settings_store.load()
-                client = OpenAICompatibleAIClient(settings)
-                remote_client = RemoteAIServiceClient(settings) if settings.use_remote_ai_service else None
                 for position, row_index in enumerate(suggestion_rows, start=1):
                     suggestion = self._find_suggestion_by_row_index(row_index)
                     if suggestion is None:
                         continue
                     self.window.after(0, lambda position=position, total=total, row_index=row_index: self._on_parameter_recommendation_progress(position, total, row_index))
                     try:
-                        if remote_client is not None:
-                            response = remote_client.recommend_parameters(
-                                session_dir=self.session_dir,
-                                session_data=self.session_data,
-                                suggestion=suggestion,
-                                ai_analysis_path=ai_analysis_path,
-                                methods_registry_path=methods_path,
-                                session_path=session_path if session_path.exists() else None,
-                                scripts_registry_path=scripts_path,
-                                top_k_methods=3,
-                                top_k_scripts=2,
-                            )
-                            updated = response.get("suggestion", {}) if isinstance(response, dict) else {}
-                            if isinstance(updated, dict):
-                                refreshed = type(suggestion).from_dict(updated)
-                                suggestion.method_name = refreshed.method_name
-                                suggestion.score = refreshed.score
-                                suggestion.confidence = refreshed.confidence
-                                suggestion.reason = refreshed.reason
-                                suggestion.step_description = refreshed.step_description
-                                suggestion.step_conclusion = refreshed.step_conclusion
-                                suggestion.method_summary = refreshed.method_summary
-                                suggestion.script_name = refreshed.script_name
-                                suggestion.script_summary = refreshed.script_summary
-                                suggestion.candidate_payload = refreshed.candidate_payload
-                                suggestion.parameters = refreshed.parameters
-                            prompt_text = str(response.get("prompt_text", ""))
-                            response_text = str(response.get("response_text", ""))
-                        else:
-                            _notes, _preview, prompt_text, response_text = self.suggestion_service.recommend_parameters_for_suggestion(
-                                client=client,
-                                suggestion=suggestion,
-                                ai_analysis_path=ai_analysis_path,
-                                methods_registry_path=methods_path,
-                                session_path=session_path if session_path.exists() else None,
-                                scripts_registry_path=scripts_path,
-                                top_k_methods=3,
-                                top_k_scripts=2,
-                            )
+                        event = self.event_rows[row_index] if 0 <= row_index < len(self.event_rows) and isinstance(self.event_rows[row_index], dict) else {}
+                        ai_observation = self.ai_step_texts.get(row_index, "")
+                        self.suggestion_service.recommend_parameters_from_context(
+                            suggestion=suggestion,
+                            event=event,
+                            ai_observation_text=ai_observation,
+                        )
                         completed_rows.append(row_index)
-                        self.parameter_prompt_by_step[row_index] = prompt_text
-                        self.parameter_response_by_step[row_index] = response_text
+                        self.parameter_prompt_by_step.pop(row_index, None)
+                        self.parameter_response_by_step.pop(row_index, None)
                         self.suggestion_service.write_result_file(self.session_dir / "conversion_suggestions.json", self.suggestion_result)
                     except Exception as exc:
                         failed_rows.append(f"步骤 {row_index + 1}: {exc}")
@@ -4059,11 +4045,10 @@ class RecorderViewerWindow:
 
     def _resolve_suggestion_registry_paths(self) -> tuple[Path, Path] | None:
         registry_root = self.project_root / "converter_assets" / "registry"
-        pilot_methods = registry_root / "pilot_methods.yaml"
         pilot_scripts = registry_root / "pilot_scripts.yaml"
         full_methods = registry_root / "control_action_methods.yaml"
         full_scripts = registry_root / "scripts.yaml"
-        methods_path = pilot_methods if self._registry_has_entries(pilot_methods) else full_methods if self._registry_has_entries(full_methods) else None
+        methods_path = full_methods if self._registry_has_entries(full_methods) else None
         scripts_path = pilot_scripts if self._registry_has_entries(pilot_scripts) else full_scripts if self._registry_has_entries(full_scripts) else None
         if methods_path and scripts_path:
             return methods_path, scripts_path

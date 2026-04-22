@@ -735,6 +735,7 @@ class SettingsDialog:
         self.send_video_directly_var = tk.BooleanVar(value=self.settings.send_video_directly)
         self.analysis_batch_size_var = tk.StringVar(value=str(self.settings.analysis_batch_size))
         self.send_fullscreen_var = tk.BooleanVar(value=self.settings.send_fullscreen_screenshots)
+        self.ai_observation_excluded_process_var = tk.StringVar(value=self.settings.ai_observation_excluded_process_names)
         self.exclude_recorder_windows_var = tk.BooleanVar(value=self.settings.exclude_recorder_process_windows)
         self.use_remote_ai_service_var = tk.BooleanVar(value=self.settings.use_remote_ai_service)
         self.remote_ai_service_url_var = tk.StringVar(value=self.settings.remote_ai_service_url)
@@ -863,6 +864,18 @@ class SettingsDialog:
             text="提示: 默认会直接发送原始视频给模型；如服务端不兼容，可关闭该选项回退到旧的抽帧分析逻辑。双屏整图场景下默认只发送当前操作所在屏幕，也可切换为发送全屏截图。",
             wraplength=860,
         ).pack(anchor=tk.W, pady=(8, 0))
+
+        observation_filter_frame = ttk.LabelFrame(parent, text="AI看图发送过滤", padding=12)
+        observation_filter_frame.pack(fill=tk.X, pady=(12, 0))
+        ttk.Label(
+            observation_filter_frame,
+            text="以下进程名命中时，对应步骤截图不会发送给 AI看图。每行一个，默认排除 explorer 和 msedge。",
+            wraplength=820,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W)
+        self.ai_observation_excluded_process_text = tk.Text(observation_filter_frame, height=4, wrap=tk.WORD, font=("Consolas", 10))
+        self.ai_observation_excluded_process_text.pack(fill=tk.X, pady=(8, 0))
+        _set_text(self.ai_observation_excluded_process_text, self.settings.ai_observation_excluded_process_names)
 
         remote_service_frame = ttk.LabelFrame(parent, text="远端共享 AI 服务", padding=12)
         remote_service_frame.pack(fill=tk.X, pady=(12, 0))
@@ -1028,6 +1041,7 @@ class SettingsDialog:
                 send_video_directly=self.send_video_directly_var.get(),
                 analysis_batch_size=int(self.analysis_batch_size_var.get().strip()),
                 send_fullscreen_screenshots=self.send_fullscreen_var.get(),
+                ai_observation_excluded_process_names=self.ai_observation_excluded_process_text.get("1.0", tk.END).strip(),
                 exclude_recorder_process_windows=self.exclude_recorder_windows_var.get(),
                 excluded_process_names=self.excluded_process_text.get("1.0", tk.END).strip(),
                 excluded_window_keywords=self.excluded_window_text.get("1.0", tk.END).strip(),
@@ -1047,6 +1061,7 @@ class SettingsDialog:
                 checkpoint_prompt_content_column=self.checkpoint_prompt_content_column_var.get().strip() or "PromptContent",
             )
             SettingsStore.parse_extra_headers(settings.extra_headers_json)
+            SettingsStore.parse_pattern_list(settings.ai_observation_excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_window_keywords)
             if settings.design_steps_overlay_width < 320:
@@ -1174,6 +1189,7 @@ class SettingsDialog:
             send_video_directly=self.send_video_directly_var.get(),
             analysis_batch_size=int(self.analysis_batch_size_var.get().strip()),
             send_fullscreen_screenshots=self.send_fullscreen_var.get(),
+            ai_observation_excluded_process_names=self.ai_observation_excluded_process_text.get("1.0", tk.END).strip(),
             exclude_recorder_process_windows=self.exclude_recorder_windows_var.get(),
             excluded_process_names=self.excluded_process_text.get("1.0", tk.END).strip(),
             excluded_window_keywords=self.excluded_window_text.get("1.0", tk.END).strip(),
@@ -1495,7 +1511,7 @@ class AICheckpointDialog:
         form = ttk.Frame(wrapper)
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="期望结果").grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text="期望结果:").grid(row=0, column=0, sticky=tk.W, pady=6)
         ttk.Entry(form, textvariable=self.title_var).grid(row=0, column=1, sticky=tk.EW, pady=6)
 
         controls = ttk.Frame(wrapper)
@@ -1947,7 +1963,17 @@ class AICheckpointDialog:
             messagebox.showerror("保存失败", str(exc), parent=self.window)
 
     def _build_checkpoint_payload(self) -> dict[str, object] | None:
-        title = self.title_var.get().strip() or "AI Checkpoint"
+        title = self.title_var.get().strip()
+        step_description = self._get_step_comment_text()
+        missing_fields: list[str] = []
+        if not title:
+            missing_fields.append("期望结果")
+        if not step_description:
+            missing_fields.append("Step Description")
+        if missing_fields:
+            messagebox.showerror("保存失败", f"请填写: {'、'.join(missing_fields)}。", parent=self.window)
+            return None
+
         prompt = self.last_effective_prompt or self._build_prompt_from_selection()
         response_text = self.response_text.get("1.0", tk.END).strip()
         if self.video_recorder and self.video_recorder.is_recording:
@@ -1989,8 +2015,8 @@ class AICheckpointDialog:
             "query_payload": self.query_result,
             "prompt_template_key": self.prompt_template_var.get().strip() or "ct_validation",
             "design_steps": self._get_design_steps_text(),
-            "step_description": self._get_step_comment_text(),
-            "step_comment": self._get_step_comment_text(),
+            "step_description": step_description,
+            "step_comment": step_description,
         }
 
     def _refresh_media_summary(self) -> None:
