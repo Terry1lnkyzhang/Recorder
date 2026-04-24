@@ -12,9 +12,9 @@ def build_step_observation_prompt() -> str:
     instruction = {
         "task": "观察当前桌面自动化步骤，仅基于截图提取事实层描述",
         "requirements": [
-            "你只能基于截图和红色框选区域判断，不要假设还能看到历史步骤、结构化事件数据或其他上下文。",
+            "截图上红色框选区域是当前操作目标。",
             "请针对每一步输出 6 个字段：control_type、label、relative_position、need_scroll、is_table、action。不要输出其他字段。",
-            "红框就是当前操作目标区域。control_type 表示红框对应控件的类型，例如 button、editbox、combobox、checkbox、radiobutton、tab、menuitem、table、row、cell、list、listitem、dialog、panel；无法确定时可用 unknown。",
+            "control_type 表示红框对应控件的类型，例如 button、editbox、combobox、checkbox、radiobutton、tab、menuitem、table、row、cell、list、listitem、dialog、panel；无法确定时可用 unknown。",
             "label 表示红框目标控件自身的文字标签，或与该控件最直接对应的字段标签。对于 combobox 和 editbox，label 不应取控件内部当前显示的值或输入内容，而应优先取最直接对应的字段标签。必须准确使用截图原文，不要猜测、改写、翻译、缩写或替换成其他近似词；没有明确 label 时返回空字符串。",
             "relative_position 只能是 self、up、down、left、right 之一，表示目标控件位于 label 的哪个方向。例如控件在 label 右边时返回 right，在 label 左边时返回 left，在 label 上方时返回 up，在 label 下方时返回 down；若 label 就在目标控件自身上，则返回 self。",
             "若按钮、复选框、单选框、tab、菜单项等控件自身已带明确 label，则 label 直接写该控件文字，relative_position 必须为 self，不要再借用附近字段标签。",
@@ -125,6 +125,75 @@ def build_workflow_aggregation_prompt(
     return json.dumps(instruction, ensure_ascii=False, indent=2)
 
 
+def build_grouped_step_summary_prompt(
+    session_id: str,
+    step_ids: list[int],
+    step_events: list[dict[str, object]],
+) -> str:
+    instruction = {
+        "task": "基于一小批连续步骤截图与事件元数据，总结这一批步骤中用户实际进行了哪些操作",
+        "session_id": session_id,
+        "step_ids": step_ids,
+        "requirements": [
+            "这些步骤不适合按单张截图逐控件识别，请改用多步骤操作理解方式。",
+            "你会同时看到这一批连续步骤的多张截图，以及每一步的事件元数据。",
+            "请输出详细中文总结，说明用户在这批步骤里依次做了什么、界面发生了什么变化、是否有输入、选择、滚动、切换、确认等操作。",
+            "只能基于提供的截图和事件元数据，不要猜测截图外的信息。",
+            "如果某一步看不清，也要结合前后连续步骤做谨慎描述，但不要编造。",
+            "只输出 JSON。",
+        ],
+        "json_schema_hint": {
+            "window_summary": "步骤 11-15：先进入某个区域，再连续滚动并选择目标项，最后确认设置。",
+            "step_highlights": [
+                {
+                    "step_id": 11,
+                    "description": "进入相关设置区域并开始定位目标内容。",
+                }
+            ],
+        },
+        "events": step_events,
+    }
+    return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+
+def build_grouped_step_merge_prompt(
+    session_id: str,
+    step_ids: list[int],
+    step_events: list[dict[str, object]],
+    window_summaries: list[dict[str, object]],
+) -> str:
+    instruction = {
+        "task": "基于多批重叠窗口总结，生成连续步骤区间的最终操作总结",
+        "session_id": session_id,
+        "step_ids": step_ids,
+        "requirements": [
+            "输入里的 window_summaries 来自同一连续步骤区间，且相邻窗口会有 1 个重叠步骤。",
+            "请先对重叠内容去重，再总结整个区间的真实操作过程。",
+            "segment_summary 需要是详细中文自然语言描述，说明这一整段步骤总体完成了什么。",
+            "step_summaries 必须覆盖 step_ids 中的每一个步骤号，并按顺序输出。",
+            "非最后一步的 step_summaries.description 要写成简短分步描述，通常 1 句，聚焦该步的直接作用，不要重复整段总结。",
+            "最后一个步骤的 description 需要更完整一些，用于承载整段操作的最终收束，可以带上整段  step_ids 的总结。",
+            "只输出 JSON。",
+        ],
+        "json_schema_hint": {
+            "segment_summary": "步骤 11-17：用户先浏览并定位目标区域，随后连续滚动和切换候选项，最终完成目标项选择与确认。",
+            "step_summaries": [
+                {
+                    "step_id": 11,
+                    "description": "开始浏览相关界面区域，定位后续要操作的内容。",
+                },
+                {
+                    "step_id": 17,
+                    "description": "完成本段连续操作的最后确认；整段来看，步骤 11-17 主要是在浏览、定位并完成目标项处理。",
+                },
+            ],
+        },
+        "events": step_events,
+        "window_summaries": window_summaries,
+    }
+    return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+
 def build_batch_events(events: list[dict[str, object]], start_index: int, batch_size: int) -> list[dict[str, object]]:
     rows = []
     sliced = events[start_index : start_index + batch_size]
@@ -147,6 +216,13 @@ def build_batch_events(events: list[dict[str, object]], start_index: int, batch_
     return rows
 
 
+def resolve_analysis_step_id(event: dict[str, object], fallback_step_id: int) -> int:
+    candidate = event.get("analysis_step_id")
+    if isinstance(candidate, int) and candidate > 0:
+        return candidate
+    return fallback_step_id
+
+
 def collect_observation_inputs(
     session_dir: Path,
     events: list[dict[str, object]],
@@ -155,6 +231,7 @@ def collect_observation_inputs(
     display_layout: dict[str, object] | None = None,
     send_fullscreen: bool = False,
     excluded_process_names: list[str] | None = None,
+    include_all_screenshot_events: bool = False,
 ) -> tuple[list[dict[str, object]], list[Path], list[int], dict[str, int]]:
     rows: list[dict[str, object]] = []
     image_paths: list[Path] = []
@@ -162,10 +239,11 @@ def collect_observation_inputs(
     seen: set[Path] = set()
     cropped_count = 0
     cache_dir = session_dir / "ai_preprocessed" / "monitors"
-    normalized_excluded_process_names = {str(item).strip().lower() for item in (excluded_process_names or []) if str(item).strip()}
+    normalized_excluded_process_names = _build_normalized_excluded_process_names(excluded_process_names)
     sliced = events[start_index : start_index + batch_size]
     for offset, event in enumerate(sliced, start=start_index + 1):
-        if not _should_send_event_to_observation(event, normalized_excluded_process_names):
+        analysis_step_id = resolve_analysis_step_id(event, offset)
+        if not include_all_screenshot_events and not _should_send_event_to_observation(event, normalized_excluded_process_names):
             continue
         primary = _resolve_primary_image(session_dir, event)
         if not primary:
@@ -193,12 +271,12 @@ def collect_observation_inputs(
             display_layout,
             cache_dir,
             send_fullscreen=send_fullscreen,
-            cache_key=f"step_{offset:04d}",
+            cache_key=f"step_{analysis_step_id:04d}",
         )
         if was_cropped:
             cropped_count += 1
         rows.append(row)
-        step_ids.append(offset)
+        step_ids.append(analysis_step_id)
         if prepared_path not in seen:
             image_paths.append(prepared_path)
             seen.add(prepared_path)
@@ -213,6 +291,7 @@ def collect_batch_images(
     display_layout: dict[str, object] | None = None,
     send_fullscreen: bool = False,
     excluded_process_names: list[str] | None = None,
+    include_all_screenshot_events: bool = False,
 ) -> tuple[list[Path], dict[str, int]]:
     _, image_paths, _, image_stats = collect_observation_inputs(
         session_dir,
@@ -222,8 +301,92 @@ def collect_batch_images(
         display_layout=display_layout,
         send_fullscreen=send_fullscreen,
         excluded_process_names=excluded_process_names,
+        include_all_screenshot_events=include_all_screenshot_events,
     )
     return image_paths, image_stats
+
+
+def collect_group_summary_inputs(
+    session_dir: Path,
+    events: list[dict[str, object]],
+    step_ids: list[int],
+    display_layout: dict[str, object] | None = None,
+    send_fullscreen: bool = False,
+) -> tuple[list[dict[str, object]], list[Path], list[int], dict[str, int]]:
+    rows: list[dict[str, object]] = []
+    image_paths: list[Path] = []
+    available_step_ids: list[int] = []
+    seen: set[Path] = set()
+    cropped_count = 0
+    cache_dir = session_dir / "ai_preprocessed" / "monitors"
+    event_lookup = {resolve_analysis_step_id(event, index): event for index, event in enumerate(events, start=1) if isinstance(event, dict)}
+    for step_id in step_ids:
+        if not isinstance(step_id, int) or step_id < 1:
+            continue
+        event = event_lookup.get(step_id)
+        if not isinstance(event, dict):
+            continue
+        primary = _resolve_primary_image(session_dir, event)
+        if not primary:
+            continue
+        path = session_dir / str(primary)
+        if not path.exists():
+            continue
+        row: dict[str, object] = {
+            "step_id": step_id,
+            "event_type": normalize_event_type(event.get("event_type", ""), event.get("action", "")),
+            "action": event.get("action", ""),
+        }
+        ui_element = _build_prompt_ui_element(event)
+        if ui_element:
+            row["ui_element"] = ui_element
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
+        keyboard = event.get("keyboard", {}) if event_type == "input" else {}
+        mouse = event.get("mouse", {}) if event_type == "controlOperation" else {}
+        if keyboard:
+            row["keyboard"] = keyboard
+        if mouse:
+            row["mouse"] = mouse
+        prepared_path, was_cropped = prepare_image_path_for_ai(
+            path,
+            event,
+            display_layout,
+            cache_dir,
+            send_fullscreen=send_fullscreen,
+            cache_key=f"group_step_{step_id:04d}",
+        )
+        if was_cropped:
+            cropped_count += 1
+        rows.append(row)
+        available_step_ids.append(step_id)
+        if prepared_path not in seen:
+            image_paths.append(prepared_path)
+            seen.add(prepared_path)
+    return rows, image_paths, available_step_ids, {"image_count": len(image_paths), "cropped_monitor_count": cropped_count}
+
+
+def find_group_summary_segments(
+    session_dir: Path,
+    events: list[dict[str, object]],
+    excluded_process_names: list[str] | None = None,
+    include_all_screenshot_events: bool = False,
+) -> list[list[int]]:
+    if include_all_screenshot_events:
+        return []
+    normalized_excluded_process_names = _build_normalized_excluded_process_names(excluded_process_names)
+    segments: list[list[int]] = []
+    current_segment: list[int] = []
+    for fallback_step_id, event in enumerate(events, start=1):
+        step_id = resolve_analysis_step_id(event, fallback_step_id)
+        if _should_send_event_to_group_summary(session_dir, event, normalized_excluded_process_names):
+            current_segment.append(step_id)
+            continue
+        if current_segment:
+            segments.append(current_segment)
+            current_segment = []
+    if current_segment:
+        segments.append(current_segment)
+    return segments
 
 
 def _build_prompt_ui_element(event: dict[str, object]) -> dict[str, object]:
@@ -275,8 +438,54 @@ def _should_send_event_to_observation(event: dict[str, object], excluded_process
         return False
 
     window = event.get("window", {}) if isinstance(event.get("window", {}), dict) else {}
-    process_name = str(window.get("process_name", "")).strip().lower()
+    process_name = _normalize_process_name_for_filter(window.get("process_name", ""))
     if process_name in (excluded_process_names or set()):
         return False
 
     return True
+
+
+def _should_send_event_to_group_summary(
+    session_dir: Path,
+    event: dict[str, object],
+    excluded_process_names: set[str] | None = None,
+) -> bool:
+    event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")).strip().lower()
+    action = format_recorded_action(event.get("action", "")).strip().lower()
+    if event_type in {"comment", "checkpoint", "getscreenshot"}:
+        return False
+    if event_type == "wait" or action in {"manual_comment", "ai_checkpoint", "getscreenshot", "manual_screenshot"}:
+        return False
+    if _should_send_event_to_observation(event, excluded_process_names):
+        return False
+    return _resolve_primary_image(session_dir, event) is not None
+
+
+def _build_normalized_excluded_process_names(excluded_process_names: list[str] | None) -> set[str]:
+    normalized: set[str] = set()
+    for item in excluded_process_names or []:
+        alias_names = _expand_process_filter_aliases(item)
+        normalized.update(alias_names)
+    return normalized
+
+
+def _expand_process_filter_aliases(process_name: object) -> set[str]:
+    normalized = _normalize_process_name_for_filter(process_name)
+    if not normalized:
+        return set()
+    aliases = {normalized}
+    if normalized == "wordpad":
+        aliases.add("write")
+    elif normalized == "write":
+        aliases.add("wordpad")
+    return aliases
+
+
+def _normalize_process_name_for_filter(process_name: object) -> str:
+    value = str(process_name or "").strip().lower().replace("\\", "/")
+    if not value:
+        return ""
+    value = value.rsplit("/", 1)[-1]
+    if value.endswith(".exe"):
+        value = value[:-4]
+    return value.strip()

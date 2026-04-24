@@ -869,7 +869,7 @@ class SettingsDialog:
         observation_filter_frame.pack(fill=tk.X, pady=(12, 0))
         ttk.Label(
             observation_filter_frame,
-            text="以下进程名命中时，对应步骤截图不会发送给 AI看图。每行一个，默认排除 explorer 和 msedge。",
+            text="以下进程名命中时，对应步骤截图不会发送给 AI看图。每行一个，默认排除 explorer、msedge、notepad，以及 WordPad 常见进程名 wordpad/write。",
             wraplength=820,
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
@@ -1638,7 +1638,7 @@ class AICheckpointDialog:
             return
         if not self.window.winfo_exists():
             return
-        self.add_image()
+        self.add_image(show_notice=False)
 
     def _set_middle_paned_ratio(self, paned: ttk.Panedwindow, left_ratio: float) -> None:
         if self._middle_pane_ratio_initialized:
@@ -1742,10 +1742,10 @@ class AICheckpointDialog:
             f"{response_text or '(无)'}"
         )
 
-    def add_image(self) -> None:
-        self.capture_image(len(self.image_selections))
+    def add_image(self, show_notice: bool = True) -> None:
+        self.capture_image(len(self.image_selections), show_notice=show_notice)
 
-    def capture_image(self, slot_index: int) -> None:
+    def capture_image(self, slot_index: int, show_notice: bool = True) -> None:
         if not self._ensure_can_use_images(slot_index):
             return
         if slot_index < 0 or slot_index >= MAX_AI_CHECKPOINT_IMAGES:
@@ -1754,6 +1754,15 @@ class AICheckpointDialog:
         if slot_index > len(self.image_selections):
             messagebox.showinfo("提示", f"请先按顺序添加到截图 {len(self.image_selections) + 1}。", parent=self.window)
             return
+        if show_notice:
+            messagebox.showinfo(
+                "截图提示",
+                "接下来将进入 AI Checkpoint 截图模式。\n\n"
+                "截图过程中的鼠标和键盘操作不会被 Recorder 录制。\n"
+                "为避免截图内容和当前 Checkpoint 参数不一致，请不要在此过程中修改参数、切换页面、页面跳转，或执行其他会改变当前界面状态的操作。\n\n"
+                "请先让页面停留在目标状态，再框选需要的截图区域。",
+                parent=self.window,
+            )
 
         selection = _select_region_with_window_management(
             self.parent,

@@ -263,10 +263,18 @@ def _derive_parameter_values_for_method(
     normalized_method = method_name.strip().lower()
     if normalized_method == "findcontrolbyname":
         return _derive_find_control_by_name_values(event, ai_observation_text)
+    if normalized_method == "getscreenshot":
+        return _derive_get_screenshot_values(event)
+    if normalized_method == "waitforexists":
+        return _derive_wait_for_exists_values(event)
+    if normalized_method == "agentinterface":
+        return _derive_agent_interface_values(event)
     if normalized_method == "manualcheck":
         return _derive_manual_check_values(event)
     if normalized_method == "sendkeys":
         return _derive_send_keys_values(event)
+    if normalized_method == "click":
+        return _derive_click_values(event)
     if normalized_method == "wheel":
         return _derive_wheel_values(event)
     if normalized_method == "dragdrop":
@@ -304,18 +312,18 @@ def _derive_find_control_by_name_values(
         else:
             missing_map["Name"] = "AI看图和事件明细中都没有可用的 Name/HelpText。"
 
-    direction = _normalize_find_control_direction(str(observation.get("direction", "")).strip())
-    if direction:
+    direction = str(observation.get("direction", "")).strip().lower()
+    if direction and direction != "self":
         derived_values["direction"] = direction
         evidence_map["direction"] = [f"AI看图: direction={observation.get('direction', '')}"]
 
-    control_type = str(observation.get("control_type", "")).strip()
-    if not control_type:
-        control_type = str(ui_element.get("control_type", "")).strip()
-        if control_type:
-            evidence_map["controlTypeList"] = [f"事件明细.ui_element.control_type={control_type}"]
+    control_type = str(ui_element.get("control_type", "")).strip()
+    if control_type:
+        evidence_map["controlTypeList"] = [f"事件明细.ui_element.control_type={control_type}"]
     else:
-        evidence_map["controlTypeList"] = [f"AI看图: control_type={control_type}"]
+        control_type = str(observation.get("control_type", "")).strip()
+        if control_type:
+            evidence_map["controlTypeList"] = [f"AI看图: control_type={control_type}"]
     if control_type:
         derived_values["controlTypeList"] = [control_type]
 
@@ -377,6 +385,87 @@ def _derive_generic_parameter_values(
     return derived_values, evidence_map, missing_map
 
 
+def _derive_get_screenshot_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
+    media_items = event.get("media", []) if isinstance(event.get("media", []), list) else []
+    derived_values: dict[str, Any] = {}
+    evidence_map: dict[str, list[str]] = {}
+    missing_map: dict[str, str] = {}
+
+    file_name = _extract_first_media_file_name(media_items)
+    if file_name:
+        derived_values["filePath"] = file_name
+        evidence_map["filePath"] = [f"事件明细.media[0].path 文件名={file_name}"]
+    else:
+        missing_map["filePath"] = "事件明细中没有可用的 media.path。"
+
+    return derived_values, evidence_map, missing_map
+
+
+def _derive_wait_for_exists_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
+    media_items = event.get("media", []) if isinstance(event.get("media", []), list) else []
+    note_text = str(event.get("note", "")).strip()
+    derived_values: dict[str, Any] = {}
+    evidence_map: dict[str, list[str]] = {}
+    missing_map: dict[str, str] = {}
+
+    source_paths = [
+        str(item.get("path", "")).strip()
+        for item in media_items
+        if isinstance(item, dict) and str(item.get("path", "")).strip()
+    ]
+    if len(source_paths) == 1:
+        derived_values["sourcePath"] = source_paths[0]
+        evidence_map["sourcePath"] = [f"事件明细.media[0].path={source_paths[0]}"]
+    elif len(source_paths) > 1:
+        derived_values["sourcePath"] = source_paths
+        evidence_map["sourcePath"] = [f"事件明细.media.path 列表={source_paths}"]
+    else:
+        missing_map["sourcePath"] = "事件明细中没有可用的 media.path。"
+
+    if note_text:
+        derived_values["Description"] = note_text
+        evidence_map["Description"] = [f"事件明细.note={note_text}"]
+    else:
+        missing_map["Description"] = "事件明细.note 为空，无法生成 WaitForExists.Description。"
+
+    return derived_values, evidence_map, missing_map
+
+
+def _derive_agent_interface_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
+    checkpoint = event.get("checkpoint", {}) if isinstance(event.get("checkpoint", {}), dict) else {}
+    media_items = event.get("media", []) if isinstance(event.get("media", []), list) else []
+    derived_values: dict[str, Any] = {}
+    evidence_map: dict[str, list[str]] = {}
+    missing_map: dict[str, str] = {}
+
+    step_comment = str(checkpoint.get("step_comment", "")).strip()
+    if step_comment:
+        derived_values["Description"] = step_comment
+        evidence_map["Description"] = [f"事件明细.checkpoint.step_comment={step_comment}"]
+
+    title = str(checkpoint.get("title", "")).strip()
+    if title:
+        derived_values["Expect"] = title
+        evidence_map["Expect"] = [f"事件明细.checkpoint.title={title}"]
+
+    query = str(checkpoint.get("query", "")).strip()
+    if query:
+        derived_values["query"] = query
+        evidence_map["query"] = [f"事件明细.checkpoint.query={query}"]
+
+    rect = _extract_agent_interface_rect(media_items)
+    if rect is not None:
+        derived_values["rect"] = rect
+        evidence_map["rect"] = [f"事件明细.media[0].region={rect}"]
+
+    image_list = _extract_agent_interface_image_list(media_items)
+    if image_list:
+        derived_values["imageList"] = image_list
+        evidence_map["imageList"] = [f"事件明细.media[1:] 路径文件名={image_list}"]
+
+    return derived_values, evidence_map, missing_map
+
+
 def _derive_manual_check_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
     note_text = str(event.get("note", "")).strip()
     derived_values: dict[str, Any] = {}
@@ -423,6 +512,39 @@ def _derive_send_keys_values(event: dict[str, Any]) -> tuple[dict[str, Any], dic
             evidence_map["text"].append(f"事件明细.additional_details.combined_action={combined_action}")
         if "key" in evidence_map:
             evidence_map["key"].append(f"事件明细.additional_details.combined_action={combined_action}")
+
+    return derived_values, evidence_map, missing_map
+
+
+def _derive_click_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
+    mouse = event.get("mouse", {}) if isinstance(event.get("mouse", {}), dict) else {}
+    derived_values: dict[str, Any] = {}
+    evidence_map: dict[str, list[str]] = {}
+    missing_map: dict[str, str] = {}
+
+    button_name = _normalize_mouse_button(str(mouse.get("button", "")).strip())
+    if button_name:
+        derived_values["button"] = button_name
+        evidence_map["button"] = [f"事件明细.mouse.button={mouse.get('button', '')}"]
+    else:
+        missing_map["button"] = "事件明细缺少可识别的鼠标按键。"
+
+    x = mouse.get("x")
+    y = mouse.get("y")
+    if isinstance(x, int):
+        derived_values["x"] = x
+        evidence_map["x"] = [f"事件明细.mouse.x={x}"]
+    else:
+        missing_map["x"] = "事件明细缺少 x 坐标。"
+    if isinstance(y, int):
+        derived_values["y"] = y
+        evidence_map["y"] = [f"事件明细.mouse.y={y}"]
+    else:
+        missing_map["y"] = "事件明细缺少 y 坐标。"
+
+    if "x" in derived_values and "y" in derived_values:
+        derived_values["absolute"] = True
+        evidence_map["absolute"] = ["Click 类型按屏幕绝对坐标点击，参数推荐使用 absolute=True"]
 
     return derived_values, evidence_map, missing_map
 
@@ -505,6 +627,7 @@ def _build_parameter_suggestions_from_schema(
     ordered_names = [str(item.get("name", "")).strip() for item in schema_fields if str(item.get("name", "")).strip()]
     if not ordered_names:
         ordered_names = list(derived_values.keys())
+    ordered_names = _reorder_parameter_names_for_method(str(suggestion.method_name or ""), ordered_names)
 
     suggestions: list[MethodParameterSuggestion] = []
     seen_names: set[str] = set()
@@ -542,7 +665,45 @@ def _build_parameter_suggestions_from_schema(
                 missing_reason="",
             )
         )
-    return suggestions
+    return _reorder_parameter_suggestions(str(suggestion.method_name or ""), suggestions)
+
+
+def _reorder_parameter_names_for_method(method_name: str, ordered_names: list[str]) -> list[str]:
+    priority_names = ["Name", "HelpText", "direction", "scrollable", "cellValue"]
+    reordered = list(ordered_names)
+    for name in reversed(priority_names):
+        reordered = _move_name_to_front(reordered, name)
+    normalized_method = str(method_name or "").strip().lower()
+    if normalized_method == "findcontrolbyname":
+        return reordered
+    if normalized_method == "click":
+        for name in reversed(["absolute", "y", "x", "button"]):
+            reordered = _move_name_to_front(reordered, name)
+        return reordered
+    return reordered
+
+
+def _reorder_parameter_suggestions(method_name: str, suggestions: list[MethodParameterSuggestion]) -> list[MethodParameterSuggestion]:
+    priority_order = {"Name": 0, "HelpText": 1, "direction": 2, "scrollable": 3, "cellValue": 4}
+    normalized_method = str(method_name or "").strip().lower()
+    if normalized_method == "click":
+        priority_order = {"button": 0, "x": 1, "y": 2, "absolute": 3}
+    indexed = list(enumerate(suggestions))
+    indexed.sort(key=lambda item: (priority_order.get(str(item[1].name), 999), item[0]))
+    return [item for _index, item in indexed]
+
+
+def _move_name_to_front(names: list[str], target_name: str) -> list[str]:
+    target_indexes = [index for index, item in enumerate(names) if item == target_name]
+    if not target_indexes:
+        return names
+    target_index = target_indexes[0]
+    if target_index == 0:
+        return names
+    reordered = list(names)
+    target_value = reordered.pop(target_index)
+    reordered.insert(0, target_value)
+    return reordered
 
 
 def _extract_schema_fields(suggestion: MethodSelectionSuggestion) -> list[dict[str, Any]]:
@@ -557,6 +718,8 @@ def _extract_schema_fields(suggestion: MethodSelectionSuggestion) -> list[dict[s
         filtered_fields = [item for item in schema_fields if isinstance(item, dict)]
         if str(suggestion.method_name or "").strip().lower() == "sendkeys":
             return [item for item in filtered_fields if str(item.get("name", "")).strip() in {"text", "key"}]
+        if str(suggestion.method_name or "").strip().lower() == "click":
+            return [item for item in filtered_fields if str(item.get("name", "")).strip() in {"absolute", "x", "y"}]
         return filtered_fields
     return []
 
@@ -615,6 +778,45 @@ def _extract_scroll_point(scroll: dict[str, Any], mouse: dict[str, Any]) -> tupl
     if isinstance(mouse_x, int) and isinstance(mouse_y, int):
         return mouse_x, mouse_y
     return None, None
+
+
+def _extract_agent_interface_rect(media_items: list[Any]) -> list[int] | None:
+    if not media_items:
+        return None
+    first_item = media_items[0] if isinstance(media_items[0], dict) else {}
+    region = first_item.get("region", {}) if isinstance(first_item.get("region", {}), dict) else {}
+    left = region.get("left")
+    top = region.get("top")
+    right = region.get("right")
+    bottom = region.get("bottom")
+    if all(isinstance(value, int) for value in (left, top, right, bottom)):
+        return [left, top, right, bottom]
+    return None
+
+
+def _extract_agent_interface_image_list(media_items: list[Any]) -> list[str]:
+    if len(media_items) <= 1:
+        return []
+
+    image_names: list[str] = []
+    for item in media_items[1:]:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("path", "")).strip()
+        if not raw_path:
+            continue
+        image_names.append(Path(raw_path).name)
+    return image_names
+
+
+def _extract_first_media_file_name(media_items: list[Any]) -> str:
+    if not media_items:
+        return ""
+    first_item = media_items[0] if isinstance(media_items[0], dict) else {}
+    raw_path = str(first_item.get("path", "")).strip()
+    if not raw_path:
+        return ""
+    return Path(raw_path).name
 
 
 def _derive_send_keys_text_value(keyboard: dict[str, Any]) -> str:
@@ -781,6 +983,8 @@ def _should_skip_missing_parameter(
     method_name = str(suggestion.method_name or "").strip().lower()
     parameter_name = str(name or "").strip()
     if method_name == "sendkeys" and parameter_name in {"text", "key"} and value is None and not missing_reason:
+        return True
+    if method_name == "waitforexists" and value is None:
         return True
     return False
 

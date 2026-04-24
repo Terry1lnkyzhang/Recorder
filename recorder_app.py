@@ -2,4 +2,4 @@ from src.recorder.app import launch_app
 
 
 if __name__ == "__main__":
-    launch_app()
+    launch_app()                                

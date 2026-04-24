@@ -99,17 +99,11 @@ class OpenAICompatibleAIClient:
                         }
                     )
 
-        body = {
-            "model": self.settings.model,
-            "temperature": self.settings.temperature,
-            "chat_template_kwargs": {"enable_thinking": self.settings.enable_thinking},
-            "messages": [
-                {"role": "system", "content": system_prompt or self.settings.default_system_prompt},
-                {"role": "user", "content": content},
-            ],
-        }
-        if extra_body:
-            body.update(extra_body)
+        body = self._build_request_body(
+            content=content,
+            system_prompt=system_prompt,
+            extra_body=extra_body,
+        )
 
         headers = {"Content-Type": "application/json"}
         if self.settings.api_key:
@@ -134,17 +128,26 @@ class OpenAICompatibleAIClient:
         with self._session_lock:
             self._active_session = session
         try:
-            response = session.post(
-                self.settings.endpoint,
-                headers=headers,
-                json=body,
-                timeout=self.settings.timeout_seconds,
-            )
-            response.raise_for_status()
+            response = self._post_with_fallback(session, headers, body)
+        except requests.HTTPError as exc:
+            if cancel_callback and cancel_callback():
+                raise AIClientError("AI 分析已取消。") from exc
+            response = exc.response
+            status_code = response.status_code if response is not None else "?"
+            preview = ""
+            if response is not None:
+                try:
+                    preview = response.text[:600].replace("\n", " ").strip()
+                except Exception:
+                    preview = ""
+            message = f"AI 请求失败: HTTP {status_code}"
+            if preview:
+                message = f"{message} | {preview}"
+            raise AIClientError(message) from exc
         except requests.RequestException as exc:
             if cancel_callback and cancel_callback():
                 raise AIClientError("AI 分析已取消。") from exc
-            raise
+            raise AIClientError(f"AI 请求失败: {exc}") from exc
         finally:
             with self._session_lock:
                 if self._active_session is session:
@@ -173,6 +176,78 @@ class OpenAICompatibleAIClient:
             "sampled_video_frames": len(sampled_frames),
             "direct_video_upload": bool(video_path and self.settings.send_video_directly),
         }
+
+    def _build_request_body(
+        self,
+        content: list[dict[str, object]],
+        system_prompt: str | None,
+        extra_body: dict[str, Any] | None,
+    ) -> dict[str, object]:
+        body = {
+            "model": self.settings.model,
+            "temperature": self.settings.temperature,
+            "chat_template_kwargs": {"enable_thinking": self.settings.enable_thinking},
+            "messages": [
+                {"role": "system", "content": system_prompt or self.settings.default_system_prompt},
+                {"role": "user", "content": content},
+            ],
+        }
+        if extra_body:
+            body.update(extra_body)
+        return body
+
+    def _post_with_fallback(self, session: requests.Session, headers: dict[str, str], body: dict[str, object]) -> requests.Response:
+        variants = self._build_request_body_variants(body)
+        last_error: requests.HTTPError | None = None
+        for variant in variants:
+            response = session.post(
+                self.settings.endpoint,
+                headers=headers,
+                json=variant,
+                timeout=self.settings.timeout_seconds,
+            )
+            try:
+                response.raise_for_status()
+                return response
+            except requests.HTTPError as exc:
+                last_error = exc
+                if not self._should_retry_with_minimal_body(response):
+                    raise
+        if last_error is not None:
+            raise last_error
+        raise AIClientError("AI 请求失败: 未获得有效响应。")
+
+    def _build_request_body_variants(self, body: dict[str, object]) -> list[dict[str, object]]:
+        variants: list[dict[str, object]] = [dict(body)]
+
+        without_chat_template = dict(body)
+        without_chat_template.pop("chat_template_kwargs", None)
+        if without_chat_template != variants[-1]:
+            variants.append(without_chat_template)
+
+        minimal_body = {
+            "model": body.get("model", self.settings.model),
+            "messages": body.get("messages", []),
+        }
+        extra_fields = body.get("max_tokens")
+        if extra_fields is not None:
+            minimal_body["max_tokens"] = extra_fields
+        if minimal_body != variants[-1]:
+            variants.append(minimal_body)
+
+        return variants
+
+    @staticmethod
+    def _should_retry_with_minimal_body(response: requests.Response | None) -> bool:
+        if response is None:
+            return False
+        if response.status_code < 500:
+            return False
+        try:
+            preview = response.text[:600].lower()
+        except Exception:
+            preview = ""
+        return "param null" in preview or "null" in preview or "internal server error" in preview
 
     def cancel(self) -> None:
         with self._session_lock:

@@ -25,7 +25,7 @@ class Settings:
     send_video_directly: bool = True
     analysis_batch_size: int = 1
     send_fullscreen_screenshots: bool = False
-    ai_observation_excluded_process_names: str = "explorer\nmsedge"
+    ai_observation_excluded_process_names: str = "explorer\nmsedge\nnotepad\nwordpad\nwrite"
     analysis_system_prompt: str = (
         "你是桌面自动化操作分析助手。"
     )

@@ -11,7 +11,7 @@
   "video_fps": 5,
   "analysis_batch_size": 1,
   "send_fullscreen_screenshots": false,
-  "ai_observation_excluded_process_names": "explorer\nmsedge",
+  "ai_observation_excluded_process_names": "explorer\nmsedge\nnotepad\nwordpad\nwrite",
   "analysis_system_prompt": "你是桌面自动化操作分析助手。",
   "exclude_recorder_process_windows": true,
   "excluded_process_names": "",

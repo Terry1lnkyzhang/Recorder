@@ -71,6 +71,8 @@ def normalize_event_type(value: Any, action: Any = "") -> str:
         return "mouseAction"
     if lowered in {"mouse_click", "controloperation"}:
         return "controlOperation"
+        if lowered == "click":
+            return "Click"
     return event_type
 
 

@@ -12,11 +12,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 import tkinter as tk
 
+import requests
 import yaml
 from PIL import Image
 
 from src.ai import AISuggestionService
 from src.ai.client import OpenAICompatibleAIClient
+from src.ai.method_mapping import resolve_method_name_for_event
 from src.ai.remote_service_client import RemoteAIServiceClient
 from src.ai.session_analyzer import SessionWorkflowAnalyzer
 from src.common.display_utils import prepare_image_path_for_ai
@@ -24,7 +26,7 @@ from src.common.image_widgets import ZoomableImageView
 from src.common.media_utils import load_video_preview_frame
 from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
 from src.common.session_discovery import find_latest_session_dir, scan_session_candidates
-from src.converter.compiler import export_suggestions_to_atframework_yaml
+from src.converter.compiler import build_atframework_yaml_dict, export_suggestions_to_atframework_yaml
 from src.recorder.models import format_recorded_action, normalize_event_type, normalize_keyboard_key_name
 from src.recorder.dialogs import (
     AICheckpointDraft,
@@ -77,6 +79,7 @@ class RecorderViewerWindow:
         self.ai_analysis: dict[str, object] | None = None
         self.ai_step_tags: dict[int, str] = {}
         self.ai_step_texts: dict[int, str] = {}
+        self.ai_process_summary_texts: dict[int, str] = {}
         self.suggestion_service = AISuggestionService()
         self.suggestion_result = None
         self.step_method_suggestions: dict[int, str] = {}
@@ -84,12 +87,15 @@ class RecorderViewerWindow:
         self.step_parameter_summaries: dict[int, str] = {}
         self.parameter_prompt_by_step: dict[int, str] = {}
         self.parameter_response_by_step: dict[int, str] = {}
-        self.current_analyzer: SessionWorkflowAnalyzer | None = None
+        self.current_analyzer: SessionWorkflowAnalyzer | OpenAICompatibleAIClient | None = None
         self.close_callback = None
         self.analysis_running = False
+        self.analysis_cancel_event = threading.Event()
         self.coverage_query_running = False
         self.parameter_recommendation_running = False
         self.suggestion_generation_running = False
+        self.export_yaml_running = False
+        self.debug_run_running = False
         self.analysis_started_at = 0.0
         self.analysis_status_base = "未执行 AI 分析"
         self.analysis_status_token = 0
@@ -153,15 +159,20 @@ class RecorderViewerWindow:
         self.ai_button.pack(side=tk.LEFT, padx=(8, 0))
         self.selected_ai_button = ttk.Button(toolbar, text="AI分析选中行", command=self.run_selected_ai_analysis)
         self.selected_ai_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.ai_process_summary_button = ttk.Button(toolbar, text="AI总结", command=self.run_ai_process_summary)
+        self.ai_process_summary_button.pack(side=tk.LEFT, padx=(8, 0))
         self.load_ai_button = ttk.Button(toolbar, text="加载历史AI结果", command=self.load_historical_ai_analysis, state=tk.DISABLED)
         self.load_ai_button.pack(side=tk.LEFT, padx=(8, 0))
         self.cancel_ai_button = ttk.Button(toolbar, text="终止AI分析", command=self.cancel_ai_analysis, state=tk.DISABLED)
         self.cancel_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.generate_suggestion_button = ttk.Button(toolbar, text="生成方法建议", command=self.run_method_suggestion_generation)
+        self.generate_suggestion_button = ttk.Button(toolbar, text="为当前步骤生成方法建议", command=self.run_method_suggestion_generation)
         self.generate_suggestion_button.pack(side=tk.LEFT, padx=(8, 0))
         self.parameter_recommend_button = ttk.Button(toolbar, text="为当前步骤生成参数推荐", command=self.run_parameter_recommendation)
         self.parameter_recommend_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="转成ATFramework YAML", command=self.export_atframework_yaml).pack(side=tk.LEFT, padx=(8, 0))
+        self.export_yaml_button = ttk.Button(toolbar, text="转成ATFramework YAML", command=self.export_atframework_yaml)
+        self.export_yaml_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.debug_run_button = ttk.Button(toolbar, text="调试", command=self.debug_atframework_steps)
+        self.debug_run_button.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text="全选步骤", command=self.select_all_events).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text="应用AI删除建议", command=self.apply_ai_deletions).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text="数据清洗", command=self.preview_cleaning).pack(side=tk.LEFT, padx=(8, 0))
@@ -219,7 +230,7 @@ class RecorderViewerWindow:
 
         self.tree = ttk.Treeview(
             left,
-            columns=("idx", "event_type", "action", "time", "process_name", "comment", "method_suggestion", "module_suggestion", "parameter_suggestion", "ai_note"),
+            columns=("idx", "event_type", "action", "time", "process_name", "method_suggestion", "parameter_suggestion", "comment", "ai_note", "ai_summary", "module_suggestion"),
             show="headings",
             selectmode="extended",
         )
@@ -228,21 +239,23 @@ class RecorderViewerWindow:
         self.tree.heading("action", text=self._build_filter_heading_text("action"))
         self.tree.heading("time", text="时间")
         self.tree.heading("process_name", text=self._build_filter_heading_text("process"))
-        self.tree.heading("comment", text="Comment")
         self.tree.heading("method_suggestion", text="方法建议")
-        self.tree.heading("module_suggestion", text="模块建议")
         self.tree.heading("parameter_suggestion", text="参数建议")
+        self.tree.heading("comment", text="Comment")
         self.tree.heading("ai_note", text="AI看图")
+        self.tree.heading("ai_summary", text="AI总结")
+        self.tree.heading("module_suggestion", text="模块建议")
         self.tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
         self.tree.column("event_type", width=110, minwidth=92, anchor=tk.W, stretch=False)
         self.tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
         self.tree.column("time", width=132, minwidth=118, anchor=tk.W, stretch=False)
         self.tree.column("process_name", width=150, minwidth=120, anchor=tk.W, stretch=False)
-        self.tree.column("comment", width=180, minwidth=120, anchor=tk.W, stretch=False)
         self.tree.column("method_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
-        self.tree.column("module_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
-        self.tree.column("parameter_suggestion", width=320, minwidth=180, anchor=tk.W, stretch=True)
+        self.tree.column("parameter_suggestion", width=320, minwidth=180, anchor=tk.W, stretch=False)
+        self.tree.column("comment", width=220, minwidth=140, anchor=tk.W, stretch=True)
         self.tree.column("ai_note", width=420, minwidth=240, anchor=tk.W, stretch=False)
+        self.tree.column("ai_summary", width=420, minwidth=240, anchor=tk.W, stretch=False)
+        self.tree.column("module_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<<TreeviewSelect>>", self.on_select_event)
         self.tree.bind("<Double-1>", self.on_double_click)
@@ -600,7 +613,7 @@ class RecorderViewerWindow:
 
         tree = ttk.Treeview(
             wrapper,
-            columns=("idx", "event_type", "action", "time", "process_name", "comment", "method_suggestion", "module_suggestion", "parameter_suggestion", "ai_note"),
+            columns=("idx", "event_type", "action", "time", "process_name", "method_suggestion", "parameter_suggestion", "comment", "ai_note", "ai_summary", "module_suggestion"),
             show="headings",
             selectmode="extended",
         )
@@ -632,21 +645,23 @@ class RecorderViewerWindow:
         tree.heading("action", text=self._build_filter_heading_text("action"))
         tree.heading("time", text="时间")
         tree.heading("process_name", text=self._build_filter_heading_text("process"))
-        tree.heading("comment", text="Comment")
         tree.heading("method_suggestion", text="方法建议")
-        tree.heading("module_suggestion", text="模块建议")
         tree.heading("parameter_suggestion", text="参数建议")
+        tree.heading("comment", text="Comment")
         tree.heading("ai_note", text="AI看图")
+        tree.heading("ai_summary", text="AI总结")
+        tree.heading("module_suggestion", text="模块建议")
         tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
         tree.column("event_type", width=110, minwidth=92, anchor=tk.W, stretch=False)
         tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
         tree.column("time", width=132, minwidth=118, anchor=tk.W, stretch=False)
         tree.column("process_name", width=150, minwidth=120, anchor=tk.W, stretch=False)
-        tree.column("comment", width=180, minwidth=120, anchor=tk.W, stretch=False)
         tree.column("method_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
-        tree.column("module_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
-        tree.column("parameter_suggestion", width=320, minwidth=180, anchor=tk.W, stretch=True)
+        tree.column("parameter_suggestion", width=320, minwidth=180, anchor=tk.W, stretch=False)
+        tree.column("comment", width=220, minwidth=140, anchor=tk.W, stretch=True)
         tree.column("ai_note", width=420, minwidth=240, anchor=tk.W, stretch=False)
+        tree.column("ai_summary", width=420, minwidth=240, anchor=tk.W, stretch=False)
+        tree.column("module_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
 
     def _reload_event_list_popup(self) -> None:
         if not self.event_list_tree or not self.event_list_tree.winfo_exists():
@@ -791,11 +806,11 @@ class RecorderViewerWindow:
         self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
         self._set_text_widget(self.parameter_result_text, "")
         self._update_historical_ai_button_state()
+        self._restore_historical_analysis_outputs()
         self._refresh_coverage_summary()
         self._refresh_filter_options()
         self._load_session_metadata_editor()
         self.summary_var.set(self._build_session_summary_text())
-        self._try_load_historical_suggestions()
         self._reload_tree()
         self._reload_event_list_popup()
 
@@ -1133,6 +1148,8 @@ class RecorderViewerWindow:
         if tree is None:
             return None
         region = tree.identify_region(event.x, event.y)
+        if region == "separator":
+            return None
         if region != "heading":
             return None
         column_id = tree.identify_column(event.x)
@@ -1306,12 +1323,32 @@ class RecorderViewerWindow:
         self.ai_analysis = analysis
         self.ai_step_tags = self._build_ai_step_tags(analysis)
         self.ai_step_texts = self._build_ai_step_texts(analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(analysis)
         self.ai_var.set(f"已加载历史 AI 分析结果 | {self._build_ai_summary_text(analysis)}")
         self._try_load_historical_suggestions()
         self._refresh_ai_panels()
         self._refresh_selected_suggestion_panel()
         self._refresh_coverage_summary()
         self._reload_tree()
+
+    def _restore_historical_analysis_outputs(self) -> None:
+        if not self.session_dir:
+            return
+        analysis = self._load_ai_analysis(self.session_dir)
+        if analysis:
+            self.ai_analysis = analysis
+            self.ai_step_tags = self._build_ai_step_tags(analysis)
+            self.ai_step_texts = self._build_ai_step_texts(analysis)
+            self.ai_process_summary_texts = self._build_ai_process_summary_texts(analysis)
+            self.ai_var.set(f"已自动加载历史 AI 分析结果 | {self._build_ai_summary_text(analysis)}")
+        else:
+            self.ai_analysis = None
+            self.ai_step_tags = {}
+            self.ai_step_texts = {}
+            self.ai_process_summary_texts = {}
+        self._try_load_historical_suggestions()
+        self._refresh_ai_panels()
+        self._refresh_selected_suggestion_panel()
 
     def _update_historical_ai_button_state(self) -> None:
         has_history = bool(self.session_dir and (self.session_dir / "ai_analysis.json").exists())
@@ -1417,46 +1454,49 @@ class RecorderViewerWindow:
 
         self._select_row_index(int(row_id), source_tree=tree)
 
-        if column_id == "#9":
-            suggestion = self._find_suggestion_by_row_index(int(row_id))
-            if suggestion is None:
+        if column_id == "#2":
+            self._edit_event_type(int(row_id))
+            return
+
+        if column_id in {"#6", "#7"}:
+            if column_id == "#6":
+                self._edit_method_or_module_suggestion(int(row_id), "method_name")
+            else:
+                self._edit_parameter_suggestion(int(row_id))
+            return
+
+        if column_id == "#8":
+            index = int(row_id)
+            current = self._extract_comment(self.event_rows[index])
+            new_comment = simpledialog.askstring("编辑 Comment", "请输入 comment:", initialvalue=current, parent=self.window)
+            if new_comment is None:
                 return
-            self.details_notebook.select(self.ai_tab)
-            self.tree.selection_set(row_id)
-            self.tree.focus(row_id)
-            self.on_select_event(None)
-            self._show_text_dialog(f"步骤 {int(row_id) + 1} 参数建议", self._format_parameter_detail_text(suggestion))
+
+            self._update_event_comment(index, new_comment)
+            self._persist_session()
+            self._reload_tree()
+            self._reload_event_list_popup()
+            self._select_row_index(index)
+            return
+
+        if column_id == "#3":
+            self._edit_event_action(int(row_id))
+            return
+
+        if column_id not in {"#9", "#10", "#11"}:
+            return
+
+        if column_id == "#9":
+            self._edit_ai_note(int(row_id))
             return
 
         if column_id == "#10":
-            full_text = self._describe_event_for_view(int(row_id), self.event_rows[int(row_id)])
-            if full_text:
-                self._show_text_dialog(f"步骤 {int(row_id) + 1} AI看图", full_text)
+            self._edit_ai_process_summary(int(row_id))
             return
 
-        if column_id in {"#7", "#8"}:
-            values = tree.item(row_id, "values")
-            column_index = int(column_id.replace("#", "")) - 1
-            full_text = str(values[column_index]) if column_index < len(values) else ""
-            if full_text:
-                title = "方法建议" if column_id == "#7" else "模块建议"
-                self._show_text_dialog(f"步骤 {int(row_id) + 1} {title}", full_text)
+        if column_id == "#11":
+            self._edit_method_or_module_suggestion(int(row_id), "script_name")
             return
-
-        if column_id != "#6":
-            return
-
-        index = int(row_id)
-        current = self._extract_comment(self.event_rows[index])
-        new_comment = simpledialog.askstring("编辑 Comment", "请输入 comment:", initialvalue=current, parent=self.window)
-        if new_comment is None:
-            return
-
-        self._update_event_comment(index, new_comment)
-        self._persist_session()
-        self._reload_tree()
-        self._reload_event_list_popup()
-        self._select_row_index(index)
 
     def _build_event_row_values(self, row_index: int, event: dict[str, object]) -> tuple[object, ...]:
         comment = self._extract_comment(event)
@@ -1464,17 +1504,19 @@ class RecorderViewerWindow:
         module_suggestion = self._describe_module_suggestion_for_view(row_index)
         parameter_suggestion = self._describe_parameter_suggestion_for_view(row_index)
         ai_note = self._describe_event_for_view(row_index, event)
+        ai_summary = self._describe_process_summary_for_view(row_index)
         return (
             row_index + 1,
             self._extract_event_type(event),
             self._extract_event_action(event),
             self._format_timestamp(event.get("timestamp", "")),
             self._extract_process_name(event),
-            comment,
             method_suggestion,
-            module_suggestion,
             parameter_suggestion,
+            comment,
             ai_note,
+            ai_summary,
+            module_suggestion,
         )
 
     def _extract_process_name(self, event: dict[str, object]) -> str:
@@ -1536,6 +1578,7 @@ class RecorderViewerWindow:
         self.ai_analysis = None
         self.ai_step_tags = {}
         self.ai_step_texts = {}
+        self.ai_process_summary_texts = {}
         self.suggestion_result = None
         self.step_method_suggestions = {}
         self.step_module_suggestions = {}
@@ -1561,10 +1604,53 @@ class RecorderViewerWindow:
                 self.event_list_tree.item(item_id, tags=self._build_row_tags(int(item_id), include_cleaning=False))
 
     def run_ai_analysis(self) -> None:
-        self._start_ai_analysis()
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        settings = self.settings_store.load()
+        target_rows = self._build_default_ai_analysis_row_indexes(settings)
+        if not target_rows:
+            messagebox.showinfo("提示", "当前没有可执行 AI 分析的步骤。", parent=self.window)
+            return
+        self._start_ai_analysis(target_rows)
+
+    def run_ai_process_summary(self) -> None:
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        if self.analysis_running:
+            return
+        selected_rows = self._get_selected_row_indexes()
+        if selected_rows:
+            should_use_selected_rows = messagebox.askyesno(
+                "AI总结",
+                f"检测到当前选中了 {len(selected_rows)} 行。\n\n是否仅对选中行执行总结？\n\n选择“是”：忽略按进程分段，把当前选中的步骤作为一个整体总结。\n选择“否”：继续按当前默认逻辑，对整次录制按进程分段总结。",
+                parent=self.window,
+            )
+            if should_use_selected_rows:
+                self._start_ai_process_summary(selected_rows=selected_rows)
+                return
+        self._start_ai_process_summary()
 
     def run_method_suggestion_generation(self) -> None:
-        self._generate_method_suggestions_async(status_message="正在生成方法建议...", interactive=True)
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        selected_rows = self._get_selected_row_indexes()
+        if not selected_rows:
+            messagebox.showinfo("提示", "请先选择至少一个步骤。", parent=self.window)
+            return
+        if len(selected_rows) == 1:
+            status_message = f"正在为步骤 {selected_rows[0] + 1} 生成方法建议..."
+        else:
+            preview = ", ".join(str(row_index + 1) for row_index in selected_rows[:8])
+            suffix = "..." if len(selected_rows) > 8 else ""
+            status_message = f"正在为所选 {len(selected_rows)} 个步骤生成方法建议: {preview}{suffix}"
+        self._generate_method_suggestions_async(
+            selected_rows=selected_rows,
+            status_message=status_message,
+            interactive=True,
+        )
 
     def run_selected_ai_analysis(self) -> None:
         if not self.session_dir or not self.session_data:
@@ -1572,7 +1658,7 @@ class RecorderViewerWindow:
             return
         selected_rows = self._get_selected_row_indexes()
         if not selected_rows:
-            messagebox.showinfo("提示", "请先选择至少一行事件。", parent=self.window)
+            messagebox.showinfo("提示", "请先选择至少一个步骤。", parent=self.window)
             return
         self._start_ai_analysis(selected_rows)
 
@@ -1583,67 +1669,410 @@ class RecorderViewerWindow:
             return
 
         partial_row_indexes = self._normalize_selected_analysis_rows(selected_rows)
-        partial_mode = partial_row_indexes is not None
-        if partial_mode and not partial_row_indexes:
+        if not partial_row_indexes:
             messagebox.showinfo("提示", "所选行无可分析事件。", parent=self.window)
             return
 
-        analysis_session_data, step_id_mapping = self._build_analysis_session_data(partial_row_indexes)
-
         self.analysis_running = True
+        self.analysis_cancel_event.clear()
         self.ai_button.configure(state=tk.DISABLED)
         self.selected_ai_button.configure(state=tk.DISABLED)
+        self.ai_process_summary_button.configure(state=tk.DISABLED)
         self.cancel_ai_button.configure(state=tk.NORMAL)
         self.analysis_started_at = time.time()
-        self.analysis_status_base = "AI 分析预处理中（选中行）" if partial_mode else "AI 分析预处理中"
+        self.analysis_status_base = f"AI 分析预处理中（共 {len(partial_row_indexes)} 步）"
         self.analysis_status_token += 1
         self._refresh_analysis_status(self.analysis_status_token)
 
         def worker() -> None:
-            staged_session_dir: Path | None = None
             try:
                 settings = self.settings_store.load()
-                if settings.use_remote_ai_service:
-                    self.current_analyzer = None
-                    progress_payload = {"transport": "remote_service"}
-                    if partial_mode:
-                        progress_payload["selected_count"] = len(partial_row_indexes or [])
-                    self.window.after(0, lambda payload=progress_payload: self._on_ai_analysis_progress("send_request", payload))
-                    result = RemoteAIServiceClient(settings).analyze_session(self.session_dir, analysis_session_data)
-                    self.window.after(0, lambda payload=progress_payload: self._on_ai_analysis_progress("done", payload))
-                else:
-                    analyzer = SessionWorkflowAnalyzer(settings)
-                    self.current_analyzer = analyzer
-                    analysis_dir = self.session_dir
-                    if partial_mode:
-                        staged_session_dir = self._create_temp_analysis_session_dir(analysis_session_data)
-                        analysis_dir = staged_session_dir
-                    result = analyzer.analyze(
-                        analysis_dir,
-                        analysis_session_data,
-                        progress_callback=lambda stage, payload: self.window.after(
-                            0,
-                            lambda stage=stage, payload=payload: self._on_ai_analysis_progress(stage, payload),
+                client = OpenAICompatibleAIClient(settings)
+                self.current_analyzer = client
+                targets = self._build_ai_analysis_targets(partial_row_indexes, settings)
+                if not targets:
+                    raise ValueError("所选步骤在 AI 看图过滤范围外，或没有可发送给 AI 的图片。")
+                target_batches = [[target] for target in targets]
+                analyses: list[dict[str, object]] = []
+
+                for batch_index, target_batch in enumerate(target_batches, start=1):
+                    self._raise_if_analysis_cancel_requested()
+                    self.window.after(
+                        0,
+                        lambda batch_index=batch_index, total_batches=len(target_batches), count=len(target_batch), start_step=target_batch[0]["step_id"], end_step=target_batch[-1]["step_id"]: self._on_ai_analysis_progress(
+                            "batch_preprocess_done",
+                            {
+                                "current_batch": batch_index,
+                                "total_batches": total_batches,
+                                "start_step": start_step,
+                                "end_step": end_step,
+                                "image_count": count,
+                                "cropped_monitor_count": 0,
+                            },
                         ),
                     )
+
+                    response = client.query(
+                        user_prompt=self._build_single_pass_ai_analysis_prompt(target_batch),
+                        image_paths=[item["image_path"] for item in target_batch],
+                        system_prompt=(
+                            "你是桌面自动化单步看图助手。"
+                            "你会一次看到多张按步骤顺序排列的截图，以及每一步的事件元数据。"
+                            "必须严格按给定 step_id 输出 JSON 结果。"
+                        ),
+                        cancel_callback=self._is_analysis_cancel_requested,
+                        progress_callback=lambda stage, payload, batch_index=batch_index, total_batches=len(target_batches), start_step=target_batch[0]["step_id"], end_step=target_batch[-1]["step_id"]: self.window.after(
+                            0,
+                            lambda stage=stage, payload=payload, batch_index=batch_index, total_batches=total_batches, start_step=start_step, end_step=end_step: self._on_ai_analysis_progress(
+                                stage,
+                                {
+                                    "current_batch": batch_index,
+                                    "total_batches": total_batches,
+                                    "start_step": start_step,
+                                    "end_step": end_step,
+                                    **payload,
+                                },
+                            ),
+                        ),
+                    )
+                    analyses.append(self._build_single_pass_ai_analysis_result(target_batch, str(response.get("response_text", ""))))
+
+                self._raise_if_analysis_cancel_requested()
+                analysis = self._combine_single_pass_ai_analysis_results(analyses, 1)
             except Exception as exc:
                 message = str(exc)
                 self.window.after(0, lambda message=message: self._on_ai_analysis_failed(message))
                 return
-            finally:
-                if staged_session_dir is not None:
-                    shutil.rmtree(staged_session_dir.parent, ignore_errors=True)
-            analysis = result.to_dict()
-            if partial_mode:
-                analysis = self._remap_analysis_step_ids(analysis, step_id_mapping)
-                self.window.after(
-                    0,
-                    lambda analysis=analysis, partial_row_indexes=partial_row_indexes: self._on_selected_ai_analysis_success(analysis, partial_row_indexes or []),
-                )
-                return
-            self.window.after(0, lambda analysis=analysis: self._on_ai_analysis_success(analysis))
+
+            self.window.after(
+                0,
+                lambda analysis=analysis, partial_row_indexes=partial_row_indexes: self._on_selected_ai_analysis_success(analysis, partial_row_indexes or []),
+            )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _build_default_ai_analysis_row_indexes(self, settings) -> list[int]:
+        return [row_index for row_index, event in enumerate(self.event_rows) if self._is_event_supported_for_ai_analysis(event, settings)]
+
+    def _is_event_supported_for_ai_analysis(self, event: dict[str, object], settings) -> bool:
+        event_type = self._extract_event_type(event).strip().lower()
+        action = format_recorded_action(self._extract_event_action(event)).strip().lower()
+        if event_type in {"comment", "checkpoint", "getscreenshot"}:
+            return False
+        if event_type == "wait" or action in {"manual_comment", "ai_checkpoint", "getscreenshot", "manual_screenshot"}:
+            return False
+        if self._is_process_excluded_for_ai_analysis(event, settings):
+            return False
+        return self._resolve_event_primary_image_path(event) is not None
+
+    def _is_process_excluded_for_ai_analysis(self, event: dict[str, object], settings) -> bool:
+        process_name = self._normalize_process_name_for_ai_filter(self._extract_process_name(event))
+        if not process_name:
+            return False
+        excluded_process_names = self._build_ai_observation_excluded_process_names(settings)
+        return process_name in excluded_process_names
+
+    def _build_ai_observation_excluded_process_names(self, settings) -> set[str]:
+        normalized: set[str] = set()
+        for item in SettingsStore.parse_pattern_list(getattr(settings, "ai_observation_excluded_process_names", "")):
+            process_name = self._normalize_process_name_for_ai_filter(item)
+            if not process_name:
+                continue
+            normalized.add(process_name)
+            if process_name == "wordpad":
+                normalized.add("write")
+            elif process_name == "write":
+                normalized.add("wordpad")
+        return normalized
+
+    @staticmethod
+    def _normalize_process_name_for_ai_filter(process_name: object) -> str:
+        value = str(process_name or "").strip().lower().replace("\\", "/")
+        if not value:
+            return ""
+        name = value.rsplit("/", 1)[-1]
+        if name.endswith(".exe"):
+            name = name[:-4]
+        return name
+
+    def _resolve_event_primary_image_path(self, event: dict[str, object]) -> Path | None:
+        if not self.session_dir:
+            return None
+        media_items = event.get("media", [])
+        if isinstance(media_items, list):
+            for item in media_items:
+                if isinstance(item, dict) and item.get("type") == "image" and item.get("path"):
+                    candidate = self.session_dir / str(item.get("path"))
+                    if candidate.exists():
+                        return candidate
+        screenshot = event.get("screenshot")
+        if screenshot:
+            candidate = self.session_dir / str(screenshot)
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _build_ai_analysis_targets(self, row_indexes: list[int], settings) -> list[dict[str, object]]:
+        display_layout = self._get_session_display_layout()
+        cache_dir = self.session_dir / "ai_preprocessed" / "viewer_single_pass"
+        targets: list[dict[str, object]] = []
+        for row_index in row_indexes:
+            if not (0 <= row_index < len(self.event_rows)):
+                continue
+            event = self.event_rows[row_index]
+            if not self._is_event_supported_for_ai_analysis(event, settings):
+                continue
+            image_path = self._resolve_event_primary_image_path(event)
+            if image_path is None:
+                continue
+            prepared_path, _was_cropped = prepare_image_path_for_ai(
+                image_path,
+                event,
+                display_layout,
+                cache_dir,
+                send_fullscreen=settings.send_fullscreen_screenshots,
+                cache_key=f"viewer_single_pass_{row_index + 1:04d}",
+            )
+            optimized_path = self._optimize_ai_analysis_image(prepared_path, row_index + 1)
+            targets.append(
+                {
+                    "row_index": row_index,
+                    "step_id": row_index + 1,
+                    "image_path": optimized_path,
+                    "analysis_mode": self._determine_ai_analysis_mode(event),
+                    "event_type": self._extract_event_type(event),
+                    "action": self._extract_event_action(event),
+                    "process_name": self._extract_process_name(event),
+                    "ui_element": self._build_prompt_ui_element_for_viewer(event),
+                }
+            )
+        return targets
+
+    def _optimize_ai_analysis_image(self, image_path: Path, step_id: int) -> Path:
+        if not self.session_dir:
+            return image_path
+        output_dir = self.session_dir / "ai_preprocessed" / "viewer_single_pass_resized"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"step_{step_id:04d}.jpg"
+        try:
+            with Image.open(image_path) as image:
+                converted = image.convert("RGB")
+                converted.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+                converted.save(output_path, format="JPEG", quality=82, optimize=True)
+            return output_path
+        except Exception:
+            return image_path
+
+    def _determine_ai_analysis_mode(self, event: dict[str, object]) -> str:
+        return "control_observation" if resolve_method_name_for_event(event) == "FindControlByName" else "image_summary"
+
+    def _build_prompt_ui_element_for_viewer(self, event: dict[str, object]) -> dict[str, object]:
+        ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
+        payload: dict[str, object] = {}
+        for key in ("name", "control_type", "help_text", "automation_id", "class_name"):
+            value = str(ui_element.get(key, "")).strip()
+            if value:
+                payload[key] = value
+        return payload
+
+    def _build_single_pass_ai_analysis_prompt(self, targets: list[dict[str, object]]) -> str:
+        instruction = {
+            "task": "对给定步骤截图逐步输出 AI看图结果",
+            "requirements": [
+                "你会按顺序看到多张截图，每张截图对应 steps 数组里的同序步骤。",
+                "必须输出 step_results，且顺序与 steps 一致，step_id 必须原样返回。",
+                "当 analysis_mode=control_observation 时，沿用旧的 FindControlByName 看图规则，输出 control_type、label、relative_position、need_scroll、is_table、action，并尽量同时补 observation。",
+                "当 analysis_mode=image_summary 时，请只基于当前单张截图，输出详细中文 observation，总结这一步界面上发生了什么、用户在做什么。此时其余字段可留空或省略。",
+                "不要跨步骤合并，不要输出额外解释，只输出 JSON。",
+            ],
+            "json_schema_hint": {
+                "step_results": [
+                    {
+                        "step_id": 11,
+                        "analysis_mode": "control_observation",
+                        "control_type": "button",
+                        "label": "Save",
+                        "relative_position": "self",
+                        "need_scroll": False,
+                        "is_table": False,
+                        "action": "click",
+                        "observation": "label=Save | direction=self | control_type=button | scroll=false | table=false | action=click",
+                    },
+                    {
+                        "step_id": 12,
+                        "analysis_mode": "image_summary",
+                        "observation": "当前在资源管理器中浏览目标文件夹内容，并准备进行下一步操作。",
+                    },
+                ]
+            },
+            "steps": [
+                {
+                    "step_id": item["step_id"],
+                    "analysis_mode": item["analysis_mode"],
+                    "event_type": item["event_type"],
+                    "action": item["action"],
+                    "process_name": item["process_name"],
+                    "ui_element": item["ui_element"],
+                }
+                for item in targets
+            ],
+        }
+        return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+    def _build_single_pass_ai_analysis_result(self, targets: list[dict[str, object]], response_text: str) -> dict[str, object]:
+        parsed = self._parse_viewer_ai_json(response_text)
+        values = parsed.get("step_results", []) if isinstance(parsed, dict) else []
+        results_by_step: dict[int, dict[str, object]] = {}
+        if isinstance(values, list):
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                step_id = int(item.get("step_id", 0) or 0)
+                if step_id > 0:
+                    results_by_step[step_id] = item
+
+        step_observations: list[dict[str, object]] = []
+        step_insights: list[dict[str, object]] = []
+        for target in targets:
+            step_id = int(target["step_id"])
+            item = results_by_step.get(step_id, {})
+            observation = self._normalize_single_pass_observation_text(target, item)
+            if not observation:
+                continue
+            observation_item: dict[str, object] = {"step_id": step_id, "observation": observation}
+            if target["analysis_mode"] == "control_observation":
+                control_type = str(item.get("control_type", "")).strip()
+                label = str(item.get("label", "")).strip()
+                relative_position = str(item.get("relative_position", "")).strip()
+                if control_type:
+                    observation_item["control_type"] = control_type
+                if label:
+                    observation_item["label"] = label
+                if relative_position:
+                    observation_item["relative_position"] = relative_position
+                if isinstance(item.get("need_scroll"), bool):
+                    observation_item["need_scroll"] = item.get("need_scroll")
+                if isinstance(item.get("is_table"), bool):
+                    observation_item["is_table"] = item.get("is_table")
+                action = str(item.get("action", "")).strip()
+                if action:
+                    observation_item["action"] = action
+            step_observations.append(observation_item)
+            step_insights.append({"step_id": step_id, "description": observation})
+
+        return {
+            "session_id": str((self.session_data or {}).get("session_id", self.session_dir.name if self.session_dir else "")),
+            "batch_size": len(targets),
+            "status": "completed",
+            "failure_message": "",
+            "carry_memory": [],
+            "batches": [
+                {
+                    "batch_id": f"viewer_single_pass_{targets[0]['step_id']:04d}_{targets[-1]['step_id']:04d}",
+                    "start_step": targets[0]["step_id"],
+                    "end_step": targets[-1]["step_id"],
+                    "event_indexes": [item["step_id"] for item in targets],
+                    "image_paths": [str(Path(item["image_path"]).relative_to(self.session_dir).as_posix()) for item in targets],
+                    "prompt_preview": self._build_single_pass_ai_analysis_prompt(targets)[:2000],
+                    "response_text": response_text,
+                    "parsed_result": parsed,
+                }
+            ],
+            "step_observations": step_observations,
+            "step_insights": step_insights,
+            "invalid_steps": [],
+            "reusable_modules": [],
+            "wait_suggestions": [],
+            "analysis_notes": [],
+            "workflow_report_markdown": "",
+        }
+
+    def _combine_single_pass_ai_analysis_results(self, analyses: list[dict[str, object]], batch_size: int) -> dict[str, object]:
+        combined = {
+            "session_id": str((self.session_data or {}).get("session_id", self.session_dir.name if self.session_dir else "")),
+            "batch_size": max(1, batch_size),
+            "status": "completed",
+            "failure_message": "",
+            "carry_memory": [],
+            "batches": [],
+            "step_observations": [],
+            "step_insights": [],
+            "invalid_steps": [],
+            "reusable_modules": [],
+            "wait_suggestions": [],
+            "analysis_notes": [],
+            "workflow_report_markdown": "",
+        }
+        for analysis in analyses:
+            if not isinstance(analysis, dict):
+                continue
+            for key in ("batches", "step_observations", "step_insights", "invalid_steps", "reusable_modules", "wait_suggestions"):
+                values = analysis.get(key, [])
+                if isinstance(values, list):
+                    combined[key].extend(copy.deepcopy(values))
+            notes = analysis.get("analysis_notes", [])
+            if isinstance(notes, list):
+                combined["analysis_notes"].extend(str(item) for item in notes if isinstance(item, str))
+        combined["batches"] = sorted(
+            combined["batches"],
+            key=lambda item: (
+                int(item.get("start_step", 0) or 0),
+                int(item.get("end_step", 0) or 0),
+                str(item.get("batch_id", "")),
+            ),
+        )
+        combined["step_observations"] = sorted(combined["step_observations"], key=lambda item: int(item.get("step_id", 0) or 0))
+        combined["step_insights"] = sorted(combined["step_insights"], key=lambda item: int(item.get("step_id", 0) or 0))
+        combined["wait_suggestions"] = sorted(combined["wait_suggestions"], key=lambda item: int(item.get("step_id", 0) or 0))
+        combined["analysis_notes"] = self._deduplicate_texts(combined["analysis_notes"])
+        return combined
+
+    def _normalize_single_pass_observation_text(self, target: dict[str, object], item: dict[str, object]) -> str:
+        direct_observation = self._clean_sentence(str(item.get("observation", item.get("description", ""))))
+        if target["analysis_mode"] != "control_observation":
+            return direct_observation
+        parts: list[str] = []
+        label = self._clean_sentence(str(item.get("label", "")))
+        if label:
+            parts.append(f"label={label}")
+        relative_position = self._clean_sentence(str(item.get("relative_position", "")))
+        if relative_position:
+            parts.append(f"direction={relative_position}")
+        control_type = self._clean_sentence(str(item.get("control_type", "")))
+        if control_type:
+            parts.append(f"control_type={control_type}")
+        if isinstance(item.get("need_scroll"), bool):
+            parts.append(f"scroll={str(item.get('need_scroll')).lower()}")
+        if isinstance(item.get("is_table"), bool):
+            parts.append(f"table={str(item.get('is_table')).lower()}")
+        action = self._clean_sentence(str(item.get("action", "")))
+        if action:
+            parts.append(f"action={action}")
+        if parts:
+            return " | ".join(parts)
+        return direct_observation
+
+    def _parse_viewer_ai_json(self, response_text: str) -> dict[str, object]:
+        text = str(response_text or "").strip()
+        candidates = [text]
+        if "```" in text:
+            lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+            candidates.append("\n".join(lines).strip())
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                start = candidate.find("{")
+                end = candidate.rfind("}")
+                if start == -1 or end == -1 or end <= start:
+                    continue
+                try:
+                    payload = json.loads(candidate[start : end + 1])
+                except Exception:
+                    continue
+            if isinstance(payload, dict):
+                return payload
+        raise ValueError("AI 返回无法解析为 JSON。")
 
     def _normalize_selected_analysis_rows(self, selected_rows: list[int] | None) -> list[int] | None:
         if selected_rows is None:
@@ -1652,6 +2081,19 @@ class RecorderViewerWindow:
         return valid_rows
 
     def _build_analysis_session_data(self, selected_rows: list[int] | None) -> tuple[dict[str, object], dict[int, int]]:
+        session_data = copy.deepcopy(self.session_data) if isinstance(self.session_data, dict) else {}
+        events = session_data.get("events", []) if isinstance(session_data.get("events", []), list) else []
+        if selected_rows is None:
+            return session_data, {index + 1: index + 1 for index in range(len(events))}
+        selected_events: list[dict[str, object]] = []
+        for row_index in selected_rows:
+            copied_event = copy.deepcopy(self.event_rows[row_index])
+            copied_event["analysis_step_id"] = row_index + 1
+            selected_events.append(copied_event)
+        session_data["events"] = selected_events
+        return session_data, {subset_index + 1: row_index + 1 for subset_index, row_index in enumerate(selected_rows)}
+
+    def _build_suggestion_session_data(self, selected_rows: list[int] | None) -> tuple[dict[str, object], dict[int, int]]:
         session_data = copy.deepcopy(self.session_data) if isinstance(self.session_data, dict) else {}
         events = session_data.get("events", []) if isinstance(session_data.get("events", []), list) else []
         if selected_rows is None:
@@ -1724,6 +2166,15 @@ class RecorderViewerWindow:
             if isinstance(item, dict)
         ]
         remapped["batches"] = [item for item in remapped["batches"] if item.get("event_indexes") or item.get("batch_id") == "workflow_aggregation"]
+        remapped["process_summaries"] = [
+            self._remap_process_summary_item(item, step_id_mapping)
+            for item in remapped.get("process_summaries", [])
+            if isinstance(item, dict)
+        ]
+        remapped["process_summaries"] = [item for item in remapped["process_summaries"] if item.get("last_step_id")]
+        overview = remapped.get("process_summary_overview", {}) if isinstance(remapped.get("process_summary_overview", {}), dict) else {}
+        if overview:
+            remapped["process_summary_overview"] = self._remap_process_summary_overview(overview, step_id_mapping)
         return remapped
 
     def _mapped_step_id(self, value: object, step_id_mapping: dict[int, int]) -> int | None:
@@ -1753,6 +2204,37 @@ class RecorderViewerWindow:
             remapped["end_step"] = max(mapped_indexes)
         return remapped
 
+    def _remap_process_summary_item(self, item: dict[str, object], step_id_mapping: dict[int, int]) -> dict[str, object]:
+        remapped = dict(item)
+        step_ids = item.get("step_ids", []) if isinstance(item.get("step_ids", []), list) else []
+        mapped_step_ids = [step_id_mapping[step_id] for step_id in step_ids if isinstance(step_id, int) and step_id in step_id_mapping]
+        remapped["step_ids"] = mapped_step_ids
+        if mapped_step_ids:
+            remapped["start_step"] = min(mapped_step_ids)
+            remapped["end_step"] = max(mapped_step_ids)
+            remapped["last_step_id"] = max(mapped_step_ids)
+        else:
+            remapped["last_step_id"] = None
+        return remapped
+
+    def _remap_process_summary_overview(self, overview: dict[str, object], step_id_mapping: dict[int, int]) -> dict[str, object]:
+        remapped = copy.deepcopy(overview)
+        candidates = remapped.get("rollback_candidates", []) if isinstance(remapped.get("rollback_candidates", []), list) else []
+        normalized_candidates: list[dict[str, object]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            step_ids = item.get("step_ids", []) if isinstance(item.get("step_ids", []), list) else []
+            mapped_step_ids = [step_id_mapping[step_id] for step_id in step_ids if isinstance(step_id, int) and step_id in step_id_mapping]
+            candidate = dict(item)
+            candidate["step_ids"] = mapped_step_ids
+            if mapped_step_ids:
+                candidate["start_step"] = min(mapped_step_ids)
+                candidate["end_step"] = max(mapped_step_ids)
+                normalized_candidates.append(candidate)
+        remapped["rollback_candidates"] = normalized_candidates
+        return remapped
+
     def _on_selected_ai_analysis_success(self, analysis: dict[str, object], selected_rows: list[int]) -> None:
         selected_step_ids = {row_index + 1 for row_index in selected_rows}
         base_analysis = copy.deepcopy(self.ai_analysis) if isinstance(self.ai_analysis, dict) else self._load_ai_analysis(self.session_dir) or {}
@@ -1763,14 +2245,15 @@ class RecorderViewerWindow:
         self.current_analyzer = None
         self.ai_button.configure(state=tk.NORMAL)
         self.selected_ai_button.configure(state=tk.NORMAL)
+        self.ai_process_summary_button.configure(state=tk.NORMAL)
         self.cancel_ai_button.configure(state=tk.DISABLED)
         self.analysis_status_base = "选中行 AI 分析完成"
         self.analysis_status_token += 1
         self.ai_analysis = merged_analysis
         self.ai_step_tags = self._build_ai_step_tags(merged_analysis)
         self.ai_step_texts = self._build_ai_step_texts(merged_analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(merged_analysis)
         self.ai_var.set(f"已完成选中 {len(selected_rows)} 行 AI 分析 | {self._build_ai_summary_text(merged_analysis)}")
-        self._invalidate_suggestion_outputs(message="局部 AI 分析已更新，调用建议需重新全量生成")
         self._refresh_coverage_summary()
         self._refresh_ai_panels()
         self._refresh_selected_suggestion_panel()
@@ -1803,6 +2286,8 @@ class RecorderViewerWindow:
             "wait_suggestions": [],
             "analysis_notes": [item for item in base_analysis.get("analysis_notes", []) if isinstance(item, str)],
             "workflow_report_markdown": "",
+            "process_summaries": [item for item in base_analysis.get("process_summaries", []) if isinstance(item, dict)],
+            "process_summary_overview": copy.deepcopy(base_analysis.get("process_summary_overview", {})) if isinstance(base_analysis.get("process_summary_overview", {}), dict) else {},
         }
 
         existing_step_observations = [
@@ -1910,17 +2395,621 @@ class RecorderViewerWindow:
         self.parameter_status_var.set("请重新生成调用建议后再执行参数推荐。")
         self._set_text_widget(self.parameter_result_text, "")
 
+    def _start_ai_process_summary(self, selected_rows: list[int] | None = None) -> None:
+        if not self.session_dir or not self.session_data:
+            return
+
+        normalized_selected_rows = self._normalize_selected_analysis_rows(selected_rows)
+        use_selected_rows = bool(normalized_selected_rows)
+        segments = self._build_selected_process_summary_segments(normalized_selected_rows or []) if use_selected_rows else self._build_process_summary_segments()
+        if not segments:
+            messagebox.showinfo("提示", "当前没有可按进程总结的步骤。", parent=self.window)
+            return
+
+        self.analysis_running = True
+        self.analysis_cancel_event.clear()
+        self.ai_button.configure(state=tk.DISABLED)
+        self.selected_ai_button.configure(state=tk.DISABLED)
+        self.ai_process_summary_button.configure(state=tk.DISABLED)
+        self.cancel_ai_button.configure(state=tk.NORMAL)
+        self.analysis_started_at = time.time()
+        self.analysis_status_base = f"AI总结预处理中（已选 {len(normalized_selected_rows or [])} 步）" if use_selected_rows else "AI总结预处理中"
+        self.analysis_status_token += 1
+        self._refresh_analysis_status(self.analysis_status_token)
+
+        def worker() -> None:
+            try:
+                settings = self.settings_store.load()
+                client = OpenAICompatibleAIClient(settings)
+                self.current_analyzer = client
+                summaries: list[dict[str, object]] = []
+                total_segments = len(segments)
+                for batch_index, segment in enumerate(segments, start=1):
+                    self._raise_if_analysis_cancel_requested()
+                    self.window.after(
+                        0,
+                        lambda batch_index=batch_index, total_segments=total_segments, segment=segment: self._on_ai_analysis_progress(
+                            "process_summary_segment_start",
+                            {
+                                "current_batch": batch_index,
+                                "total_batches": total_segments,
+                                "start_step": segment["start_step"],
+                                "end_step": segment["end_step"],
+                                "process_name": segment["process_name"],
+                            },
+                        ),
+                    )
+                    window_batches = self._build_process_summary_image_batches(segment, settings)
+                    window_summaries: list[dict[str, object]] = []
+                    if not window_batches:
+                        response = client.query(
+                            user_prompt=self._build_process_summary_text_only_prompt(segment),
+                            system_prompt=(
+                                "你是桌面自动化按进程总结助手。"
+                                "你基于连续同进程步骤的事件元数据与已有 AI 看图描述，输出详细中文总结。"
+                                "不要输出 markdown，不要输出列表前缀，不要输出 JSON，只输出总结正文。"
+                            ),
+                            cancel_callback=self._is_analysis_cancel_requested,
+                            progress_callback=(
+                                lambda stage, payload, batch_index=batch_index, total_segments=total_segments, segment=segment: self.window.after(
+                                    0,
+                                    lambda stage=stage, payload=payload, batch_index=batch_index, total_segments=total_segments, segment=segment: self._on_ai_analysis_progress(
+                                        stage,
+                                        {
+                                            "current_batch": batch_index,
+                                            "total_batches": total_segments,
+                                            "start_step": segment["start_step"],
+                                            "end_step": segment["end_step"],
+                                            "process_name": segment["process_name"],
+                                            "analysis_phase": "process_summary",
+                                            **payload,
+                                        },
+                                    ),
+                                )
+                            ),
+                        )
+                        summary_text = self._clean_ai_process_summary_response(str(response.get("response_text", "")))
+                    else:
+                        for window_index, batch in enumerate(window_batches, start=1):
+                            self._raise_if_analysis_cancel_requested()
+                            response = client.query(
+                                user_prompt=self._build_process_summary_prompt(segment, batch),
+                                image_paths=batch["image_paths"],
+                                system_prompt=(
+                                    "你是桌面自动化按进程总结助手。"
+                                    "你基于当前批次截图、连续同进程步骤事件元数据与已有 AI 看图描述，输出详细中文总结。"
+                                    "不要输出 markdown，不要输出列表前缀，不要输出 JSON，只输出总结正文。"
+                                ),
+                                cancel_callback=self._is_analysis_cancel_requested,
+                                progress_callback=(
+                                    lambda stage, payload, batch_index=batch_index, total_segments=total_segments, segment=segment, window_index=window_index, total_windows=len(window_batches): self.window.after(
+                                        0,
+                                        lambda stage=stage, payload=payload, batch_index=batch_index, total_segments=total_segments, segment=segment, window_index=window_index, total_windows=total_windows: self._on_ai_analysis_progress(
+                                            stage,
+                                            {
+                                                "current_batch": batch_index,
+                                                "total_batches": total_segments,
+                                                "start_step": segment["start_step"],
+                                                "end_step": segment["end_step"],
+                                                "process_name": segment["process_name"],
+                                                "analysis_phase": "process_summary",
+                                                "window_index": window_index,
+                                                "total_windows": total_windows,
+                                                **payload,
+                                            },
+                                        ),
+                                    )
+                                ),
+                            )
+                            window_summaries.append(
+                                {
+                                    "window_index": window_index,
+                                    "step_ids": batch["step_ids"],
+                                    "summary": self._clean_ai_process_summary_response(str(response.get("response_text", ""))),
+                                }
+                            )
+                        if len(window_summaries) == 1:
+                            summary_text = window_summaries[0]["summary"]
+                        else:
+                            self._raise_if_analysis_cancel_requested()
+                            merge_response = client.query(
+                                user_prompt=self._build_process_summary_merge_prompt(segment, window_summaries),
+                                system_prompt=(
+                                    "你是桌面自动化按进程总结助手。"
+                                    "你基于同一进程多个图像窗口的分段总结，输出这一整段连续操作的最终详细中文总结。"
+                                    "不要输出 markdown，不要输出 JSON，只输出总结正文。"
+                                ),
+                                cancel_callback=self._is_analysis_cancel_requested,
+                            )
+                            summary_text = self._clean_ai_process_summary_response(str(merge_response.get("response_text", "")))
+                    if not summary_text:
+                        continue
+                    summaries.append(
+                        {
+                            "process_name": segment["process_name"],
+                            "start_step": segment["start_step"],
+                            "end_step": segment["end_step"],
+                            "last_step_id": segment["last_step_id"],
+                            "step_ids": list(segment["step_ids"]),
+                            "summary": summary_text,
+                        }
+                    )
+                    self.window.after(
+                        0,
+                        lambda batch_index=batch_index, total_segments=total_segments, segment=segment: self._on_ai_analysis_progress(
+                            "process_summary_segment_done",
+                            {
+                                "current_batch": batch_index,
+                                "total_batches": total_segments,
+                                "start_step": segment["start_step"],
+                                "end_step": segment["end_step"],
+                                "process_name": segment["process_name"],
+                            },
+                        ),
+                    )
+                self._raise_if_analysis_cancel_requested()
+                process_summary_overview = None if use_selected_rows else self._build_process_summary_overview(client, segments, summaries)
+            except Exception as exc:
+                self.window.after(0, lambda message=str(exc): self._on_ai_process_summary_failed(message))
+                return
+
+            self.window.after(
+                0,
+                lambda summaries=summaries, process_summary_overview=process_summary_overview, normalized_selected_rows=normalized_selected_rows: self._on_ai_process_summary_success(
+                    summaries,
+                    process_summary_overview,
+                    normalized_selected_rows,
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _build_selected_process_summary_segments(self, row_indexes: list[int]) -> list[dict[str, object]]:
+        valid_rows = [row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)]
+        if not valid_rows:
+            return []
+        items = [(row_index, self.event_rows[row_index]) for row_index in valid_rows if isinstance(self.event_rows[row_index], dict)]
+        if not items:
+            return []
+        return [self._finalize_selected_process_summary_segment(items)]
+
+    def _finalize_selected_process_summary_segment(self, items: list[tuple[int, dict[str, object]]]) -> dict[str, object]:
+        step_ids = [row_index + 1 for row_index, _event in items]
+        return {
+            "process_name": "已选步骤",
+            "start_step": min(step_ids),
+            "end_step": max(step_ids),
+            "last_step_id": max(step_ids),
+            "step_ids": step_ids,
+            "summary_scope": "selected_rows",
+            "events": [self._build_process_summary_event_payload(row_index, event) for row_index, event in items],
+        }
+
+    def _build_process_summary_segments(self) -> list[dict[str, object]]:
+        segments: list[dict[str, object]] = []
+        current_items: list[tuple[int, dict[str, object]]] = []
+        current_process_name = ""
+        for row_index, event in enumerate(self.event_rows):
+            process_name = self._extract_process_name(event) or "(未知进程)"
+            if current_items and process_name != current_process_name:
+                segments.append(self._finalize_process_summary_segment(current_process_name, current_items))
+                current_items = []
+            current_process_name = process_name
+            current_items.append((row_index, event))
+        if current_items:
+            segments.append(self._finalize_process_summary_segment(current_process_name, current_items))
+        return [segment for segment in segments if segment.get("step_ids")]
+
+    def _finalize_process_summary_segment(
+        self,
+        process_name: str,
+        items: list[tuple[int, dict[str, object]]],
+    ) -> dict[str, object]:
+        step_ids = [row_index + 1 for row_index, _event in items]
+        return {
+            "process_name": process_name,
+            "start_step": step_ids[0],
+            "end_step": step_ids[-1],
+            "last_step_id": step_ids[-1],
+            "step_ids": step_ids,
+            "events": [self._build_process_summary_event_payload(row_index, event) for row_index, event in items],
+        }
+
+    def _build_process_summary_event_payload(self, row_index: int, event: dict[str, object]) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "step_id": row_index + 1,
+            "event_type": self._extract_event_type(event),
+            "action": self._extract_event_action(event),
+        }
+        process_name = self._extract_process_name(event)
+        if process_name:
+            payload["process_name"] = process_name
+        ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
+        if ui_element:
+            filtered_ui_element = {
+                key: value
+                for key, value in ui_element.items()
+                if key in {"name", "control_type", "help_text", "automation_id", "class_name"} and str(value).strip()
+            }
+            if filtered_ui_element:
+                payload["ui_element"] = filtered_ui_element
+        comment = self._extract_comment(event)
+        if comment:
+            payload["comment"] = comment
+        ai_note = self.ai_step_texts.get(row_index, "")
+        if ai_note:
+            payload["ai_note"] = ai_note
+        return payload
+
+    def _build_process_summary_text_only_prompt(self, segment: dict[str, object]) -> str:
+        is_selected_rows_summary = str(segment.get("summary_scope", "")).strip() == "selected_rows"
+        instruction = {
+            "task": "总结当前选中步骤整体完成了什么操作" if is_selected_rows_summary else "总结连续同进程步骤完成了什么操作",
+            "process_name": segment.get("process_name", ""),
+            "step_range": [segment.get("start_step", 0), segment.get("end_step", 0)],
+            "requirements": [
+                "这些步骤是用户当前选中的步骤，请把它们作为一个整体来总结。" if is_selected_rows_summary else "这些步骤都属于同一个连续进程段，请总结这一段操作整体在做什么。",
+                "请结合每一步的 event_type、action、ui_element、comment，以及已有 ai_note 做总结。",
+                "总结要详细，但要是自然语言，不要逐条机械复述原字段名。",
+                "如果某些步骤只是过渡、定位、切换或确认动作，也要体现在整体流程里。",
+                "不要输出 JSON，不要输出 markdown，不要输出标题，只输出一段中文总结。",
+            ],
+            "events": segment.get("events", []),
+        }
+        return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+    def _build_process_summary_prompt(self, segment: dict[str, object], batch: dict[str, object]) -> str:
+        is_selected_rows_summary = str(segment.get("summary_scope", "")).strip() == "selected_rows"
+        instruction = {
+            "task": "总结当前选中步骤中的当前图像批次操作" if is_selected_rows_summary else "总结同一进程连续步骤中的当前图像批次操作",
+            "process_name": segment.get("process_name", ""),
+            "segment_step_range": [segment.get("start_step", 0), segment.get("end_step", 0)],
+            "window_step_ids": batch.get("step_ids", []),
+            "requirements": [
+                "当前会提供这一批选中步骤中的一批截图，最多 5 张，按步骤顺序排列。" if is_selected_rows_summary else "当前会提供这一进程段中的一批截图，最多 5 张，按步骤顺序排列。",
+                "请结合当前批次截图、整段事件明细，以及已有 AI 看图描述，总结这批图像对应的操作过程。",
+                "没有截图的步骤也已经包含在 events 中，请在整体总结时一并考虑。",
+                "只输出一段详细中文总结，不要输出 JSON，不要输出 markdown。",
+            ],
+            "events": segment.get("events", []),
+        }
+        return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+    def _build_process_summary_merge_prompt(self, segment: dict[str, object], window_summaries: list[dict[str, object]]) -> str:
+        is_selected_rows_summary = str(segment.get("summary_scope", "")).strip() == "selected_rows"
+        instruction = {
+            "task": "汇总当前选中步骤的多个图像批次总结" if is_selected_rows_summary else "汇总同一进程连续步骤的多个图像批次总结",
+            "process_name": segment.get("process_name", ""),
+            "segment_step_range": [segment.get("start_step", 0), segment.get("end_step", 0)],
+            "requirements": [
+                "这些 window_summaries 来自当前选中的步骤，只是因为图片较多被拆成多个窗口。" if is_selected_rows_summary else "这些 window_summaries 来自同一进程的连续步骤，只是因为图片较多被拆成多个窗口。",
+                "请去重并合并这些窗口总结，得到整段连续操作的最终中文总结。",
+                "同时要参考整段 events，确保没有图片的步骤也被纳入整体流程理解。",
+                "只输出一段详细中文总结，不要输出 JSON，不要输出 markdown。",
+            ],
+            "events": segment.get("events", []),
+            "window_summaries": window_summaries,
+        }
+        return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+    def _build_process_summary_overview(self, client: OpenAICompatibleAIClient, segments: list[dict[str, object]], summaries: list[dict[str, object]]) -> dict[str, object]:
+        if not summaries:
+            return {"summary": "", "rollback_candidates": [], "notes": []}
+        response = client.query(
+            user_prompt=self._build_process_summary_overview_prompt(segments, summaries),
+            system_prompt=(
+                "你是桌面自动化流程归纳助手。"
+                "你需要从多段进程总结中提炼出用户真正完成的目标操作。"
+                "中途走错、回退、重复尝试、不满意后重做的步骤，不应混进最终主流程总结。"
+                "同时你还需要单独指出这些可能无效或后续被回退覆盖的步骤。"
+                "必须返回 JSON，不要输出 markdown。"
+            ),
+            cancel_callback=self._is_analysis_cancel_requested,
+        )
+        return self._parse_process_summary_overview_response(str(response.get("response_text", "")))
+
+    def _build_process_summary_overview_prompt(self, segments: list[dict[str, object]], summaries: list[dict[str, object]]) -> str:
+        instruction = {
+            "task": "基于整次录制的分段总结，生成统一总结并识别可能无效或被回退的步骤",
+            "requirements": [
+                "final_summary 只保留用户真正要完成的操作主线，不要把明显走错、回退、重复尝试、修正性中间动作写进主线总结。",
+                "rollback_candidates 需要列出可能无效、后来被回退、被重做覆盖、或最终不属于主线目标的步骤范围。",
+                "rollback_candidates 中每一项都要给出 step_ids 和 reason。step_ids 必须使用整数数组。",
+                "如果没有明显无效操作，rollback_candidates 返回空数组。",
+                "必须严格返回 JSON 对象，字段为 final_summary、rollback_candidates、notes。不要输出额外说明。",
+            ],
+            "json_schema_hint": {
+                "final_summary": "用户先打开设置页面，定位到目标配置项并完成修改，随后保存配置并返回主界面确认结果。",
+                "rollback_candidates": [
+                    {"step_ids": [12, 13, 14], "reason": "先进入了错误菜单，随后返回并改走正确入口。"},
+                    {"step_ids": [21], "reason": "一次不满意的点击尝试，后续又重新执行了正确操作。"}
+                ],
+                "notes": ["如果某段只是重复确认且没有改变结果，可视为非主线。"],
+            },
+            "segment_summaries": summaries,
+            "segments": [
+                {
+                    "process_name": segment.get("process_name", ""),
+                    "start_step": segment.get("start_step", 0),
+                    "end_step": segment.get("end_step", 0),
+                    "events": segment.get("events", []),
+                }
+                for segment in segments
+            ],
+        }
+        return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+    def _parse_process_summary_overview_response(self, response_text: str) -> dict[str, object]:
+        payload = self._parse_viewer_ai_json(response_text)
+        final_summary = self._clean_sentence(str(payload.get("final_summary", payload.get("summary", ""))))
+        notes = payload.get("notes", []) if isinstance(payload.get("notes", []), list) else []
+        cleaned_notes = self._deduplicate_texts([self._clean_sentence(str(item)) for item in notes if self._clean_sentence(str(item))])
+        rollback_candidates: list[dict[str, object]] = []
+        values = payload.get("rollback_candidates", []) if isinstance(payload.get("rollback_candidates", []), list) else []
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            raw_step_ids = item.get("step_ids", []) if isinstance(item.get("step_ids", []), list) else []
+            step_ids = sorted({int(step_id) for step_id in raw_step_ids if isinstance(step_id, int) and step_id > 0})
+            reason = self._clean_sentence(str(item.get("reason", "")))
+            if not step_ids and not reason:
+                continue
+            rollback_candidates.append(
+                {
+                    "step_ids": step_ids,
+                    "start_step": min(step_ids) if step_ids else None,
+                    "end_step": max(step_ids) if step_ids else None,
+                    "reason": reason,
+                }
+            )
+        return {
+            "summary": final_summary,
+            "rollback_candidates": rollback_candidates,
+            "notes": cleaned_notes,
+            "raw": str(response_text or "").strip(),
+        }
+
+    def _build_process_summary_image_batches(self, segment: dict[str, object], settings) -> list[dict[str, object]]:
+        display_layout = self._get_session_display_layout()
+        cache_dir = self.session_dir / "ai_preprocessed" / "process_summary"
+        image_entries: list[dict[str, object]] = []
+        for event_item in segment.get("events", []):
+            if not isinstance(event_item, dict):
+                continue
+            step_id = int(event_item.get("step_id", 0) or 0)
+            if step_id < 1 or step_id > len(self.event_rows):
+                continue
+            event = self.event_rows[step_id - 1]
+            image_path = self._resolve_event_primary_image_path(event)
+            if image_path is None:
+                continue
+            prepared_path, _was_cropped = prepare_image_path_for_ai(
+                image_path,
+                event,
+                display_layout,
+                cache_dir,
+                send_fullscreen=settings.send_fullscreen_screenshots,
+                cache_key=f"process_summary_{step_id:04d}",
+            )
+            optimized_path = self._optimize_image_for_ai_batch(prepared_path, step_id)
+            image_entries.append({"step_id": step_id, "image_path": optimized_path})
+
+        batches: list[dict[str, object]] = []
+        for start in range(0, len(image_entries), 5):
+            batch_entries = image_entries[start : start + 5]
+            if not batch_entries:
+                continue
+            batches.append(
+                {
+                    "step_ids": [item["step_id"] for item in batch_entries],
+                    "image_paths": [item["image_path"] for item in batch_entries],
+                }
+            )
+        return batches
+
+    def _get_session_display_layout(self) -> dict[str, object] | None:
+        environment = self.session_data.get("environment", {}) if isinstance(self.session_data, dict) and isinstance(self.session_data.get("environment", {}), dict) else {}
+        return environment.get("display_layout") if isinstance(environment, dict) else None
+
+    def _optimize_image_for_ai_batch(self, image_path: Path, step_id: int) -> Path:
+        if not self.session_dir:
+            return image_path
+        output_dir = self.session_dir / "ai_preprocessed" / "process_summary_resized"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"step_{step_id:04d}.jpg"
+        try:
+            with Image.open(image_path) as image:
+                converted = image.convert("RGB")
+                converted.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+                converted.save(output_path, format="JPEG", quality=82, optimize=True)
+            return output_path
+        except Exception:
+            return image_path
+
+    def _clean_ai_process_summary_response(self, value: str) -> str:
+        text = str(value or "").strip()
+        if text.startswith("```"):
+            lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+            text = "\n".join(lines).strip()
+        return self._clean_sentence(text)
+
+    def _on_ai_process_summary_success(self, summaries: list[dict[str, object]], process_summary_overview: dict[str, object] | None, selected_rows: list[int] | None = None) -> None:
+        self.analysis_running = False
+        self.current_analyzer = None
+        self.ai_button.configure(state=tk.NORMAL)
+        self.selected_ai_button.configure(state=tk.NORMAL)
+        self.ai_process_summary_button.configure(state=tk.NORMAL)
+        self.cancel_ai_button.configure(state=tk.DISABLED)
+        self.analysis_status_base = "AI总结完成"
+        self.analysis_status_token += 1
+        base_analysis = copy.deepcopy(self.ai_analysis) if isinstance(self.ai_analysis, dict) else self._load_ai_analysis(self.session_dir) or {}
+        if selected_rows:
+            analysis = self._merge_selected_process_summaries_into_analysis(base_analysis, summaries, selected_rows)
+        else:
+            analysis = self._merge_process_summaries_into_analysis(base_analysis, summaries, process_summary_overview)
+        self.ai_analysis = analysis
+        self.ai_step_tags = self._build_ai_step_tags(analysis)
+        self.ai_step_texts = self._build_ai_step_texts(analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(analysis)
+        self._persist_ai_analysis(analysis)
+        if selected_rows:
+            self.ai_var.set(f"AI总结完成: 已更新所选 {len(selected_rows)} 行的总结")
+        else:
+            self.ai_var.set(f"AI总结完成: 已生成 {len(summaries)} 段进程总结，并更新统一总结")
+        self._refresh_ai_panels()
+        self._refresh_coverage_summary()
+        self._reload_tree()
+        if selected_rows:
+            messagebox.showinfo("AI总结完成", f"已将所选 {len(selected_rows)} 行作为一个整体完成总结。", parent=self.window)
+        else:
+            messagebox.showinfo("AI总结完成", f"已生成 {len(summaries)} 段进程总结，并更新统一总结与回退判断。", parent=self.window)
+
+    def _on_ai_process_summary_failed(self, message: str) -> None:
+        self.analysis_running = False
+        self.current_analyzer = None
+        self.ai_button.configure(state=tk.NORMAL)
+        self.selected_ai_button.configure(state=tk.NORMAL)
+        self.ai_process_summary_button.configure(state=tk.NORMAL)
+        self.cancel_ai_button.configure(state=tk.DISABLED)
+        self.analysis_status_base = "AI总结失败"
+        self.analysis_status_token += 1
+        self.ai_var.set(f"AI总结失败: {message}")
+        messagebox.showerror("AI总结失败", message, parent=self.window)
+
+    def _merge_process_summaries_into_analysis(
+        self,
+        base_analysis: dict[str, object],
+        process_summaries: list[dict[str, object]],
+        process_summary_overview: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        analysis = copy.deepcopy(base_analysis) if isinstance(base_analysis, dict) else {}
+        analysis.setdefault("session_id", str((self.session_data or {}).get("session_id", self.session_dir.name if self.session_dir else "")))
+        analysis.setdefault("batch_size", 1)
+        analysis.setdefault("status", "completed")
+        analysis.setdefault("failure_message", "")
+        analysis.setdefault("carry_memory", [])
+        analysis.setdefault("batches", [])
+        analysis.setdefault("step_observations", [])
+        analysis.setdefault("step_insights", [])
+        analysis.setdefault("invalid_steps", [])
+        analysis.setdefault("reusable_modules", [])
+        analysis.setdefault("wait_suggestions", [])
+        analysis.setdefault("analysis_notes", [])
+        analysis.setdefault("workflow_report_markdown", "")
+        analysis["process_summaries"] = process_summaries
+        analysis["process_summary_overview"] = copy.deepcopy(process_summary_overview) if isinstance(process_summary_overview, dict) else {}
+        return analysis
+
+    def _merge_selected_process_summaries_into_analysis(
+        self,
+        base_analysis: dict[str, object],
+        process_summaries: list[dict[str, object]],
+        selected_rows: list[int],
+    ) -> dict[str, object]:
+        analysis = copy.deepcopy(base_analysis) if isinstance(base_analysis, dict) else {}
+        analysis.setdefault("session_id", str((self.session_data or {}).get("session_id", self.session_dir.name if self.session_dir else "")))
+        analysis.setdefault("batch_size", 1)
+        analysis.setdefault("status", "completed")
+        analysis.setdefault("failure_message", "")
+        analysis.setdefault("carry_memory", [])
+        analysis.setdefault("batches", [])
+        analysis.setdefault("step_observations", [])
+        analysis.setdefault("step_insights", [])
+        analysis.setdefault("invalid_steps", [])
+        analysis.setdefault("reusable_modules", [])
+        analysis.setdefault("wait_suggestions", [])
+        analysis.setdefault("analysis_notes", [])
+        analysis.setdefault("workflow_report_markdown", "")
+        selected_step_ids = {row_index + 1 for row_index in selected_rows if row_index >= 0}
+        existing_summaries = analysis.get("process_summaries", []) if isinstance(analysis.get("process_summaries", []), list) else []
+        preserved_summaries: list[dict[str, object]] = []
+        for item in existing_summaries:
+            if not isinstance(item, dict):
+                continue
+            step_ids = item.get("step_ids", []) if isinstance(item.get("step_ids", []), list) else []
+            item_step_ids = {step_id for step_id in step_ids if isinstance(step_id, int) and step_id > 0}
+            if item_step_ids & selected_step_ids:
+                continue
+            preserved_summaries.append(copy.deepcopy(item))
+        merged_summaries = [*preserved_summaries, *[copy.deepcopy(item) for item in process_summaries if isinstance(item, dict)]]
+        analysis["process_summaries"] = sorted(
+            merged_summaries,
+            key=lambda item: int(item.get("last_step_id", item.get("end_step", 0)) or 0),
+        )
+        return analysis
+
+    def _invalidate_suggestion_outputs_for_rows(self, row_indexes: list[int], message: str) -> None:
+        target_step_ids = {row_index + 1 for row_index in row_indexes if row_index >= 0}
+        if not target_step_ids:
+            return
+
+        if self.suggestion_result is None and self.session_dir:
+            suggestion_path = self.session_dir / "conversion_suggestions.json"
+            if suggestion_path.exists():
+                try:
+                    self.suggestion_result = self.suggestion_service.load_result_file(suggestion_path)
+                except Exception:
+                    self.suggestion_result = None
+
+        if self.suggestion_result is None:
+            for row_index in row_indexes:
+                self.parameter_prompt_by_step.pop(row_index, None)
+                self.parameter_response_by_step.pop(row_index, None)
+            self.suggestion_var.set(message)
+            self.parameter_progress_var.set("参数推荐批处理未执行")
+            self.parameter_status_var.set("请为当前步骤重新生成调用建议后再执行参数推荐。")
+            self._refresh_ai_chat_panel()
+            return
+
+        self.suggestion_result.suggestions = [
+            item for item in self.suggestion_result.suggestions
+            if int(getattr(item, "step_id", 0) or 0) not in target_step_ids
+        ]
+
+        for row_index in row_indexes:
+            self.parameter_prompt_by_step.pop(row_index, None)
+            self.parameter_response_by_step.pop(row_index, None)
+
+        if self.suggestion_result.suggestions:
+            self._persist_suggestion_result()
+            self.suggestion_var.set(message)
+        else:
+            self.suggestion_result = None
+            self.step_method_suggestions = {}
+            self.step_module_suggestions = {}
+            self.step_parameter_summaries = {}
+            if self.session_dir:
+                suggestion_path = self.session_dir / "conversion_suggestions.json"
+                if suggestion_path.exists():
+                    try:
+                        suggestion_path.unlink()
+                    except Exception:
+                        pass
+            self.suggestion_var.set(message)
+
+        self.parameter_progress_var.set("参数推荐批处理未执行")
+        self.parameter_status_var.set("请仅对当前受影响步骤重新生成调用建议后再执行参数推荐。")
+        self._refresh_ai_chat_panel()
+
     def cancel_ai_analysis(self) -> None:
         if not self.analysis_running:
             return
         self.analysis_status_base = "正在请求取消 AI 分析"
         self._refresh_analysis_status(self.analysis_status_token)
+        self.analysis_cancel_event.set()
         analyzer = self.current_analyzer
         if analyzer is not None:
             analyzer.cancel()
         elif self.settings_store.load().use_remote_ai_service:
             self.analysis_status_base = "远端共享服务当前不支持取消，等待本次请求结束"
             self._refresh_analysis_status(self.analysis_status_token)
+
+    def _is_analysis_cancel_requested(self) -> bool:
+        return self.analysis_cancel_event.is_set()
+
+    def _raise_if_analysis_cancel_requested(self) -> None:
+        if self._is_analysis_cancel_requested():
+            raise RuntimeError("AI 分析已取消。")
 
     def _set_details(self, payload: dict[str, object]) -> None:
         self.details_text.configure(state=tk.NORMAL)
@@ -1955,6 +3044,227 @@ class RecorderViewerWindow:
         button_bar = ttk.Frame(container)
         button_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         ttk.Button(button_bar, text="关闭", command=dialog.destroy).pack(side=tk.RIGHT)
+
+    def _show_edit_text_dialog(self, title: str, text: str) -> str | None:
+        dialog = tk.Toplevel(self.window)
+        dialog.title(title)
+        dialog.geometry("900x600")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        result: dict[str, str | None] = {"value": None}
+
+        container = ttk.Frame(dialog, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+
+        text_widget = tk.Text(container, wrap=tk.WORD, font=("Consolas", 10))
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=text_widget.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        self._set_text_widget(text_widget, text, disabled=False)
+
+        def save() -> None:
+            result["value"] = text_widget.get("1.0", tk.END).rstrip("\n")
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        button_bar = ttk.Frame(container)
+        button_bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Button(button_bar, text="取消", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text="保存", command=save).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        text_widget.focus_set()
+        dialog.wait_window()
+        return result["value"]
+
+    def _edit_method_or_module_suggestion(self, row_index: int, field_name: str) -> None:
+        suggestion = self._find_suggestion_by_row_index(row_index)
+        if suggestion is None or not self.session_dir or self.suggestion_result is None:
+            messagebox.showinfo("提示", f"步骤 {row_index + 1} 暂无可编辑的建议。", parent=self.window)
+            return
+        title = "方法建议" if field_name == "method_name" else "模块建议"
+        current_value = str(getattr(suggestion, field_name, "") or "")
+        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} {title}", current_value)
+        if edited_value is None:
+            return
+        setattr(suggestion, field_name, edited_value.strip())
+        self._persist_suggestion_result()
+        self._after_edit_row_content(row_index)
+
+    def _edit_parameter_suggestion(self, row_index: int) -> None:
+        suggestion = self._find_suggestion_by_row_index(row_index)
+        if suggestion is None or not self.session_dir or self.suggestion_result is None:
+            messagebox.showinfo("提示", f"步骤 {row_index + 1} 暂无可编辑的参数建议。", parent=self.window)
+            return
+        current_value = self._describe_parameter_suggestion_for_view(row_index) or ""
+        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} 参数建议", current_value)
+        if edited_value is None:
+            return
+        suggestion.candidate_payload["viewer_parameter_summary_override"] = edited_value.strip()
+        self._persist_suggestion_result()
+        self._after_edit_row_content(row_index)
+
+    def _edit_ai_note(self, row_index: int) -> None:
+        current_value = self._describe_event_for_view(row_index, self.event_rows[row_index])
+        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} AI看图", current_value)
+        if edited_value is None:
+            return
+        if not self._update_ai_analysis_text(row_index, edited_value.strip()):
+            messagebox.showinfo("提示", f"步骤 {row_index + 1} 当前没有可编辑的 AI 结果。", parent=self.window)
+            return
+        self._after_edit_row_content(row_index)
+
+    def _edit_ai_process_summary(self, row_index: int) -> None:
+        current_value = self._describe_process_summary_for_view(row_index)
+        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} AI总结", current_value)
+        if edited_value is None:
+            return
+        if not self._update_ai_process_summary_text(row_index, edited_value.strip()):
+            messagebox.showinfo("提示", f"步骤 {row_index + 1} 当前没有可编辑的 AI总结结果。", parent=self.window)
+            return
+        self._after_edit_row_content(row_index)
+
+    def _after_edit_row_content(self, row_index: int) -> None:
+        self._reload_tree()
+        self._select_row_index(row_index)
+
+    def _edit_event_action(self, row_index: int) -> None:
+        event = self.event_rows[row_index]
+        current_value = self._extract_event_action(event)
+        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} 动作", current_value)
+        if edited_value is None:
+            return
+        self._update_event_action(row_index, edited_value.strip())
+        self._persist_session()
+        self._after_edit_row_content(row_index)
+
+    def _edit_event_type(self, row_index: int) -> None:
+        event = self.event_rows[row_index]
+        current_value = self._extract_event_type(event)
+        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} 类型", current_value)
+        if edited_value is None:
+            return
+        self._update_event_type(row_index, edited_value.strip())
+        self._persist_session()
+        self._refresh_filter_options()
+        self._after_edit_row_content(row_index)
+
+    def _persist_suggestion_result(self) -> None:
+        if not self.session_dir or self.suggestion_result is None:
+            return
+        self.suggestion_service.write_result_file(self.session_dir / "conversion_suggestions.json", self.suggestion_result)
+        self.step_method_suggestions = self._build_method_suggestion_map(self.suggestion_result)
+        self.step_module_suggestions = self._build_module_suggestion_map(self.suggestion_result)
+        self.step_parameter_summaries = self._build_parameter_suggestion_map(self.suggestion_result)
+        self.suggestion_var.set(self._build_suggestion_summary_text(self.suggestion_result))
+        self._refresh_selected_suggestion_panel()
+
+    def _update_ai_analysis_text(self, row_index: int, text: str) -> bool:
+        analysis = self.ai_analysis
+        if not isinstance(analysis, dict):
+            if not self.session_dir:
+                return False
+            analysis = self._load_ai_analysis(self.session_dir)
+            if not isinstance(analysis, dict):
+                return False
+
+        step_id = row_index + 1
+        updated = False
+        explicit_observations = analysis.get("step_observations", [])
+        if isinstance(explicit_observations, list):
+            for item in explicit_observations:
+                if isinstance(item, dict) and item.get("step_id") == step_id:
+                    item["observation"] = text
+                    updated = True
+
+        for batch in analysis.get("batches", []):
+            if not isinstance(batch, dict):
+                continue
+            parsed_result = batch.get("parsed_result", {}) if isinstance(batch.get("parsed_result", {}), dict) else {}
+            observation_round = parsed_result.get("observation_round", {}) if isinstance(parsed_result.get("observation_round", {}), dict) else {}
+            values = observation_round.get("step_observations", [])
+            event_indexes = batch.get("event_indexes", []) if isinstance(batch.get("event_indexes", []), list) else []
+            if not isinstance(values, list):
+                continue
+            for offset, item in enumerate(values):
+                if not isinstance(item, dict):
+                    continue
+                item_step_id = item.get("step_id")
+                if not isinstance(item_step_id, int) and offset < len(event_indexes) and isinstance(event_indexes[offset], int):
+                    item_step_id = event_indexes[offset]
+                if item_step_id == step_id:
+                    item["observation"] = text
+                    updated = True
+
+        step_insights = analysis.get("step_insights", [])
+        if isinstance(step_insights, list):
+            for item in step_insights:
+                if isinstance(item, dict) and item.get("step_id") == step_id:
+                    item["description"] = text
+                    updated = True
+
+        if not updated:
+            return False
+
+        self.ai_analysis = analysis
+        self.ai_step_tags = self._build_ai_step_tags(analysis)
+        self.ai_step_texts = self._build_ai_step_texts(analysis)
+        self.ai_var.set(f"已更新 AI 分析结果 | {self._build_ai_summary_text(analysis)}")
+        self._persist_ai_analysis(analysis)
+        self._refresh_ai_panels()
+        self._refresh_selected_suggestion_panel()
+        self._refresh_coverage_summary()
+        return True
+
+    def _update_ai_process_summary_text(self, row_index: int, text: str) -> bool:
+        analysis = self.ai_analysis
+        if not isinstance(analysis, dict):
+            if not self.session_dir:
+                return False
+            analysis = self._load_ai_analysis(self.session_dir)
+            if not isinstance(analysis, dict):
+                return False
+
+        step_id = row_index + 1
+        process_summaries = analysis.get("process_summaries", [])
+        if not isinstance(process_summaries, list):
+            return False
+
+        updated = False
+        for item in process_summaries:
+            if not isinstance(item, dict):
+                continue
+            item_step_id = item.get("last_step_id", item.get("end_step"))
+            if item_step_id == step_id:
+                item["summary"] = text
+                updated = True
+
+        if not updated:
+            return False
+
+        self.ai_analysis = analysis
+        self.ai_step_tags = self._build_ai_step_tags(analysis)
+        self.ai_step_texts = self._build_ai_step_texts(analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(analysis)
+        self.ai_var.set(f"已更新 AI 总结结果 | {self._build_ai_summary_text(analysis)}")
+        self._persist_ai_analysis(analysis)
+        self._refresh_ai_panels()
+        self._refresh_selected_suggestion_panel()
+        self._refresh_coverage_summary()
+        return True
+
+    def _update_event_action(self, index: int, action: str) -> None:
+        event = self.event_rows[index]
+        event["action"] = action
+
+    def _update_event_type(self, index: int, event_type: str) -> None:
+        event = self.event_rows[index]
+        event["event_type"] = event_type
 
     def _get_selected_row_indexes(self) -> list[int]:
         selection = self.tree.selection()
@@ -2077,12 +3387,14 @@ class RecorderViewerWindow:
         reference_event = self.event_rows[row_index]
         inserted_event = self._build_new_checkpoint_event(reference_event, payload, engine)
         insert_at = row_index + 1
+        original_event_count = len(self.event_rows)
         self.event_rows.insert(insert_at, inserted_event)
         self.session_data["events"] = self.event_rows
         self._sync_checkpoint_collection_entry({}, inserted_event)
         self.summary_var.set(self._build_session_summary_text())
         self._persist_session()
-        self._invalidate_derived_outputs()
+        step_id_mapping = self._build_step_id_mapping_after_row_insertion(original_event_count, insert_at, 1)
+        self._remap_outputs_after_row_insertion(step_id_mapping)
         self.media_cache.clear()
         self._reload_tree()
         self._select_row_index(insert_at)
@@ -2173,6 +3485,9 @@ class RecorderViewerWindow:
         if not valid_indexes:
             return
 
+        original_event_count = len(self.event_rows)
+        step_id_mapping = self._build_step_id_mapping_after_row_deletion(original_event_count, valid_indexes)
+
         removed_events: list[dict[str, object]] = []
         for row_index in valid_indexes:
             removed_events.append(self.event_rows[row_index])
@@ -2183,13 +3498,104 @@ class RecorderViewerWindow:
         self._remove_comment_collection_entries(removed_events)
         self.summary_var.set(self._build_session_summary_text())
         self._persist_session()
-        self._invalidate_derived_outputs()
+        self._remap_outputs_after_row_deletion(step_id_mapping)
         self.media_cache.clear()
         self._reload_tree()
 
         if self.event_rows:
             next_index = min(valid_indexes[-1], len(self.event_rows) - 1)
             self._select_row_index(next_index)
+
+    def _build_step_id_mapping_after_row_deletion(self, original_event_count: int, removed_row_indexes: list[int]) -> dict[int, int]:
+        removed_step_ids = {row_index + 1 for row_index in removed_row_indexes}
+        next_step_id = 1
+        step_id_mapping: dict[int, int] = {}
+        for original_step_id in range(1, original_event_count + 1):
+            if original_step_id in removed_step_ids:
+                continue
+            step_id_mapping[original_step_id] = next_step_id
+            next_step_id += 1
+        return step_id_mapping
+
+    def _build_step_id_mapping_after_row_insertion(self, original_event_count: int, insert_at: int, inserted_count: int) -> dict[int, int]:
+        step_id_mapping: dict[int, int] = {}
+        for original_step_id in range(1, original_event_count + 1):
+            if original_step_id <= insert_at:
+                step_id_mapping[original_step_id] = original_step_id
+            else:
+                step_id_mapping[original_step_id] = original_step_id + inserted_count
+        return step_id_mapping
+
+    def _remap_outputs_after_row_deletion(self, step_id_mapping: dict[int, int]) -> None:
+        self._remap_ai_analysis_after_row_deletion(step_id_mapping)
+        self._remap_suggestions_after_row_deletion(step_id_mapping)
+        self._remap_parameter_chat_history_after_row_deletion(step_id_mapping)
+        self._refresh_coverage_summary()
+        self._update_historical_ai_button_state()
+
+    def _remap_outputs_after_row_insertion(self, step_id_mapping: dict[int, int]) -> None:
+        self._remap_ai_analysis_after_row_deletion(step_id_mapping)
+        self._remap_suggestions_after_row_deletion(step_id_mapping)
+        self._remap_parameter_chat_history_after_row_deletion(step_id_mapping)
+        self._refresh_coverage_summary()
+        self._update_historical_ai_button_state()
+
+    def _remap_ai_analysis_after_row_deletion(self, step_id_mapping: dict[int, int]) -> None:
+        analysis = copy.deepcopy(self.ai_analysis) if isinstance(self.ai_analysis, dict) else None
+        if analysis is None and self.session_dir:
+            analysis = self._load_ai_analysis(self.session_dir)
+        if not isinstance(analysis, dict):
+            return
+
+        remapped_analysis = self._remap_analysis_step_ids(analysis, step_id_mapping)
+        self.ai_analysis = remapped_analysis
+        self.ai_step_tags = self._build_ai_step_tags(remapped_analysis)
+        self.ai_step_texts = self._build_ai_step_texts(remapped_analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(remapped_analysis)
+        self._persist_ai_analysis(remapped_analysis)
+        self.ai_var.set(f"已更新历史 AI 分析结果 | {self._build_ai_summary_text(remapped_analysis)}")
+        self._refresh_ai_panels()
+
+    def _remap_suggestions_after_row_deletion(self, step_id_mapping: dict[int, int]) -> None:
+        result = copy.deepcopy(self.suggestion_result) if self.suggestion_result is not None else None
+        if result is None and self.session_dir:
+            suggestion_path = self.session_dir / "conversion_suggestions.json"
+            if suggestion_path.exists():
+                try:
+                    result = self.suggestion_service.load_result_file(suggestion_path)
+                except Exception:
+                    result = None
+        if result is None:
+            return
+
+        remapped_suggestions = []
+        for item in result.suggestions:
+            step_id = int(getattr(item, "step_id", 0) or 0)
+            mapped_step_id = step_id_mapping.get(step_id)
+            if mapped_step_id is None:
+                continue
+            copied_item = copy.deepcopy(item)
+            copied_item.step_id = mapped_step_id
+            remapped_suggestions.append(copied_item)
+        result.suggestions = sorted(remapped_suggestions, key=lambda item: int(getattr(item, "step_id", 0) or 0))
+        self.suggestion_result = result
+        self._persist_suggestion_result()
+
+    def _remap_parameter_chat_history_after_row_deletion(self, step_id_mapping: dict[int, int]) -> None:
+        remapped_prompt_history: dict[int, str] = {}
+        for row_index, prompt in self.parameter_prompt_by_step.items():
+            mapped_step_id = step_id_mapping.get(row_index + 1)
+            if mapped_step_id is None:
+                continue
+            remapped_prompt_history[mapped_step_id - 1] = prompt
+        remapped_response_history: dict[int, str] = {}
+        for row_index, response in self.parameter_response_by_step.items():
+            mapped_step_id = step_id_mapping.get(row_index + 1)
+            if mapped_step_id is None:
+                continue
+            remapped_response_history[mapped_step_id - 1] = response
+        self.parameter_prompt_by_step = remapped_prompt_history
+        self.parameter_response_by_step = remapped_response_history
 
     def _create_session_edit_engine(self) -> RecorderEngine | None:
         if not self.session_dir:
@@ -2456,12 +3862,14 @@ class RecorderViewerWindow:
             return
         inserted_events = [self._clone_recorded_event_for_current_session(event, source_session_dir, engine) for event in recorded_events]
         insert_at = row_index + 1
+        original_event_count = len(self.event_rows)
         self.event_rows[insert_at:insert_at] = inserted_events
         self.session_data["events"] = self.event_rows
         self._sync_auxiliary_collections_for_inserted_events(inserted_events)
         self.summary_var.set(self._build_session_summary_text())
         self._persist_session()
-        self._invalidate_derived_outputs()
+        step_id_mapping = self._build_step_id_mapping_after_row_insertion(original_event_count, insert_at, len(inserted_events))
+        self._remap_outputs_after_row_insertion(step_id_mapping)
         self.media_cache.clear()
         self._reload_tree()
         self._select_row_index(insert_at)
@@ -2607,6 +4015,7 @@ class RecorderViewerWindow:
         self.ai_analysis = None
         self.ai_step_tags = {}
         self.ai_step_texts = {}
+        self.ai_process_summary_texts = {}
         self.suggestion_result = None
         self.step_method_suggestions = {}
         self.step_module_suggestions = {}
@@ -2639,30 +4048,15 @@ class RecorderViewerWindow:
         return "break"
 
     def _build_coverage_panel(self, parent: ttk.Frame) -> None:
-        container = ttk.Frame(parent)
-        container.pack(fill=tk.BOTH, expand=True)
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill=tk.BOTH, expand=True)
 
-        canvas = tk.Canvas(container, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        summary_tab = ttk.Frame(notebook)
+        coverage_tab = ttk.Frame(notebook)
+        notebook.add(summary_tab, text="AI总结")
+        notebook.add(coverage_tab, text="覆盖判断")
 
-        body = ttk.Frame(canvas)
-        canvas_window = canvas.create_window((0, 0), window=body, anchor=tk.NW)
-
-        def sync_scrollregion(_event: tk.Event | None = None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def sync_width(event: tk.Event) -> None:
-            canvas.itemconfigure(canvas_window, width=event.width)
-
-        body.bind("<Configure>", sync_scrollregion)
-        canvas.bind("<Configure>", sync_width)
-
-        self.coverage_canvas = canvas
-
-        summary_frame = ttk.LabelFrame(body, text="当前录制流程总结")
+        summary_frame = ttk.LabelFrame(summary_tab, text="统一操作总结")
         summary_frame.pack(fill=tk.BOTH, expand=True)
         self.coverage_summary_text = tk.Text(summary_frame, height=8, wrap=tk.WORD, font=("Segoe UI", 10))
         self.coverage_summary_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
@@ -2670,8 +4064,16 @@ class RecorderViewerWindow:
         summary_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
         self.coverage_summary_text.configure(yscrollcommand=summary_scroll.set, state=tk.DISABLED)
 
-        input_frame = ttk.LabelFrame(body, text="覆盖目标判断")
-        input_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        review_frame = ttk.LabelFrame(summary_tab, text="可能无效 / 回退 / 被覆盖的步骤")
+        review_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.coverage_review_text = tk.Text(review_frame, height=10, wrap=tk.WORD, font=("Segoe UI", 10))
+        self.coverage_review_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
+        review_scroll = ttk.Scrollbar(review_frame, orient=tk.VERTICAL, command=self.coverage_review_text.yview)
+        review_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
+        self.coverage_review_text.configure(yscrollcommand=review_scroll.set, state=tk.DISABLED)
+
+        input_frame = ttk.LabelFrame(coverage_tab, text="覆盖目标判断")
+        input_frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(input_frame, textvariable=self.coverage_status_var).pack(anchor=tk.W, padx=8, pady=(8, 4))
         ttk.Label(input_frame, text="请输入想验证是否已覆盖的需求或场景说明:").pack(anchor=tk.W, padx=8)
         self.coverage_input_text = tk.Text(input_frame, height=4, wrap=tk.WORD, font=("Segoe UI", 10))
@@ -2685,9 +4087,8 @@ class RecorderViewerWindow:
         self.coverage_result_text = tk.Text(input_frame, height=8, wrap=tk.WORD, font=("Consolas", 10))
         self.coverage_result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.coverage_result_text.configure(state=tk.DISABLED)
-        for widget in [canvas, body, summary_frame, input_frame, self.coverage_summary_text, self.coverage_input_text, self.coverage_result_text]:
-            widget.bind("<MouseWheel>", self._on_coverage_mousewheel, add="+")
-        self._set_text_widget(self.coverage_summary_text, "请先执行 AI 分析。")
+        self._set_text_widget(self.coverage_summary_text, "请先执行 AI 总结。")
+        self._set_text_widget(self.coverage_review_text, "请先执行 AI 总结。")
         self._set_text_widget(self.coverage_result_text, "")
 
     def _build_ai_panel(self, parent: ttk.Frame) -> None:
@@ -3216,6 +4617,24 @@ class RecorderViewerWindow:
                     texts[step_id - 1] = display_text
         return texts
 
+    def _build_ai_process_summary_texts(self, analysis: dict[str, object] | None) -> dict[int, str]:
+        texts: dict[int, str] = {}
+        if not analysis:
+            return texts
+        values = analysis.get("process_summaries", [])
+        if not isinstance(values, list):
+            return texts
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            step_id = item.get("last_step_id", item.get("end_step"))
+            if not isinstance(step_id, int) or step_id < 1:
+                continue
+            summary = self._clean_sentence(str(item.get("summary", "")))
+            if summary:
+                texts[step_id - 1] = summary
+        return texts
+
     def _extract_analysis_step_observations(self, analysis: dict[str, object]) -> list[dict[str, object]]:
         explicit_values = analysis.get("step_observations", [])
         if isinstance(explicit_values, list) and explicit_values:
@@ -3297,19 +4716,20 @@ class RecorderViewerWindow:
         self.current_analyzer = None
         self.ai_button.configure(state=tk.NORMAL)
         self.selected_ai_button.configure(state=tk.NORMAL)
+        self.ai_process_summary_button.configure(state=tk.NORMAL)
         self.cancel_ai_button.configure(state=tk.DISABLED)
         self.analysis_status_base = "AI 分析完成"
         self.analysis_status_token += 1
+        existing_analysis = copy.deepcopy(self.ai_analysis) if isinstance(self.ai_analysis, dict) else self._load_ai_analysis(self.session_dir) or {}
+        analysis = self._merge_analysis_extras(existing_analysis, analysis)
         self.ai_analysis = analysis
         self.ai_step_tags = self._build_ai_step_tags(analysis)
         self.ai_step_texts = self._build_ai_step_texts(analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(analysis)
+        self._persist_ai_analysis(analysis)
         self.ai_var.set(self._build_ai_summary_text(analysis))
-        self.parameter_progress_var.set("参数推荐批处理未执行")
-        self.parameter_status_var.set("如需最新方法建议，可点击“生成方法建议”；应用清洗后也会自动生成。")
-        self._set_text_widget(self.parameter_result_text, "")
-        self.step_parameter_summaries = {}
-        self._clear_parameter_chat_history()
         self._refresh_coverage_summary()
+        self._refresh_selected_suggestion_panel()
         self._reload_tree()
         messagebox.showinfo("AI 分析完成", "已输出 ai_analysis.json 和 ai_analysis.yaml，并更新 viewer 高亮。", parent=self.window)
 
@@ -3318,37 +4738,41 @@ class RecorderViewerWindow:
         self.current_analyzer = None
         self.ai_button.configure(state=tk.NORMAL)
         self.selected_ai_button.configure(state=tk.NORMAL)
+        self.ai_process_summary_button.configure(state=tk.NORMAL)
         self.cancel_ai_button.configure(state=tk.DISABLED)
         self.analysis_status_base = "AI 分析失败"
         self.analysis_status_token += 1
+        partial_analysis = self._load_ai_analysis(self.session_dir) if self.session_dir else None
+        has_partial = self._has_partial_ai_analysis(partial_analysis)
         if message == "AI 分析已取消。":
             self.analysis_status_base = "AI 分析已取消"
+            if has_partial and partial_analysis is not None:
+                self.ai_analysis = partial_analysis
+                self.ai_step_tags = self._build_ai_step_tags(partial_analysis)
+                self.ai_step_texts = self._build_ai_step_texts(partial_analysis)
+                self.ai_process_summary_texts = self._build_ai_process_summary_texts(partial_analysis)
+                self.ai_var.set(f"AI 分析已取消，但已加载部分结果 | {self._build_ai_summary_text(partial_analysis)}")
+                self.suggestion_var.set("AI 分析已取消，已保留现有调用建议与已完成的 AI 看图结果")
+                self._refresh_coverage_summary()
+                self._refresh_selected_suggestion_panel()
+                self._reload_tree()
+                return
             self.ai_var.set("AI 分析已取消")
-            self.suggestion_var.set("未生成调用建议")
-            self.parameter_progress_var.set("参数推荐批处理未执行")
-            self.parameter_status_var.set("参数推荐未执行。")
-            self._set_text_widget(self.parameter_result_text, "")
+            self._refresh_selected_suggestion_panel()
             return
-        partial_analysis = self._load_ai_analysis(self.session_dir) if self.session_dir else None
-        has_partial = bool(partial_analysis and isinstance(partial_analysis.get("step_insights", []), list) and partial_analysis.get("step_insights", []))
         if has_partial and partial_analysis is not None:
             self.ai_analysis = partial_analysis
             self.ai_step_tags = self._build_ai_step_tags(partial_analysis)
             self.ai_step_texts = self._build_ai_step_texts(partial_analysis)
+            self.ai_process_summary_texts = self._build_ai_process_summary_texts(partial_analysis)
             self.ai_var.set(f"AI 分析部分成功: 已加载成功步骤 | {self._build_ai_summary_text(partial_analysis)}")
-            self.suggestion_result = None
-            self.step_method_suggestions = {}
-            self.step_module_suggestions = {}
-            self.step_parameter_summaries = {}
-            self.suggestion_var.set("AI 分析未完整完成，暂不生成调用建议")
-            self.parameter_progress_var.set("AI 分析部分成功，参数推荐需等待完整分析后再执行")
-            self.parameter_status_var.set("已加载成功的 AI 建议；当前分析未完整完成。")
-            self._set_text_widget(self.parameter_result_text, "")
-            self._clear_parameter_chat_history()
+            self.suggestion_var.set("AI 分析部分成功，已保留现有调用建议")
             self._refresh_coverage_summary()
+            self._refresh_selected_suggestion_panel()
             self._reload_tree()
         elif not has_partial:
             self.ai_var.set(f"AI 分析失败: {message}")
+            self._refresh_selected_suggestion_panel()
         parse_error_path = self._get_last_parse_error_response_path()
         if parse_error_path:
             prompt = f"{message}\n\n是否打开原始返回文件？\n{parse_error_path}"
@@ -3366,6 +4790,15 @@ class RecorderViewerWindow:
             messagebox.showwarning("AI 分析部分成功", f"{message}\n\n已将成功解析的 AI 建议写入事件列表。", parent=self.window)
             return
         messagebox.showerror("AI 分析失败", message, parent=self.window)
+
+    def _has_partial_ai_analysis(self, analysis: dict[str, object] | None) -> bool:
+        if not isinstance(analysis, dict):
+            return False
+        for field_name in ("step_insights", "step_observations", "batches"):
+            values = analysis.get(field_name, [])
+            if isinstance(values, list) and values:
+                return True
+        return False
 
     def _get_last_parse_error_response_path(self) -> Path | None:
         if not self.session_dir:
@@ -3389,40 +4822,92 @@ class RecorderViewerWindow:
         batch_prefix = ""
         if isinstance(current_batch, int) and isinstance(total_batches, int) and total_batches > 0:
             batch_prefix = f"第 {current_batch}/{total_batches} 批 | "
+        analysis_phase = str(payload.get("analysis_phase", "")).strip()
+        segment_index = payload.get("segment_index")
+        total_segments = payload.get("total_segments")
+        window_index = payload.get("window_index")
+        total_windows = payload.get("total_windows")
+        group_prefix = ""
+        if analysis_phase == "group_summary_window":
+            segment_text = ""
+            if isinstance(segment_index, int) and isinstance(total_segments, int) and total_segments > 0:
+                segment_text = f"区间 {segment_index}/{total_segments} | "
+            window_text = ""
+            if isinstance(window_index, int) and isinstance(total_windows, int) and total_windows > 0:
+                window_text = f"窗口 {window_index}/{total_windows} | "
+            elif batch_prefix:
+                window_text = batch_prefix
+            group_prefix = f"{segment_text}{window_text}"
+        elif analysis_phase == "group_summary_merge":
+            if isinstance(segment_index, int) and isinstance(total_segments, int) and total_segments > 0:
+                group_prefix = f"区间 {segment_index}/{total_segments} | 汇总 | "
+            else:
+                group_prefix = "汇总 | "
+        prefix = group_prefix or batch_prefix
 
         if stage == "start":
             event_count = payload.get("event_count", 0)
             batch_size = payload.get("batch_size", 0)
             total_batches = payload.get("total_batches", 0)
             return f"AI 分析启动: 共 {event_count} 步，batch_size={batch_size}，预计 {total_batches} 批"
+        if stage == "process_summary_segment_start":
+            start_step = payload.get("start_step", "?")
+            end_step = payload.get("end_step", "?")
+            process_name = payload.get("process_name", "")
+            return f"{batch_prefix}AI总结: 正在总结进程 {process_name} 的连续步骤 {start_step}-{end_step}"
+        if stage == "process_summary_segment_done":
+            start_step = payload.get("start_step", "?")
+            end_step = payload.get("end_step", "?")
+            process_name = payload.get("process_name", "")
+            return f"{batch_prefix}AI总结完成: 进程 {process_name} 的步骤 {start_step}-{end_step} 已生成总结"
+        if stage == "group_summary_segment_start":
+            start_step = payload.get("start_step", "?")
+            end_step = payload.get("end_step", "?")
+            total_windows = payload.get("total_windows", 0)
+            segment_text = ""
+            if isinstance(segment_index, int) and isinstance(total_segments, int) and total_segments > 0:
+                segment_text = f"区间 {segment_index}/{total_segments} | "
+            return f"{segment_text}连续步骤总结: 步骤 {start_step}-{end_step}，按每批最多 5 张、重叠 1 张发送，共 {total_windows} 个窗口"
         if stage == "batch_preprocess_start":
             start_step = payload.get("start_step", "?")
             end_step = payload.get("end_step", "?")
-            return f"{batch_prefix}预处理中: 步骤 {start_step}-{end_step}，正在整理事件与定位发送图片"
+            return f"{prefix}预处理中: 步骤 {start_step}-{end_step}，正在整理事件与定位发送图片"
         if stage == "batch_preprocess_done":
             start_step = payload.get("start_step", "?")
             end_step = payload.get("end_step", "?")
             image_count = payload.get("image_count", 0)
             cropped_monitor_count = payload.get("cropped_monitor_count", 0)
-            return f"{batch_prefix}预处理完成: 步骤 {start_step}-{end_step}，发送图片 {image_count} 张，其中单屏裁切 {cropped_monitor_count} 张"
+            return f"{prefix}预处理完成: 步骤 {start_step}-{end_step}，发送图片 {image_count} 张，其中单屏裁切 {cropped_monitor_count} 张"
         if stage == "prepare_media":
             image_count = payload.get("image_count", 0)
             inline_image_count = payload.get("inline_image_count", 0)
             has_video = payload.get("has_video", False)
-            return f"{batch_prefix}准备请求媒体: 文件图片 {image_count} 张，临时图片 {inline_image_count} 张，视频 {'有' if has_video else '无'}"
+            if analysis_phase == "group_summary_window":
+                start_step = payload.get("window_start_step", payload.get("start_step", "?"))
+                end_step = payload.get("window_end_step", payload.get("end_step", "?"))
+                return f"{prefix}准备请求媒体: 当前窗口步骤 {start_step}-{end_step}，图片 {image_count} 张，临时图片 {inline_image_count} 张，视频 {'有' if has_video else '无'}"
+            return f"{prefix}准备请求媒体: 文件图片 {image_count} 张，临时图片 {inline_image_count} 张，视频 {'有' if has_video else '无'}"
         if stage == "send_request":
             timeout_seconds = payload.get("timeout_seconds", 0)
-            return f"{batch_prefix}已发送到模型，等待响应中，单批超时 {timeout_seconds} 秒"
+            if analysis_phase == "group_summary_window":
+                start_step = payload.get("window_start_step", payload.get("start_step", "?"))
+                end_step = payload.get("window_end_step", payload.get("end_step", "?"))
+                return f"{prefix}已发送当前窗口到模型: 步骤 {start_step}-{end_step}，等待响应中，单批超时 {timeout_seconds} 秒"
+            if analysis_phase == "group_summary_merge":
+                start_step = payload.get("start_step", "?")
+                end_step = payload.get("end_step", "?")
+                return f"{prefix}已发送区间汇总请求: 步骤 {start_step}-{end_step}，等待响应中，单批超时 {timeout_seconds} 秒"
+            return f"{prefix}已发送到模型，等待响应中，单批超时 {timeout_seconds} 秒"
         if stage == "response_received":
             status_code = payload.get("status_code", "?")
-            return f"{batch_prefix}模型已返回 HTTP {status_code}，正在读取响应"
+            return f"{prefix}模型已返回 HTTP {status_code}，正在读取响应"
         if stage == "parse_response":
-            return f"{batch_prefix}正在解析模型返回 JSON"
+            return f"{prefix}正在解析模型返回 JSON"
         if stage == "batch_parse":
-            return f"{batch_prefix}正在解析当前步骤分析结果"
+            return f"{prefix}正在解析当前步骤分析结果"
         if stage == "batch_done":
             step_insight_count = payload.get("step_insight_count", 0)
-            return f"{batch_prefix}当前步骤分析完成，累计生成步骤总结 {step_insight_count} 条"
+            return f"{prefix}当前步骤分析完成，累计生成步骤总结 {step_insight_count} 条"
         if stage == "workflow_aggregate_start":
             step_count = payload.get("step_count", 0)
             return f"正在基于 {step_count} 条步骤总结做二次流程聚合分析"
@@ -3482,14 +4967,66 @@ class RecorderViewerWindow:
     def _describe_event_for_view(self, row_index: int, event: dict[str, object]) -> str:
         return self.ai_step_texts.get(row_index, "")
 
+    def _describe_process_summary_for_view(self, row_index: int) -> str:
+        return self.ai_process_summary_texts.get(row_index, "")
+
     def _refresh_coverage_summary(self) -> None:
         summary = self._build_workflow_summary_text()
         self._set_text_widget(self.coverage_summary_text, summary)
+        if hasattr(self, "coverage_review_text"):
+            self._set_text_widget(self.coverage_review_text, self._build_process_summary_review_text())
         if self.ai_analysis:
             self.coverage_status_var.set("可输入目标，让 AI 判断当前录制是否已覆盖。")
         else:
             self.coverage_status_var.set("请先执行 AI 分析，再进行覆盖判断")
         self._set_text_widget(self.coverage_result_text, "")
+
+    def _build_process_summary_review_text(self) -> str:
+        if not self.ai_analysis:
+            return "请先执行 AI 总结。"
+        overview = self.ai_analysis.get("process_summary_overview", {}) if isinstance(self.ai_analysis.get("process_summary_overview", {}), dict) else {}
+        candidates = overview.get("rollback_candidates", []) if isinstance(overview.get("rollback_candidates", []), list) else []
+        notes = overview.get("notes", []) if isinstance(overview.get("notes", []), list) else []
+        lines: list[str] = []
+        if candidates:
+            lines.append("以下步骤可能属于无效尝试、回退路径，或后续被正确操作覆盖:")
+            for item in candidates:
+                if not isinstance(item, dict):
+                    continue
+                step_ids = item.get("step_ids", []) if isinstance(item.get("step_ids", []), list) else []
+                reason = self._clean_sentence(str(item.get("reason", "")))
+                label = self._format_step_id_list(step_ids)
+                if label and reason:
+                    lines.append(f"- 步骤 {label}: {reason}")
+                elif label:
+                    lines.append(f"- 步骤 {label}")
+                elif reason:
+                    lines.append(f"- {reason}")
+        if notes:
+            if lines:
+                lines.append("")
+            lines.append("补充判断:")
+            for note in notes:
+                cleaned = self._clean_sentence(str(note))
+                if cleaned:
+                    lines.append(f"- {cleaned}")
+        return "\n".join(lines) if lines else "当前没有识别到明显的无效操作或回退步骤。"
+
+    def _format_step_id_list(self, step_ids: list[int]) -> str:
+        normalized = sorted({int(step_id) for step_id in step_ids if isinstance(step_id, int) and step_id > 0})
+        if not normalized:
+            return ""
+        ranges: list[str] = []
+        start = normalized[0]
+        end = normalized[0]
+        for step_id in normalized[1:]:
+            if step_id == end + 1:
+                end = step_id
+                continue
+            ranges.append(f"{start}-{end}" if start != end else str(start))
+            start = end = step_id
+        ranges.append(f"{start}-{end}" if start != end else str(start))
+        return ", ".join(ranges)
 
     def _extract_coverage_text(self, value: object) -> str:
         if not isinstance(value, str):
@@ -3639,6 +5176,11 @@ class RecorderViewerWindow:
         if not self.ai_analysis:
             return "请先执行 AI 分析。"
 
+        overview = self.ai_analysis.get("process_summary_overview", {}) if isinstance(self.ai_analysis.get("process_summary_overview", {}), dict) else {}
+        overview_summary = self._clean_sentence(str(overview.get("summary", "")))
+        if overview_summary:
+            return overview_summary
+
         workflow_report_markdown = str(self.ai_analysis.get("workflow_report_markdown", "")).strip()
         if workflow_report_markdown:
             return workflow_report_markdown
@@ -3713,7 +5255,12 @@ class RecorderViewerWindow:
         self.suggestion_var.set(self._build_suggestion_summary_text(result))
         self._refresh_selected_suggestion_panel()
 
-    def _generate_method_suggestions_async(self, status_message: str | None = None, interactive: bool = False) -> None:
+    def _generate_method_suggestions_async(
+        self,
+        selected_rows: list[int] | None = None,
+        status_message: str | None = None,
+        interactive: bool = False,
+    ) -> None:
         if self.suggestion_generation_running:
             if interactive:
                 messagebox.showinfo("提示", "方法建议正在生成中，请稍候。", parent=self.window)
@@ -3729,6 +5276,12 @@ class RecorderViewerWindow:
             if interactive:
                 messagebox.showerror("生成失败", "未找到可用 registry。", parent=self.window)
             return
+        normalized_selected_rows = self._normalize_selected_analysis_rows(selected_rows)
+        if selected_rows is not None and not normalized_selected_rows:
+            if interactive:
+                messagebox.showinfo("提示", "所选步骤无可生成方法建议的内容。", parent=self.window)
+            return
+        suggestion_session_data, step_id_mapping = self._build_suggestion_session_data(normalized_selected_rows)
         methods_path, _scripts_path = registry_paths
         self.suggestion_generation_running = True
         self.generate_suggestion_button.configure(state=tk.DISABLED)
@@ -3738,42 +5291,164 @@ class RecorderViewerWindow:
         def worker() -> None:
             try:
                 result = self.suggestion_service.build_method_selection_from_session_data(
-                    session_id=str(self.session_data.get("session_id", self.session_dir.name)),
-                    session_data=self.session_data,
+                    session_id=str(suggestion_session_data.get("session_id", self.session_dir.name)),
+                    session_data=suggestion_session_data,
                     methods_registry_path=methods_path,
                 )
-                self.suggestion_service.write_result_file(self.session_dir / "conversion_suggestions.json", result)
             except Exception as exc:
                 message = str(exc)
-                self.window.after(0, lambda message=message: self._on_suggestion_generation_failed(message))
+                self.window.after(0, lambda message=message, interactive=interactive: self._on_suggestion_generation_failed(message, interactive=interactive))
                 return
-            self.window.after(0, lambda result=result: self._on_suggestion_generation_success(result))
+            self.window.after(
+                0,
+                lambda result=result, selected_rows=normalized_selected_rows, step_id_mapping=step_id_mapping, interactive=interactive: self._on_suggestion_generation_success(
+                    result,
+                    selected_rows,
+                    step_id_mapping,
+                    interactive=interactive,
+                ),
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_suggestion_generation_success(self, result) -> None:
+    def _on_suggestion_generation_success(
+        self,
+        result,
+        selected_rows: list[int] | None = None,
+        step_id_mapping: dict[int, int] | None = None,
+        interactive: bool = False,
+    ) -> None:
         self.suggestion_generation_running = False
         self.generate_suggestion_button.configure(state=tk.NORMAL)
-        self.suggestion_result = result
-        self.step_method_suggestions = self._build_method_suggestion_map(result)
-        self.step_module_suggestions = self._build_module_suggestion_map(result)
-        self.step_parameter_summaries = self._build_parameter_suggestion_map(result)
-        self.suggestion_var.set(self._build_suggestion_summary_text(result))
+        merged_result = self._merge_suggestion_result_preserving_parameters(result, selected_rows, step_id_mapping)
+        self.suggestion_result = merged_result
+        self._persist_suggestion_result()
         self._refresh_selected_suggestion_panel()
         self._reload_tree()
+        if interactive:
+            selected_step_ids = {row_index + 1 for row_index in selected_rows or []}
+            matched_count = sum(
+                1
+                for item in getattr(merged_result, "suggestions", [])
+                if int(getattr(item, "step_id", 0) or 0) in selected_step_ids
+                and (
+                    str(getattr(item, "method_name", "") or "").strip()
+                    or str(getattr(item, "script_name", "") or "").strip()
+                )
+            )
+            if selected_step_ids and matched_count == 0:
+                messagebox.showinfo("生成完成", "已执行方法建议生成，但当前所选步骤没有匹配到可展示的方法或模块建议。", parent=self.window)
 
-    def _on_suggestion_generation_failed(self, message: str) -> None:
+    def _on_suggestion_generation_failed(self, message: str, interactive: bool = False) -> None:
         self.suggestion_generation_running = False
         self.generate_suggestion_button.configure(state=tk.NORMAL)
-        self.suggestion_result = None
-        self.step_method_suggestions = {}
-        self.step_module_suggestions = {}
-        self.step_parameter_summaries = {}
-        self._clear_parameter_chat_history()
         self.suggestion_var.set(f"调用建议生成失败: {message}")
         self.parameter_status_var.set("参数推荐不可用，请先修复调用建议生成。")
-        self._set_text_widget(self.parameter_result_text, "")
+        self._refresh_selected_suggestion_panel()
         self._reload_tree()
+        if interactive:
+            messagebox.showerror("调用建议生成失败", message, parent=self.window)
+
+    def _load_existing_suggestion_result(self):
+        if self.suggestion_result is not None:
+            return copy.deepcopy(self.suggestion_result)
+        if not self.session_dir:
+            return None
+        suggestion_path = self.session_dir / "conversion_suggestions.json"
+        if not suggestion_path.exists():
+            return None
+        try:
+            return self.suggestion_service.load_result_file(suggestion_path)
+        except Exception:
+            return None
+
+    def _merge_suggestion_result_preserving_parameters(self, new_result, selected_rows: list[int] | None = None, step_id_mapping: dict[int, int] | None = None):
+        existing_result = self._load_existing_suggestion_result()
+        if step_id_mapping:
+            for item in new_result.suggestions:
+                step_id = int(getattr(item, "step_id", 0) or 0)
+                if step_id in step_id_mapping:
+                    item.step_id = step_id_mapping[step_id]
+        if existing_result is None:
+            return new_result
+
+        existing_by_step = {
+            int(item.step_id): item
+            for item in existing_result.suggestions
+            if int(getattr(item, "step_id", 0) or 0) > 0
+        }
+        selected_step_ids = {row_index + 1 for row_index in selected_rows or []}
+        new_step_ids = {
+            int(item.step_id)
+            for item in new_result.suggestions
+            if int(getattr(item, "step_id", 0) or 0) > 0
+        }
+        changed_row_indexes: set[int] = set()
+        merged_suggestions = []
+
+        if selected_step_ids:
+            for item in existing_result.suggestions:
+                step_id = int(getattr(item, "step_id", 0) or 0)
+                if step_id <= 0 or step_id in selected_step_ids:
+                    continue
+                merged_suggestions.append(copy.deepcopy(item))
+
+        for item in new_result.suggestions:
+            step_id = int(getattr(item, "step_id", 0) or 0)
+            if step_id <= 0:
+                continue
+            existing_item = existing_by_step.get(step_id)
+            if existing_item is None:
+                changed_row_indexes.add(step_id - 1)
+                merged_suggestions.append(item)
+                continue
+
+            new_method_name = str(getattr(item, "method_name", "") or "").strip()
+            existing_method_name = str(getattr(existing_item, "method_name", "") or "").strip()
+            if new_method_name != existing_method_name:
+                changed_row_indexes.add(step_id - 1)
+                item.parameters = []
+                if isinstance(item.candidate_payload, dict):
+                    item.candidate_payload.pop("viewer_parameter_summary_override", None)
+                merged_suggestions.append(item)
+                continue
+
+            item.parameters = copy.deepcopy(existing_item.parameters)
+            existing_payload = existing_item.candidate_payload if isinstance(existing_item.candidate_payload, dict) else {}
+            new_payload = item.candidate_payload if isinstance(item.candidate_payload, dict) else {}
+            merged_payload = dict(new_payload)
+            if "viewer_parameter_summary_override" in existing_payload:
+                merged_payload["viewer_parameter_summary_override"] = existing_payload["viewer_parameter_summary_override"]
+            item.candidate_payload = merged_payload
+
+            merged_suggestions.append(item)
+
+        if not selected_step_ids:
+            merged_suggestions = list(new_result.suggestions)
+
+        removed_step_ids = (selected_step_ids or set(existing_by_step)) - new_step_ids
+        changed_row_indexes.update(step_id - 1 for step_id in removed_step_ids if step_id > 0)
+        for row_index in changed_row_indexes:
+            self.parameter_prompt_by_step.pop(row_index, None)
+            self.parameter_response_by_step.pop(row_index, None)
+
+        notes = [str(item) for item in getattr(existing_result, "notes", []) if str(item).strip()] if selected_step_ids else []
+        notes.extend(str(item) for item in getattr(new_result, "notes", []) if str(item).strip())
+        if selected_step_ids:
+            deduped_notes: list[str] = []
+            seen_notes: set[str] = set()
+            for note in notes:
+                if note in seen_notes:
+                    continue
+                deduped_notes.append(note)
+                seen_notes.add(note)
+            new_result.notes = deduped_notes
+        new_result.suggestions = sorted(
+            merged_suggestions,
+            key=lambda item: int(getattr(item, "step_id", 0) or 0),
+        )
+
+        return new_result
 
     def _build_method_suggestion_map(self, result) -> dict[int, str]:
         mapping: dict[int, str] = {}
@@ -3796,7 +5471,8 @@ class RecorderViewerWindow:
         for item in result.suggestions:
             if item.step_id <= 0:
                 continue
-            mapping[item.step_id - 1] = self._summarize_parameter_suggestions(item.parameters)
+            override = item.candidate_payload.get("viewer_parameter_summary_override", "") if isinstance(item.candidate_payload, dict) else ""
+            mapping[item.step_id - 1] = str(override).strip() or self._summarize_parameter_suggestions(item.parameters)
         return mapping
 
     def _build_suggestion_summary_text(self, result) -> str:
@@ -3813,6 +5489,14 @@ class RecorderViewerWindow:
     def _describe_parameter_suggestion_for_view(self, row_index: int) -> str:
         return self.step_parameter_summaries.get(row_index, "")
 
+    def _merge_analysis_extras(self, base_analysis: dict[str, object], new_analysis: dict[str, object]) -> dict[str, object]:
+        merged = copy.deepcopy(new_analysis) if isinstance(new_analysis, dict) else {}
+        if "process_summaries" not in merged and isinstance(base_analysis, dict):
+            merged["process_summaries"] = [item for item in base_analysis.get("process_summaries", []) if isinstance(item, dict)]
+        if "process_summary_overview" not in merged and isinstance(base_analysis, dict):
+            merged["process_summary_overview"] = copy.deepcopy(base_analysis.get("process_summary_overview", {})) if isinstance(base_analysis.get("process_summary_overview", {}), dict) else {}
+        return merged
+
     def _summarize_parameter_suggestions(self, parameters) -> str:
         if not parameters:
             return ""
@@ -3822,6 +5506,7 @@ class RecorderViewerWindow:
         )
 
     def _format_parameter_detail_text(self, suggestion) -> str:
+        override = suggestion.candidate_payload.get("viewer_parameter_summary_override", "") if isinstance(suggestion.candidate_payload, dict) else ""
         lines = [
             f"Step: {suggestion.step_id}",
             f"方法: {suggestion.method_name or '(无)'}",
@@ -3830,6 +5515,8 @@ class RecorderViewerWindow:
             f"原因: {suggestion.reason or '(无)'}",
             f"置信度: {suggestion.confidence:.2f}",
         ]
+        if str(override).strip():
+            lines.extend(["", f"参数建议摘要(人工修改): {str(override).strip()}"])
         if suggestion.parameters:
             lines.extend(["", "参数推荐:"])
             for item in suggestion.parameters:
@@ -3859,7 +5546,7 @@ class RecorderViewerWindow:
             return
         suggestion_rows = [row_index for row_index in row_indexes if self._find_suggestion_by_row_index(row_index) is not None]
         if not suggestion_rows:
-            messagebox.showinfo("提示", "所选步骤里没有可用的方法建议。", parent=self.window)
+            messagebox.showinfo("提示", "当前所选步骤没有可用的方法建议。", parent=self.window)
             return
 
         find_control_rows: list[int] = []
@@ -3923,22 +5610,202 @@ class RecorderViewerWindow:
         threading.Thread(target=worker, daemon=True).start()
 
     def export_atframework_yaml(self) -> None:
+        if self.export_yaml_running:
+            return
         if not self.session_dir:
             messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
             return
-        if not self.suggestion_result:
-            self._try_load_historical_suggestions()
-        if not self.suggestion_result:
-            messagebox.showinfo("提示", "请先生成或加载调用建议。", parent=self.window)
+
+        metadata_payload = self._get_session_metadata()
+
+        testcase_id = str(metadata_payload.get("testcase_id", "")).strip()
+        if not testcase_id:
+            messagebox.showerror("导出失败", "Session 元数据中的 Testcase ID 不能为空。", parent=self.window)
             return
-        output_path = self.session_dir / "atframework_steps.yaml"
+
+        export_root = self._prompt_export_root_directory()
+        if export_root is None:
+            return
+
+        export_dir = export_root / testcase_id
         try:
-            step_count = export_suggestions_to_atframework_yaml(self.suggestion_result, output_path)
+            export_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            messagebox.showerror("导出失败", str(exc), parent=self.window)
+            messagebox.showerror("导出失败", f"创建导出目录失败:\n{exc}", parent=self.window)
             return
+
+        output_path = export_dir / "atframework_steps.yaml"
+        self.export_yaml_running = True
+        self.export_yaml_button.configure(state=tk.DISABLED)
+        self.load_status_var.set(f"正在准备导出 ATFramework YAML: {output_path}")
+
+        def worker() -> None:
+            try:
+                suggestion_result = self._load_suggestion_result_for_export()
+                step_count = export_suggestions_to_atframework_yaml(suggestion_result, output_path)
+            except Exception as exc:
+                message = str(exc)
+                self.window.after(0, lambda message=message: self._on_export_atframework_yaml_failed(message))
+                return
+            self.window.after(0, lambda output_path=output_path, step_count=step_count: self._on_export_atframework_yaml_success(output_path, step_count))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _load_suggestion_result_for_export(self):
+        if self.suggestion_result is not None:
+            return copy.deepcopy(self.suggestion_result)
+        if not self.session_dir:
+            raise ValueError("请先加载 Session。")
+        suggestion_path = self.session_dir / "conversion_suggestions.json"
+        if not suggestion_path.exists():
+            raise ValueError("请先生成或加载调用建议。")
+        result = self.suggestion_service.load_result_file(suggestion_path)
+        self.window.after(0, lambda result=result: self._apply_loaded_suggestion_result(result))
+        return copy.deepcopy(result)
+
+    def _apply_loaded_suggestion_result(self, result) -> None:
+        self.suggestion_result = result
+        self.step_method_suggestions = self._build_method_suggestion_map(result)
+        self.step_module_suggestions = self._build_module_suggestion_map(result)
+        self.step_parameter_summaries = self._build_parameter_suggestion_map(result)
+        self.suggestion_var.set(self._build_suggestion_summary_text(result))
+        self._refresh_selected_suggestion_panel()
+
+    def _prompt_export_root_directory(self) -> Path | None:
+        default_root = Path.home() / "Desktop"
+        if not default_root.exists():
+            default_root = Path.home()
+        while True:
+            raw_value = simpledialog.askstring(
+                "导出目录",
+                "请输入导出根目录路径。\n将会在该目录下创建 TestcaseID 子文件夹。",
+                parent=self.window,
+                initialvalue=str(default_root),
+            )
+            if raw_value is None:
+                return None
+            candidate = Path(raw_value.strip().strip('"'))
+            if not str(candidate).strip():
+                messagebox.showerror("导出失败", "导出目录不能为空。", parent=self.window)
+                continue
+            if not candidate.exists():
+                messagebox.showerror("导出失败", f"导出目录不存在:\n{candidate}", parent=self.window)
+                continue
+            if not candidate.is_dir():
+                messagebox.showerror("导出失败", f"导出路径不是文件夹:\n{candidate}", parent=self.window)
+                continue
+            return candidate
+
+    def _get_target_row_indexes_for_current_steps(self) -> list[int]:
+        return self._get_selected_row_indexes()
+
+    def _build_selected_suggestion_result(self, row_indexes: list[int]):
+        base_result = self._load_suggestion_result_for_export()
+        selected_step_ids = {row_index + 1 for row_index in row_indexes}
+        base_result.suggestions = [
+            item for item in base_result.suggestions
+            if int(getattr(item, "step_id", 0) or 0) in selected_step_ids and str(getattr(item, "method_name", "") or "").strip()
+        ]
+        return base_result
+
+    def _convert_atframework_step_to_debug_payload(self, step: dict[str, object]) -> dict[str, object]:
+        return {
+            "ControlName": step.get("ControlName", "Null"),
+            "Action": step.get("Action", "Null"),
+            "ParameterValue": step.get("Parameter Value", ""),
+            "Check": step.get("Check", "Null"),
+            "CheckParameterValue": step.get("Check Parameter Value", ""),
+            "StepDescription": step.get("Step Description", ""),
+            "Expectresult": step.get("Expect result", ""),
+        }
+
+    def _build_debug_request_payload(self, debug_payloads: list[dict[str, object]]) -> dict[str, object] | list[dict[str, object]]:
+        if len(debug_payloads) == 1:
+            return debug_payloads[0]
+        return debug_payloads
+
+    def debug_atframework_steps(self) -> None:
+        if self.debug_run_running:
+            return
+        if not self.session_dir:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+
+        row_indexes = self._get_target_row_indexes_for_current_steps()
+        if not row_indexes:
+            messagebox.showinfo("提示", "请先选择至少一个步骤。", parent=self.window)
+            return
+
+        try:
+            suggestion_result = self._build_selected_suggestion_result(row_indexes)
+            yaml_payload = build_atframework_yaml_dict(suggestion_result)
+            steps = yaml_payload.get("Steps", []) if isinstance(yaml_payload, dict) else []
+            if not isinstance(steps, list):
+                steps = []
+            debug_payloads = [self._convert_atframework_step_to_debug_payload(step) for step in steps if isinstance(step, dict)]
+        except Exception as exc:
+            messagebox.showerror("调试失败", str(exc), parent=self.window)
+            self.load_status_var.set(f"本地ATFramework调试调用失败: {exc}")
+            return
+
+        if not debug_payloads:
+            messagebox.showinfo("提示", "当前选中步骤没有可调试的 ATFramework 方法建议。", parent=self.window)
+            return
+
+        self.debug_run_running = True
+        self.debug_run_button.configure(state=tk.DISABLED)
+        request_payload = self._build_debug_request_payload(debug_payloads)
+        self.load_status_var.set(f"正在调用本地ATFramework调试: 准备发送 {len(debug_payloads)} 条步骤")
+        self.cleaning_var.set(f"本地ATFramework调试中: 准备发送 {len(debug_payloads)} 条步骤")
+
+        def worker() -> None:
+            failures: list[str] = []
+            success_count = 0
+            try:
+                response = requests.post(
+                    "http://127.0.0.1:38002/runteststeps",
+                    headers={"Content-Type": "application/json"},
+                    json=request_payload,
+                    timeout=20,
+                )
+                response.raise_for_status()
+                success_count = len(debug_payloads)
+            except Exception as exc:
+                failures.append(f"调试调用失败: {exc} | payload={json.dumps(request_payload, ensure_ascii=False)}")
+                self.window.after(0, lambda message=str(exc): self.load_status_var.set(f"本地ATFramework调试调用失败: {message}"))
+
+            self.window.after(
+                0,
+                lambda success_count=success_count, total=len(debug_payloads), failures=failures: self._on_debug_atframework_steps_finished(
+                    success_count,
+                    total,
+                    failures,
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_debug_atframework_steps_finished(self, success_count: int, total: int, failures: list[str]) -> None:
+        self.debug_run_running = False
+        self.debug_run_button.configure(state=tk.NORMAL)
+        if failures:
+            self.load_status_var.set(f"本地ATFramework调试调用失败: 成功 {success_count}/{total}")
+            self.cleaning_var.set(f"本地ATFramework调试调用失败: 成功 {success_count}/{total} | {failures[0]}")
+            return
+        self.load_status_var.set(f"本地ATFramework调试完成: 成功 {success_count}/{total}")
+        self.cleaning_var.set(f"本地ATFramework调试完成: {success_count}/{total}")
+
+    def _on_export_atframework_yaml_success(self, output_path: Path, step_count: int) -> None:
+        self.export_yaml_running = False
+        self.export_yaml_button.configure(state=tk.NORMAL)
         self.load_status_var.set(f"已导出 ATFramework YAML: {output_path} | 步骤数 {step_count}")
         messagebox.showinfo("导出完成", f"已导出 ATFramework YAML:\n{output_path}\n\n步骤数: {step_count}", parent=self.window)
+
+    def _on_export_atframework_yaml_failed(self, message: str) -> None:
+        self.export_yaml_running = False
+        self.export_yaml_button.configure(state=tk.NORMAL)
+        self.load_status_var.set(f"导出 ATFramework YAML 失败: {message}")
+        messagebox.showerror("导出失败", message or "未知错误", parent=self.window)
 
     def _on_parameter_recommendation_progress(self, position: int, total: int, row_index: int) -> None:
         self.parameter_progress_var.set(f"参数推荐批处理中: {position}/{total} | 当前步骤 {row_index + 1}")

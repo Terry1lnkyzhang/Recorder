@@ -21,7 +21,12 @@ from .prompt_builder import (
     build_step_observation_prompt,
     build_step_reasoning_prompt,
     build_workflow_aggregation_prompt,
+    build_grouped_step_merge_prompt,
+    build_grouped_step_summary_prompt,
+    collect_group_summary_inputs,
     collect_observation_inputs,
+    find_group_summary_segments,
+    resolve_analysis_step_id,
 )
 
 
@@ -46,6 +51,8 @@ class SessionWorkflowAnalyzer:
     ) -> SessionAnalysisResult:
         session_id = str(session_data.get("session_id", session_dir.name))
         events = list(session_data.get("events", []))
+        analysis_options = session_data.get("analysis_options", {}) if isinstance(session_data.get("analysis_options", {}), dict) else {}
+        include_all_screenshot_events = bool(analysis_options.get("include_all_screenshot_events", False))
         environment = session_data.get("environment", {}) if isinstance(session_data.get("environment", {}), dict) else {}
         display_layout = environment.get("display_layout") if isinstance(environment, dict) else None
         batch_size = max(1, int(self.settings.analysis_batch_size))
@@ -53,6 +60,7 @@ class SessionWorkflowAnalyzer:
         carry_memory = load_carry_memory(memory_path)
         total_batches = max(1, (len(events) + batch_size - 1) // batch_size) if events else 0
         prior_step_observations: list[dict[str, object]] = []
+        excluded_process_names = SettingsStore.parse_pattern_list(self.settings.ai_observation_excluded_process_names)
 
         result = SessionAnalysisResult(session_id=session_id, batch_size=batch_size, status="running", carry_memory=list(carry_memory))
 
@@ -72,6 +80,9 @@ class SessionWorkflowAnalyzer:
                 raise AIClientError("AI 分析已取消。")
             batch_id = f"batch_{start_index + 1:04d}_{min(len(events), start_index + batch_size):04d}"
             current_batch = (start_index // batch_size) + 1
+            batch_slice = events[start_index : start_index + batch_size]
+            batch_start_step = resolve_analysis_step_id(batch_slice[0], start_index + 1) if batch_slice else start_index + 1
+            batch_end_step = resolve_analysis_step_id(batch_slice[-1], min(len(events), start_index + batch_size)) if batch_slice else min(len(events), start_index + batch_size)
 
             if progress_callback:
                 progress_callback(
@@ -81,8 +92,8 @@ class SessionWorkflowAnalyzer:
                         "batch_id": batch_id,
                         "current_batch": current_batch,
                         "total_batches": total_batches,
-                        "start_step": start_index + 1,
-                        "end_step": min(len(events), start_index + batch_size),
+                        "start_step": batch_start_step,
+                        "end_step": batch_end_step,
                     },
                 )
 
@@ -93,7 +104,8 @@ class SessionWorkflowAnalyzer:
                 batch_size,
                 display_layout=display_layout,
                 send_fullscreen=self.settings.send_fullscreen_screenshots,
-                excluded_process_names=SettingsStore.parse_pattern_list(self.settings.ai_observation_excluded_process_names),
+                excluded_process_names=excluded_process_names,
+                include_all_screenshot_events=include_all_screenshot_events,
             )
             observation_prompt = build_step_observation_prompt()
 
@@ -105,8 +117,8 @@ class SessionWorkflowAnalyzer:
                         "batch_id": batch_id,
                         "current_batch": current_batch,
                         "total_batches": total_batches,
-                        "start_step": start_index + 1,
-                        "end_step": min(len(events), start_index + batch_size),
+                        "start_step": batch_start_step,
+                        "end_step": batch_end_step,
                         "image_count": len(image_paths),
                         "cropped_monitor_count": image_stats.get("cropped_monitor_count", 0),
                     },
@@ -272,6 +284,27 @@ class SessionWorkflowAnalyzer:
                     },
                 )
 
+        grouped_step_observations, grouped_step_insights, grouped_batches, grouped_notes = self._analyze_grouped_screenshot_segments(
+            session_id=session_id,
+            session_dir=session_dir,
+            events=events,
+            display_layout=display_layout,
+            excluded_process_names=excluded_process_names,
+            include_all_screenshot_events=include_all_screenshot_events,
+            progress_callback=progress_callback,
+        )
+        if grouped_step_observations:
+            result.step_observations.extend(grouped_step_observations)
+            result.step_observations = sorted(result.step_observations, key=lambda item: int(item.get("step_id", 0) or 0))
+        if grouped_step_insights:
+            result.step_insights.extend(grouped_step_insights)
+            result.step_insights = sorted(result.step_insights, key=lambda item: int(item.get("step_id", 0) or 0))
+        if grouped_batches:
+            result.batches.extend(grouped_batches)
+            result.batches = sorted(result.batches, key=lambda item: (item.start_step, item.end_step, item.batch_id))
+        if grouped_notes:
+            result.analysis_notes = _merge_unique_text_items(result.analysis_notes, grouped_notes)
+
         result.carry_memory = carry_memory
         if self.is_cancelled():
             raise AIClientError("AI 分析已取消。")
@@ -364,6 +397,210 @@ class SessionWorkflowAnalyzer:
                 },
             )
         return result
+
+    def _analyze_grouped_screenshot_segments(
+        self,
+        session_id: str,
+        session_dir: Path,
+        events: list[dict[str, object]],
+        display_layout: dict[str, object] | None,
+        excluded_process_names: list[str],
+        include_all_screenshot_events: bool,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[AnalysisBatchRecord], list[str]]:
+        segments = find_group_summary_segments(
+            session_dir,
+            events,
+            excluded_process_names=excluded_process_names,
+            include_all_screenshot_events=include_all_screenshot_events,
+        )
+        if not segments:
+            return [], [], [], []
+
+        step_observations: list[dict[str, object]] = []
+        step_insights: list[dict[str, object]] = []
+        batch_records: list[AnalysisBatchRecord] = []
+        notes: list[str] = []
+        total_segments = len(segments)
+
+        for segment_index, segment_step_ids in enumerate(segments, start=1):
+            if self.is_cancelled():
+                raise AIClientError("AI 分析已取消。")
+            if progress_callback:
+                progress_callback(
+                    "group_summary_segment_start",
+                    {
+                        "session_id": session_id,
+                        "segment_index": segment_index,
+                        "total_segments": total_segments,
+                        "start_step": segment_step_ids[0],
+                        "end_step": segment_step_ids[-1],
+                    },
+                )
+
+            segment_events = _build_segment_event_payload(events, segment_step_ids)
+            window_summaries: list[dict[str, object]] = []
+            window_step_groups = _build_overlapping_step_windows(segment_step_ids, window_size=5, overlap=1)
+
+            if progress_callback:
+                progress_callback(
+                    "group_summary_segment_start",
+                    {
+                        "session_id": session_id,
+                        "segment_index": segment_index,
+                        "total_segments": total_segments,
+                        "start_step": segment_step_ids[0],
+                        "end_step": segment_step_ids[-1],
+                        "total_windows": len(window_step_groups),
+                    },
+                )
+
+            for window_index, window_step_ids in enumerate(window_step_groups, start=1):
+                window_events, image_paths, available_step_ids, image_stats = collect_group_summary_inputs(
+                    session_dir,
+                    events,
+                    window_step_ids,
+                    display_layout=display_layout,
+                    send_fullscreen=self.settings.send_fullscreen_screenshots,
+                )
+                if not available_step_ids or not image_paths:
+                    continue
+                prompt = build_grouped_step_summary_prompt(session_id, available_step_ids, window_events)
+                response = self.client.query(
+                    user_prompt=prompt,
+                    image_paths=image_paths,
+                    system_prompt=self.settings.analysis_system_prompt,
+                    progress_callback=(
+                        None
+                        if not progress_callback
+                        else lambda stage, payload, segment_index=segment_index, window_index=window_index: progress_callback(
+                            stage,
+                            {
+                                "session_id": session_id,
+                                "analysis_phase": "group_summary_window",
+                                "segment_index": segment_index,
+                                "total_segments": total_segments,
+                                "window_index": window_index,
+                                "current_batch": window_index,
+                                "total_batches": len(window_step_groups),
+                                "window_start_step": available_step_ids[0] if available_step_ids else window_step_ids[0],
+                                "window_end_step": available_step_ids[-1] if available_step_ids else window_step_ids[-1],
+                                **payload,
+                            },
+                        )
+                    ),
+                    cancel_callback=self.is_cancelled,
+                )
+                response_text = str(response.get("response_text", ""))
+                try:
+                    parsed = _parse_ai_json(response_text)
+                except Exception as exc:
+                    self._write_parse_failure_files(
+                        session_dir,
+                        f"group_summary_{segment_step_ids[0]:04d}_{segment_step_ids[-1]:04d}_{window_index:02d}",
+                        response_text,
+                        prompt,
+                    )
+                    raise AIClientError(
+                        f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
+                    ) from exc
+                window_summaries.append(
+                    {
+                        "window_index": window_index,
+                        "step_ids": available_step_ids,
+                        "window_summary": str(parsed.get("window_summary", "")).strip(),
+                        "step_highlights": [item for item in parsed.get("step_highlights", []) if isinstance(item, dict)] if isinstance(parsed, dict) else [],
+                    }
+                )
+                batch_records.append(
+                    AnalysisBatchRecord(
+                        batch_id=f"group_summary_{segment_step_ids[0]:04d}_{segment_step_ids[-1]:04d}_{window_index:02d}",
+                        start_step=available_step_ids[0],
+                        end_step=available_step_ids[-1],
+                        event_indexes=list(available_step_ids),
+                        image_paths=[path.relative_to(session_dir).as_posix() for path in image_paths],
+                        prompt_preview=prompt[:1000],
+                        response_text=response_text,
+                        parsed_result={
+                            "group_summary_window": parsed,
+                            "image_stats": image_stats,
+                        },
+                    )
+                )
+
+            if not window_summaries:
+                continue
+
+            merge_prompt = build_grouped_step_merge_prompt(session_id, segment_step_ids, segment_events, window_summaries)
+            merge_response = self.client.query(
+                user_prompt=merge_prompt,
+                system_prompt=(
+                    "你是桌面自动化连续步骤总结助手。"
+                    "你基于重叠窗口总结与事件元数据，输出连续步骤区间的最终详细中文 JSON 总结。"
+                    "必须覆盖所有步骤号，且只能输出 JSON。"
+                ),
+                progress_callback=(
+                    None
+                    if not progress_callback
+                    else lambda stage, payload, segment_index=segment_index: progress_callback(
+                        stage,
+                        {
+                            "session_id": session_id,
+                            "analysis_phase": "group_summary_merge",
+                            "segment_index": segment_index,
+                            "total_segments": total_segments,
+                            "current_batch": len(window_step_groups) + 1,
+                            "total_batches": len(window_step_groups) + 1,
+                            "start_step": segment_step_ids[0],
+                            "end_step": segment_step_ids[-1],
+                            **payload,
+                        },
+                    )
+                ),
+                cancel_callback=self.is_cancelled,
+            )
+            merge_response_text = str(merge_response.get("response_text", ""))
+            try:
+                merged_parsed = _parse_ai_json(merge_response_text)
+            except Exception as exc:
+                self._write_parse_failure_files(
+                    session_dir,
+                    f"group_summary_merge_{segment_step_ids[0]:04d}_{segment_step_ids[-1]:04d}",
+                    merge_response_text,
+                    merge_prompt,
+                )
+                raise AIClientError(
+                    f"AI 返回无法解析为 JSON。原始返回已保存到 {session_dir / 'ai_parse_error_last_response.txt'}"
+                ) from exc
+
+            segment_summary = str(merged_parsed.get("segment_summary", "")).strip() if isinstance(merged_parsed, dict) else ""
+            normalized_step_summaries = _normalize_grouped_step_summaries(merged_parsed, segment_step_ids, segment_summary)
+            for item in normalized_step_summaries:
+                step_id = int(item.get("step_id", 0) or 0)
+                description = str(item.get("description", "")).strip()
+                if step_id < 1 or not description:
+                    continue
+                step_observations.append({"step_id": step_id, "observation": description})
+                step_insights.append({"step_id": step_id, "description": description})
+            if segment_summary:
+                notes.append(segment_summary)
+            batch_records.append(
+                AnalysisBatchRecord(
+                    batch_id=f"group_summary_merge_{segment_step_ids[0]:04d}_{segment_step_ids[-1]:04d}",
+                    start_step=segment_step_ids[0],
+                    end_step=segment_step_ids[-1],
+                    event_indexes=list(segment_step_ids),
+                    image_paths=[],
+                    prompt_preview=merge_prompt[:1000],
+                    response_text=merge_response_text,
+                    parsed_result={
+                        "group_summary_merge": merged_parsed,
+                        "window_summaries": window_summaries,
+                    },
+                )
+            )
+
+        return step_observations, step_insights, batch_records, notes
 
     def _write_result_files(self, session_dir: Path, result: SessionAnalysisResult) -> None:
         json_path = session_dir / "ai_analysis.json"
@@ -664,6 +901,128 @@ def _normalize_notes(parsed: dict[str, object]) -> list[str]:
     return [str(item) for item in values if isinstance(item, str)]
 
 
+def _normalize_grouped_step_summaries(
+    parsed: dict[str, object],
+    step_ids: list[int],
+    segment_summary: str,
+) -> list[dict[str, object]]:
+    values = parsed.get("step_summaries", []) if isinstance(parsed, dict) else []
+    descriptions_by_step: dict[int, str] = {}
+    if isinstance(values, list):
+        for item in values:
+            if not isinstance(item, dict):
+                continue
+            step_id = int(item.get("step_id", 0) or 0)
+            if step_id not in step_ids:
+                continue
+            description = str(item.get("description", "")).strip()
+            if description:
+                descriptions_by_step[step_id] = description
+    normalized: list[dict[str, object]] = []
+    last_step_id = step_ids[-1] if step_ids else 0
+    for step_id in step_ids:
+        description = descriptions_by_step.get(step_id, "")
+        if step_id == last_step_id:
+            description = _build_final_grouped_step_description(description, segment_summary)
+        else:
+            description = _build_concise_grouped_step_description(description, segment_summary, step_ids)
+        if not description:
+            continue
+        normalized.append({"step_id": step_id, "description": description})
+    return normalized
+
+
+def _build_concise_grouped_step_description(description: str, segment_summary: str, step_ids: list[int]) -> str:
+    candidate = _first_meaningful_segment(description)
+    if candidate:
+        return candidate
+    if not segment_summary:
+        return ""
+    concise_summary = _first_meaningful_segment(segment_summary)
+    if concise_summary:
+        return f"属于步骤 {step_ids[0]}-{step_ids[-1]} 的连续操作：{concise_summary}"
+    return f"属于步骤 {step_ids[0]}-{step_ids[-1]} 的连续操作区间。"
+
+
+def _build_final_grouped_step_description(description: str, segment_summary: str) -> str:
+    detail = description.strip()
+    summary = segment_summary.strip()
+    if detail and summary:
+        if summary in detail:
+            return detail
+        return f"{detail}；整段来看，{summary}"
+    return detail or summary
+
+
+def _first_meaningful_segment(text: str) -> str:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return ""
+    for separator in ("；", "。", "!", "！", "?", "？"):
+        parts = [part.strip() for part in candidate.split(separator) if part.strip()]
+        if parts:
+            return parts[0]
+    return candidate
+
+
+def _build_overlapping_step_windows(step_ids: list[int], window_size: int, overlap: int) -> list[list[int]]:
+    if not step_ids:
+        return []
+    effective_window_size = max(1, window_size)
+    effective_overlap = max(0, min(overlap, effective_window_size - 1))
+    stride = max(1, effective_window_size - effective_overlap)
+    windows: list[list[int]] = []
+    start = 0
+    while start < len(step_ids):
+        window = step_ids[start : start + effective_window_size]
+        if not window:
+            break
+        windows.append(window)
+        if start + effective_window_size >= len(step_ids):
+            break
+        start += stride
+    return windows
+
+
+def _build_segment_event_payload(events: list[dict[str, object]], step_ids: list[int]) -> list[dict[str, object]]:
+    event_lookup = {resolve_analysis_step_id(event, index): event for index, event in enumerate(events, start=1) if isinstance(event, dict)}
+    payload: list[dict[str, object]] = []
+    for step_id in step_ids:
+        if step_id < 1:
+            continue
+        event = event_lookup.get(step_id)
+        if not isinstance(event, dict):
+            continue
+        item: dict[str, object] = {
+            "step_id": step_id,
+            "event_type": normalize_event_type(event.get("event_type", ""), event.get("action", "")),
+            "action": event.get("action", ""),
+        }
+        ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
+        if ui_element:
+            item["ui_element"] = ui_element
+        keyboard = event.get("keyboard", {}) if isinstance(event.get("keyboard", {}), dict) else {}
+        mouse = event.get("mouse", {}) if isinstance(event.get("mouse", {}), dict) else {}
+        if keyboard:
+            item["keyboard"] = keyboard
+        if mouse:
+            item["mouse"] = mouse
+        payload.append(item)
+    return payload
+
+
+def _merge_unique_text_items(existing: list[str], incoming: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for item in [*existing, *incoming]:
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+    return merged
+
+
 def _build_fallback_step_observations(batch_events: list[dict[str, object]], step_ids: list[int]) -> list[dict[str, object]]:
     fallback: list[dict[str, object]] = []
     for step_id, event in zip(step_ids, batch_events):
@@ -755,6 +1114,9 @@ def _pick_ui_element_label(ui_element: dict[str, object]) -> str:
 
 
 def _pick_ui_element_label_info(ui_element: dict[str, object]) -> tuple[str, str]:
+    control_type = str(ui_element.get("control_type", "")).strip().lower()
+    is_combobox = control_type in {"combobox", "comboboxcontrol"}
+
     help_text = str(ui_element.get("help_text", "")).strip()
     if _is_meaningful_ui_label(help_text):
         return help_text, "helptext"
@@ -763,16 +1125,17 @@ def _pick_ui_element_label_info(ui_element: dict[str, object]) -> tuple[str, str
     if _is_meaningful_ui_label(help_text_fallback):
         return help_text_fallback, "helptext"
 
-    name_fallbacks = ui_element.get("name_fallbacks", [])
-    if isinstance(name_fallbacks, list):
-        for item in name_fallbacks:
-            text = str(item).strip()
-            if _is_meaningful_ui_label(text):
-                return text, "label"
-
     name = str(ui_element.get("name", "")).strip()
     if _is_meaningful_ui_label(name):
         return name, "label"
+
+    if not is_combobox:
+        name_fallbacks = ui_element.get("name_fallbacks", [])
+        if isinstance(name_fallbacks, list):
+            for item in name_fallbacks:
+                text = str(item).strip()
+                if _is_meaningful_ui_label(text):
+                    return text, "label"
     return "", "label"
 
 
