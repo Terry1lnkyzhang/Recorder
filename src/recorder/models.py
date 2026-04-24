@@ -57,6 +57,8 @@ def normalize_event_type(value: Any, action: Any = "") -> str:
     action_text = format_recorded_action(action).strip().lower()
     lowered = event_type.lower()
 
+    if lowered == "performscan" or action_text == "performscan":
+        return "PerformScan"
     if action_text == "wait_for_image" or lowered == "wait":
         return "wait"
     if lowered == "getscreenshot" or action_text in {"getscreenshot", "manual_screenshot"}:
@@ -69,10 +71,10 @@ def normalize_event_type(value: Any, action: Any = "") -> str:
         return "checkpoint"
     if lowered in {"mouse_drag", "scroll", "mouseaction"}:
         return "mouseAction"
+    if lowered == "click":
+        return "Click"
     if lowered in {"mouse_click", "controloperation"}:
         return "controlOperation"
-        if lowered == "click":
-            return "Click"
     return event_type
 
 

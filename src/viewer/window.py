@@ -20,6 +20,7 @@ from PIL import Image
 from src.ai import AISuggestionService
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.method_mapping import resolve_method_name_for_event
+from src.ai.prompt_builder import build_step_observation_prompt
 from src.ai.remote_service_client import RemoteAIServiceClient
 from src.ai.session_analyzer import SessionWorkflowAnalyzer
 from src.common.display_utils import prepare_image_path_for_ai
@@ -77,6 +78,7 @@ class RecorderViewerWindow:
         self._session_load_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
         self._synchronizing_tree_selection = False
+        self.copied_event_rows: list[dict[str, object]] = []
         self.cleaning_suggestions: list[CleaningSuggestion] = []
         self.ai_analysis: dict[str, object] | None = None
         self.ai_step_tags: dict[int, str] = {}
@@ -1318,8 +1320,13 @@ class RecorderViewerWindow:
         insert_steps_menu = tk.Menu(menu, tearoff=False)
         insert_steps_menu.add_command(label="录制", command=lambda idx=row_index: self.insert_recorded_steps_after_row(idx))
         insert_steps_menu.add_command(label="导入", command=lambda idx=row_index: self.insert_imported_steps_after_row(idx))
+        insert_steps_menu.add_command(label="空行", command=lambda idx=row_index: self.insert_empty_step_after_row(idx))
         menu.add_cascade(label="插入步骤", menu=insert_steps_menu)
         menu.add_command(label="插入 CheckPoint", command=lambda idx=row_index: self.insert_checkpoint_after_row(idx))
+        menu.add_separator()
+        menu.add_command(label="复制当前行", command=lambda idx=row_index: self.copy_event_row(idx))
+        paste_state = tk.NORMAL if self.copied_event_rows else tk.DISABLED
+        menu.add_command(label="粘贴", command=lambda idx=row_index: self.paste_event_rows_after_row(idx), state=paste_state)
         menu.add_separator()
         delete_label = "删除选中行" if len(selected_rows) > 1 else "删除"
         menu.add_command(label=delete_label, command=self.delete_selected_events)
@@ -1760,9 +1767,9 @@ class RecorderViewerWindow:
         if not selected_rows:
             messagebox.showinfo("提示", "请先选择至少一个步骤。", parent=self.window)
             return
-        self._start_ai_analysis(selected_rows)
+        self._start_ai_analysis(selected_rows, upscale_single_selected_image=len(selected_rows) == 1)
 
-    def _start_ai_analysis(self, selected_rows: list[int] | None = None) -> None:
+    def _start_ai_analysis(self, selected_rows: list[int] | None = None, upscale_single_selected_image: bool = False) -> None:
         if not self.session_dir or not self.session_data:
             return
         if self.analysis_running:
@@ -1789,7 +1796,7 @@ class RecorderViewerWindow:
                 settings = self.settings_store.load()
                 client = OpenAICompatibleAIClient(settings)
                 self.current_analyzer = client
-                targets = self._build_ai_analysis_targets(partial_row_indexes, settings)
+                targets = self._build_ai_analysis_targets(partial_row_indexes, settings, upscale_single_selected_image=upscale_single_selected_image)
                 if not targets:
                     raise ValueError("所选步骤在 AI 看图过滤范围外，或没有可发送给 AI 的图片。")
                 target_batches = [[target] for target in targets]
@@ -1812,14 +1819,12 @@ class RecorderViewerWindow:
                         ),
                     )
 
+                    user_prompt = self._build_ai_analysis_user_prompt(target_batch)
+                    system_prompt = self._build_ai_analysis_system_prompt(target_batch, settings)
                     response = client.query(
-                        user_prompt=self._build_single_pass_ai_analysis_prompt(target_batch),
+                        user_prompt=user_prompt,
                         image_paths=[item["image_path"] for item in target_batch],
-                        system_prompt=(
-                            "你是桌面自动化单步看图助手。"
-                            "你会一次看到多张按步骤顺序排列的截图，以及每一步的事件元数据。"
-                            "必须严格按给定 step_id 输出 JSON 结果。"
-                        ),
+                        system_prompt=system_prompt,
                         cancel_callback=self._is_analysis_cancel_requested,
                         progress_callback=lambda stage, payload, batch_index=batch_index, total_batches=len(target_batches), start_step=target_batch[0]["step_id"], end_step=target_batch[-1]["step_id"]: self.window.after(
                             0,
@@ -1835,7 +1840,7 @@ class RecorderViewerWindow:
                             ),
                         ),
                     )
-                    analyses.append(self._build_single_pass_ai_analysis_result(target_batch, str(response.get("response_text", ""))))
+                    analyses.append(self._build_single_pass_ai_analysis_result(target_batch, str(response.get("response_text", "")), user_prompt))
 
                 self._raise_if_analysis_cancel_requested()
                 analysis = self._combine_single_pass_ai_analysis_results(analyses, 1)
@@ -1912,7 +1917,7 @@ class RecorderViewerWindow:
                 return candidate
         return None
 
-    def _build_ai_analysis_targets(self, row_indexes: list[int], settings) -> list[dict[str, object]]:
+    def _build_ai_analysis_targets(self, row_indexes: list[int], settings, upscale_single_selected_image: bool = False) -> list[dict[str, object]]:
         display_layout = self._get_session_display_layout()
         cache_dir = self.session_dir / "ai_preprocessed" / "viewer_single_pass"
         targets: list[dict[str, object]] = []
@@ -1933,13 +1938,17 @@ class RecorderViewerWindow:
                 send_fullscreen=settings.send_fullscreen_screenshots,
                 cache_key=f"viewer_single_pass_{row_index + 1:04d}",
             )
-            optimized_path = self._optimize_ai_analysis_image(prepared_path, row_index + 1)
+            optimized_path = self._optimize_ai_analysis_image(
+                prepared_path,
+                row_index + 1,
+                upscale_double=upscale_single_selected_image,
+            )
             targets.append(
                 {
                     "row_index": row_index,
                     "step_id": row_index + 1,
                     "image_path": optimized_path,
-                    "analysis_mode": self._determine_ai_analysis_mode(event),
+                    "analysis_mode": self._determine_ai_analysis_mode(event, settings),
                     "event_type": self._extract_event_type(event),
                     "action": self._extract_event_action(event),
                     "process_name": self._extract_process_name(event),
@@ -1948,23 +1957,48 @@ class RecorderViewerWindow:
             )
         return targets
 
-    def _optimize_ai_analysis_image(self, image_path: Path, step_id: int) -> Path:
+    def _optimize_ai_analysis_image(self, image_path: Path, step_id: int, upscale_double: bool = False) -> Path:
         if not self.session_dir:
             return image_path
         output_dir = self.session_dir / "ai_preprocessed" / "viewer_single_pass_resized"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"step_{step_id:04d}.jpg"
+        suffix = "_2x" if upscale_double else ""
+        output_path = output_dir / f"step_{step_id:04d}{suffix}.jpg"
         try:
             with Image.open(image_path) as image:
                 converted = image.convert("RGB")
-                converted.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
-                converted.save(output_path, format="JPEG", quality=82, optimize=True)
+                if upscale_double:
+                    resized = converted.resize((max(1, converted.width * 2), max(1, converted.height * 2)), Image.Resampling.LANCZOS)
+                else:
+                    resized = converted
+                    resized.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+                resized.save(output_path, format="JPEG", quality=82, optimize=True)
             return output_path
         except Exception:
             return image_path
 
-    def _determine_ai_analysis_mode(self, event: dict[str, object]) -> str:
-        return "control_observation" if resolve_method_name_for_event(event) == "FindControlByName" else "image_summary"
+    def _determine_ai_analysis_mode(self, event: dict[str, object], settings) -> str:
+        if self._is_process_excluded_for_ai_analysis(event, settings):
+            return "image_summary"
+        return "control_observation"
+
+    def _build_ai_analysis_user_prompt(self, targets: list[dict[str, object]]) -> str:
+        if self._should_use_legacy_observation_prompt(targets):
+            return build_step_observation_prompt()
+        return self._build_single_pass_ai_analysis_prompt(targets)
+
+    def _build_ai_analysis_system_prompt(self, targets: list[dict[str, object]], settings) -> str:
+        if self._should_use_legacy_observation_prompt(targets):
+            return str(getattr(settings, "analysis_system_prompt", "")).strip() or "你是桌面自动化操作分析助手。"
+        return (
+            "你是桌面自动化单步看图助手。"
+            "你会一次看到多张按步骤顺序排列的截图，以及每一步的事件元数据。"
+            "必须严格按给定 step_id 输出 JSON 结果。"
+        )
+
+    @staticmethod
+    def _should_use_legacy_observation_prompt(targets: list[dict[str, object]]) -> bool:
+        return bool(targets) and all(str(item.get("analysis_mode", "")).strip() == "control_observation" for item in targets)
 
     def _build_prompt_ui_element_for_viewer(self, event: dict[str, object]) -> dict[str, object]:
         ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
@@ -2019,15 +2053,19 @@ class RecorderViewerWindow:
         }
         return json.dumps(instruction, ensure_ascii=False, indent=2)
 
-    def _build_single_pass_ai_analysis_result(self, targets: list[dict[str, object]], response_text: str) -> dict[str, object]:
+    def _build_single_pass_ai_analysis_result(self, targets: list[dict[str, object]], response_text: str, prompt_text: str) -> dict[str, object]:
         parsed = self._parse_viewer_ai_json(response_text)
         values = parsed.get("step_results", []) if isinstance(parsed, dict) else []
+        if not isinstance(values, list) or not values:
+            values = parsed.get("step_observations", []) if isinstance(parsed, dict) else []
         results_by_step: dict[int, dict[str, object]] = {}
         if isinstance(values, list):
-            for item in values:
+            for index, item in enumerate(values):
                 if not isinstance(item, dict):
                     continue
                 step_id = int(item.get("step_id", 0) or 0)
+                if step_id <= 0 and len(targets) == 1 and index == 0:
+                    step_id = int(targets[0]["step_id"])
                 if step_id > 0:
                     results_by_step[step_id] = item
 
@@ -2073,7 +2111,7 @@ class RecorderViewerWindow:
                     "end_step": targets[-1]["step_id"],
                     "event_indexes": [item["step_id"] for item in targets],
                     "image_paths": [str(Path(item["image_path"]).relative_to(self.session_dir).as_posix()) for item in targets],
-                    "prompt_preview": self._build_single_pass_ai_analysis_prompt(targets)[:2000],
+                    "prompt_preview": prompt_text[:2000],
                     "response_text": response_text,
                     "parsed_result": parsed,
                 }
@@ -3182,6 +3220,61 @@ class RecorderViewerWindow:
         dialog.wait_window()
         return result["value"]
 
+    def _show_choice_dialog(self, title: str, current_value: str, choices: list[str]) -> str | None:
+        dialog = tk.Toplevel(self.window)
+        dialog.title(title)
+        dialog.geometry("420x140")
+        dialog.resizable(False, False)
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        result: dict[str, str | None] = {"value": None}
+        choice_var = tk.StringVar(value=current_value if current_value in choices else (choices[0] if choices else current_value))
+
+        container = ttk.Frame(dialog, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+
+        ttk.Label(container, text="请选择类型:").grid(row=0, column=0, sticky="w")
+        combo = ttk.Combobox(container, textvariable=choice_var, state="readonly", values=choices, width=42)
+        combo.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+
+        def save() -> None:
+            result["value"] = choice_var.get().strip()
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        button_bar = ttk.Frame(container)
+        button_bar.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(button_bar, text="取消", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text="保存", command=save).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        combo.focus_set()
+        dialog.wait_window()
+        return result["value"]
+
+    def _build_event_type_candidates(self, current_value: str = "") -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for event in self.event_rows:
+            if not isinstance(event, dict):
+                continue
+            value = self._extract_event_type(event).strip()
+            if not value or value in seen:
+                continue
+            candidates.append(value)
+            seen.add(value)
+        for value in ("controlOperation", "mouseAction", "input", "wait", "comment", "checkpoint", "getScreenshot", "Click", "PerformScan"):
+            if value not in seen:
+                candidates.append(value)
+                seen.add(value)
+        normalized_current = str(current_value or "").strip()
+        if normalized_current and normalized_current not in seen:
+            candidates.append(normalized_current)
+        return candidates
+
     def _edit_method_or_module_suggestion(self, row_index: int, field_name: str) -> None:
         suggestion = self._find_suggestion_by_row_index(row_index)
         if suggestion is None or not self.session_dir or self.suggestion_result is None:
@@ -3246,7 +3339,11 @@ class RecorderViewerWindow:
     def _edit_event_type(self, row_index: int) -> None:
         event = self.event_rows[row_index]
         current_value = self._extract_event_type(event)
-        edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} 类型", current_value)
+        edited_value = self._show_choice_dialog(
+            f"编辑步骤 {row_index + 1} 类型",
+            current_value,
+            self._build_event_type_candidates(current_value),
+        )
         if edited_value is None:
             return
         self._update_event_type(row_index, edited_value.strip())
@@ -3498,6 +3595,49 @@ class RecorderViewerWindow:
         self.media_cache.clear()
         self._reload_tree()
         self._select_row_index(insert_at)
+
+    def insert_empty_step_after_row(self, row_index: int) -> None:
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        if not (0 <= row_index < len(self.event_rows)):
+            return
+
+        engine = self._create_session_edit_engine()
+        if engine is None:
+            return
+
+        reference_event = self.event_rows[row_index]
+        inserted_event = self._build_new_empty_event(reference_event, engine)
+        insert_at = row_index + 1
+        original_event_count = len(self.event_rows)
+        self.event_rows.insert(insert_at, inserted_event)
+        self.session_data["events"] = self.event_rows
+        self.summary_var.set(self._build_session_summary_text())
+        self._persist_session()
+        step_id_mapping = self._build_step_id_mapping_after_row_insertion(original_event_count, insert_at, 1)
+        self._remap_outputs_after_row_insertion(step_id_mapping)
+        self.media_cache.clear()
+        self._reload_tree()
+        self._select_row_index(insert_at)
+
+    def copy_event_row(self, row_index: int) -> None:
+        if not (0 <= row_index < len(self.event_rows)):
+            return
+        self.copied_event_rows = [copy.deepcopy(self.event_rows[row_index])]
+        self.load_status_var.set(f"已复制步骤 {row_index + 1}")
+
+    def paste_event_rows_after_row(self, row_index: int) -> None:
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        if not (0 <= row_index < len(self.event_rows)):
+            return
+        if not self.copied_event_rows:
+            messagebox.showinfo("提示", "当前没有可粘贴的步骤。", parent=self.window)
+            return
+
+        self._insert_copied_events_after_row(row_index, self.copied_event_rows)
 
     def insert_recorded_steps_after_row(self, row_index: int) -> None:
         if not self.session_dir or not self.session_data:
@@ -3825,6 +3965,24 @@ class RecorderViewerWindow:
         }
         return self._build_checkpoint_event_from_payload(base_event, payload)
 
+    def _build_new_empty_event(self, reference_event: dict[str, object], engine: RecorderEngine) -> dict[str, object]:
+        timestamp = datetime.now().astimezone().isoformat()
+        return {
+            "event_id": engine.store.next_event_id("evt"),
+            "timestamp": timestamp,
+            "event_type": "",
+            "action": "",
+            "window": dict(reference_event.get("window", {})) if isinstance(reference_event.get("window"), dict) else {},
+            "ui_element": {},
+            "mouse": {},
+            "keyboard": {},
+            "scroll": {},
+            "note": "",
+            "additional_details": {
+                "source": "viewer_insert_empty",
+            },
+        }
+
     def _run_temporary_recording_controller(self, temp_engine: RecorderEngine) -> tuple[str, Path | None]:
         result: dict[str, object] = {"status": "cancelled", "session_dir": None}
         dialog_parent = self.window.master if self.window.state() == "withdrawn" else self.window
@@ -3973,6 +4131,11 @@ class RecorderViewerWindow:
         self.media_cache.clear()
         self._reload_tree()
         self._select_row_index(insert_at)
+
+    def _insert_copied_events_after_row(self, row_index: int, copied_events: list[dict[str, object]]) -> None:
+        if not self.session_dir:
+            return
+        self._insert_recorded_events_after_row(row_index, copied_events, self.session_dir)
 
     def _clone_recorded_event_for_current_session(
         self,
@@ -5744,16 +5907,15 @@ class RecorderViewerWindow:
     def _summarize_parameter_suggestions(self, parameters) -> str:
         if not parameters:
             return ""
-        preview_items = [
-            f"{item.name}={self._format_parameter_value_for_view(item.suggested_value)}"
-            for item in parameters[:2]
-        ]
-        summary = f"{len(parameters)} 个参数"
-        if preview_items:
-            summary += " | " + " | ".join(preview_items)
-        if len(parameters) > 2:
-            summary += " | ..."
-        return summary
+        payload: dict[str, object] = {}
+        for item in parameters:
+            name = str(getattr(item, "name", "") or "").strip()
+            if not name:
+                continue
+            payload[name] = getattr(item, "suggested_value", None)
+        if not payload:
+            return ""
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
     def _format_parameter_detail_text(self, suggestion) -> str:
         override = suggestion.candidate_payload.get("viewer_parameter_summary_override", "") if isinstance(suggestion.candidate_payload, dict) else ""

@@ -261,6 +261,8 @@ def _derive_parameter_values_for_method(
     ai_observation_text: str,
 ) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
     normalized_method = method_name.strip().lower()
+    if normalized_method == "performscan":
+        return {}, {}, {}
     if normalized_method == "findcontrolbyname":
         return _derive_find_control_by_name_values(event, ai_observation_text)
     if normalized_method == "getscreenshot":

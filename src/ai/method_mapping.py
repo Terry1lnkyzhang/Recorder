@@ -8,6 +8,7 @@ from src.recorder.models import format_recorded_action, normalize_event_type
 METHOD_SUGGESTION_NAME_MAP: dict[str, str] = {
     "controlOperation": "FindControlByName",
     "Click": "Click",
+    "PerformScan": "PerformScan",
     "input": "SendKeys",
     "wait": "WaitForExists",
     "comment": "ManualCheck",
