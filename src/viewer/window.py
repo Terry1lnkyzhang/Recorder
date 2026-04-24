@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -37,6 +38,7 @@ from src.recorder.dialogs import (
     open_wait_for_image_dialog,
 )
 from src.recorder.recorder import RecorderEngine
+from src.recorder.session import SessionStore
 from src.recorder.settings import SettingsStore
 from src.recorder.system_info import safe_relpath
 from src.recorder.session_metadata_ai import build_missing_summary, format_keyword_terms, should_prompt_ai_analysis, analyze_session_metadata, merge_keyword_text
@@ -87,6 +89,7 @@ class RecorderViewerWindow:
         self.step_parameter_summaries: dict[int, str] = {}
         self.parameter_prompt_by_step: dict[int, str] = {}
         self.parameter_response_by_step: dict[int, str] = {}
+        self._current_parameter_items: list[object] = []
         self.current_analyzer: SessionWorkflowAnalyzer | OpenAICompatibleAIClient | None = None
         self.close_callback = None
         self.analysis_running = False
@@ -1039,10 +1042,14 @@ class RecorderViewerWindow:
         self.session_metadata_ai_button.configure(state=tk.NORMAL)
         self.session_metadata_status_var.set("AI校验失败")
         if messagebox.askyesno("AI校验失败", f"AI 校验失败:\n{message}\n\n是否忽略并继续保存？", parent=self.window):
-            self.session_data["metadata"] = metadata_payload
-            self.summary_var.set(self._build_session_summary_text())
-            self._persist_session()
+            try:
+                renamed_paths = self._apply_session_metadata_and_persist(metadata_payload)
+            except Exception as exc:
+                self.session_metadata_status_var.set("保存失败")
+                messagebox.showerror("保存失败", str(exc), parent=self.window)
+                return
             self.session_metadata_status_var.set("已保存")
+            self._show_session_rename_notice(renamed_paths)
 
     def _finalize_session_metadata_save(self, metadata_payload: dict[str, object], result) -> None:
         self.session_metadata_ai_running = False
@@ -1057,10 +1064,103 @@ class RecorderViewerWindow:
             if not should_continue:
                 self.session_metadata_status_var.set("请根据建议调整后再保存")
                 return
+        try:
+            renamed_paths = self._apply_session_metadata_and_persist(metadata_payload)
+        except Exception as exc:
+            self.session_metadata_status_var.set("保存失败")
+            messagebox.showerror("保存失败", str(exc), parent=self.window)
+            return
+        self.session_metadata_status_var.set("已保存")
+        self._show_session_rename_notice(renamed_paths)
+
+    def _apply_session_metadata_and_persist(self, metadata_payload: dict[str, object]) -> tuple[Path, Path] | None:
+        if not self.session_data or not self.session_dir:
+            raise RuntimeError("请先加载 Session。")
+        renamed_paths = self._rename_session_dir_if_needed(metadata_payload)
         self.session_data["metadata"] = metadata_payload
         self.summary_var.set(self._build_session_summary_text())
         self._persist_session()
-        self.session_metadata_status_var.set("已保存")
+        return renamed_paths
+
+    def _rename_session_dir_if_needed(self, metadata_payload: dict[str, object]) -> tuple[Path, Path] | None:
+        if not self.session_dir or not self.session_data:
+            return None
+        if not bool(metadata_payload.get("is_prs_recording", True)):
+            return None
+
+        target_dir, target_session_id = self._build_session_dir_from_metadata(metadata_payload)
+        current_dir = self.session_dir.resolve()
+        if current_dir == target_dir.resolve(strict=False):
+            self._update_session_paths_after_move(current_dir, target_session_id)
+            return None
+        if target_dir.exists():
+            raise RuntimeError(f"目标 Session 目录已存在，无法重命名:\n{target_dir}")
+
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(current_dir), str(target_dir))
+        self._update_session_paths_after_move(target_dir, target_session_id)
+        self._cleanup_empty_session_parent_dirs(current_dir)
+        self._session_candidate_cache.clear()
+        self.load_status_var.set(f"Session 目录已更新: {target_dir.name}")
+        return current_dir, target_dir
+
+    def _build_session_dir_from_metadata(self, metadata_payload: dict[str, object]) -> tuple[Path, str]:
+        testcase_id = SessionStore._sanitize_session_name_part(str(metadata_payload.get("testcase_id", "")), "Testcase ID")
+        project = SessionStore._sanitize_session_name_part(str(metadata_payload.get("project", "Taichi") or "Taichi"), "Project")
+        version_number = SessionStore._sanitize_session_name_part(str(metadata_payload.get("version_number", "")), "Version Number")
+        recorder_person = SessionStore._sanitize_session_name_part(str(metadata_payload.get("recorder_person", "")), "录制人员")
+        timestamp = self._extract_session_timestamp()
+        session_id = f"{testcase_id}_{version_number}_{recorder_person}_{timestamp}"
+        return self.recordings_root / testcase_id / project / session_id, session_id
+
+    def _extract_session_timestamp(self) -> str:
+        candidates = [
+            str((self.session_data or {}).get("session_id", "")).strip(),
+            self.session_dir.name if self.session_dir else "",
+        ]
+        for candidate in candidates:
+            match = re.search(r"(\d{8}_\d{6})$", candidate)
+            if match:
+                return match.group(1)
+
+        created_at = str((self.session_data or {}).get("created_at", "")).strip()
+        if created_at:
+            normalized = created_at.replace("Z", "+00:00")
+            try:
+                return datetime.fromisoformat(normalized).strftime("%Y%m%d_%H%M%S")
+            except ValueError:
+                pass
+        return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _update_session_paths_after_move(self, session_dir: Path, session_id: str) -> None:
+        resolved_dir = session_dir.resolve()
+        self.session_dir = resolved_dir
+        self.path_var.set(str(resolved_dir))
+        self.session_data["session_id"] = session_id
+        self.session_data["output_dir"] = str(resolved_dir)
+        self.session_data["screenshots_dir"] = str(resolved_dir / "screenshots")
+        self.session_data["media_dir"] = str(resolved_dir / "media")
+
+    def _cleanup_empty_session_parent_dirs(self, old_session_dir: Path) -> None:
+        if not old_session_dir.exists():
+            current = old_session_dir.parent
+            stop_at = self.recordings_root.resolve(strict=False)
+            while current != stop_at and current.exists():
+                try:
+                    current.rmdir()
+                except OSError:
+                    break
+                current = current.parent
+
+    def _show_session_rename_notice(self, renamed_paths: tuple[Path, Path] | None) -> None:
+        if not renamed_paths:
+            return
+        old_path, new_path = renamed_paths
+        messagebox.showinfo(
+            "Session 目录已更新",
+            f"由于 Session 元数据中的命名字段已变更，录制目录已同步更新:\n\n旧路径:\n{old_path}\n\n新路径:\n{new_path}",
+            parent=self.window,
+        )
 
     def _sync_filter_combo_values(self) -> None:
         process_values = self.process_filter_combo.cget("values")
@@ -4106,10 +4206,48 @@ class RecorderViewerWindow:
         suggestion_frame = ttk.LabelFrame(parent, text="方法建议 / 参数推荐")
         suggestion_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         ttk.Label(suggestion_frame, textvariable=self.parameter_status_var).pack(anchor=tk.W, padx=8, pady=(8, 4))
-        self.parameter_result_text = tk.Text(suggestion_frame, height=10, wrap=tk.WORD, font=("Consolas", 10))
-        self.parameter_result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.parameter_result_text = tk.Text(suggestion_frame, height=7, wrap=tk.WORD, font=("Consolas", 10))
+        self.parameter_result_text.pack(fill=tk.X, expand=False, padx=8, pady=(0, 8))
         self.parameter_result_text.configure(state=tk.DISABLED)
         self._set_text_widget(self.parameter_result_text, "")
+
+        parameter_table_frame = ttk.LabelFrame(suggestion_frame, text="参数列表")
+        parameter_table_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        parameter_table_frame.columnconfigure(0, weight=1)
+        parameter_table_frame.rowconfigure(0, weight=1)
+
+        self.parameter_tree = ttk.Treeview(
+            parameter_table_frame,
+            columns=("name", "value", "confidence", "status"),
+            show="headings",
+            height=6,
+            selectmode="browse",
+        )
+        self.parameter_tree.heading("name", text="参数名")
+        self.parameter_tree.heading("value", text="推荐值")
+        self.parameter_tree.heading("confidence", text="置信度")
+        self.parameter_tree.heading("status", text="说明")
+        self.parameter_tree.column("name", width=160, minwidth=120, anchor=tk.W, stretch=False)
+        self.parameter_tree.column("value", width=340, minwidth=220, anchor=tk.W, stretch=True)
+        self.parameter_tree.column("confidence", width=80, minwidth=70, anchor=tk.CENTER, stretch=False)
+        self.parameter_tree.column("status", width=140, minwidth=120, anchor=tk.W, stretch=False)
+        self.parameter_tree.grid(row=0, column=0, sticky="nsew")
+        self.parameter_tree.bind("<<TreeviewSelect>>", self._on_parameter_tree_select)
+
+        parameter_tree_scroll = ttk.Scrollbar(parameter_table_frame, orient=tk.VERTICAL, command=self.parameter_tree.yview)
+        parameter_tree_scroll.grid(row=0, column=1, sticky="ns")
+        parameter_tree_x_scroll = ttk.Scrollbar(parameter_table_frame, orient=tk.HORIZONTAL, command=self.parameter_tree.xview)
+        parameter_tree_x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.parameter_tree.configure(yscrollcommand=parameter_tree_scroll.set, xscrollcommand=parameter_tree_x_scroll.set)
+
+        parameter_detail_frame = ttk.LabelFrame(suggestion_frame, text="参数说明")
+        parameter_detail_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self.parameter_detail_text = tk.Text(parameter_detail_frame, height=7, wrap=tk.WORD, font=("Consolas", 10))
+        self.parameter_detail_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
+        parameter_detail_scroll = ttk.Scrollbar(parameter_detail_frame, orient=tk.VERTICAL, command=self.parameter_detail_text.yview)
+        parameter_detail_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
+        self.parameter_detail_text.configure(yscrollcommand=parameter_detail_scroll.set, state=tk.DISABLED)
+        self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
 
     def _build_ai_chat_panel(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -4132,6 +4270,112 @@ class RecorderViewerWindow:
         self.parameter_response_by_step = {}
         if hasattr(self, "ai_chat_text"):
             self._set_text_widget(self.ai_chat_text, "请选择一个步骤以查看 AI 分析与参数推荐交互内容。")
+
+    def _clear_parameter_tree(self) -> None:
+        self._current_parameter_items = []
+        if not hasattr(self, "parameter_tree"):
+            return
+        for item_id in self.parameter_tree.get_children():
+            self.parameter_tree.delete(item_id)
+
+    def _format_parameter_value_for_view(self, value: object) -> str:
+        if value is None:
+            return "(未提供)"
+        text = json.dumps(value, ensure_ascii=False, default=str)
+        return text if len(text) <= 120 else f"{text[:117]}..."
+
+    def _build_parameter_summary_header(self, suggestion) -> str:
+        lines = [
+            f"步骤: {suggestion.step_id}",
+            f"方法建议: {suggestion.method_name or '(无)'}",
+            f"模块建议: {suggestion.script_name or '(无)'}",
+            f"方法置信度: {suggestion.confidence:.2f}",
+        ]
+        if suggestion.method_summary:
+            lines.append(f"方法摘要: {suggestion.method_summary}")
+        if suggestion.script_summary:
+            lines.append(f"模块摘要: {suggestion.script_summary}")
+        if suggestion.reason:
+            lines.append(f"推荐原因: {suggestion.reason}")
+        if suggestion.step_description:
+            lines.append(f"步骤描述: {suggestion.step_description}")
+        if suggestion.step_conclusion:
+            lines.append(f"步骤结论: {suggestion.step_conclusion}")
+        parameter_count = len(suggestion.parameters or [])
+        lines.append(f"参数推荐数: {parameter_count}")
+        return "\n".join(lines)
+
+    def _build_parameter_status_label(self, item) -> str:
+        if item.missing_reason:
+            return "待补充"
+        if item.suggested_value is None:
+            return "未识别"
+        return "已推荐"
+
+    def _format_parameter_detail_item(self, item) -> str:
+        lines = [
+            f"参数名: {item.name or '(未命名)'}",
+            f"推荐值: {json.dumps(item.suggested_value, ensure_ascii=False, default=str) if item.suggested_value is not None else '(未提供)'}",
+            f"置信度: {item.confidence:.2f}",
+            f"状态: {self._build_parameter_status_label(item)}",
+        ]
+        if item.evidence:
+            lines.append("")
+            lines.append("依据:")
+            lines.extend(f"- {entry}" for entry in item.evidence if str(entry).strip())
+        if item.missing_reason:
+            lines.append("")
+            lines.append(f"缺失原因: {item.missing_reason}")
+        return "\n".join(lines)
+
+    def _populate_parameter_tree(self, suggestion) -> None:
+        self._clear_parameter_tree()
+        if not hasattr(self, "parameter_tree"):
+            return
+        parameters = suggestion.parameters or []
+        self._current_parameter_items = list(parameters)
+        for index, item in enumerate(parameters):
+            self.parameter_tree.insert(
+                "",
+                tk.END,
+                iid=str(index),
+                values=(
+                    item.name,
+                    self._format_parameter_value_for_view(item.suggested_value),
+                    f"{item.confidence:.2f}",
+                    self._build_parameter_status_label(item),
+                ),
+            )
+        if parameters:
+            self.parameter_tree.selection_set("0")
+            self.parameter_tree.focus("0")
+            self._refresh_parameter_detail_text()
+            return
+        self._set_text_widget(self.parameter_detail_text, "当前步骤还没有可展示的参数推荐明细。")
+
+    def _on_parameter_tree_select(self, _event: object) -> None:
+        self._refresh_parameter_detail_text()
+
+    def _refresh_parameter_detail_text(self) -> None:
+        if not hasattr(self, "parameter_detail_text"):
+            return
+        if not hasattr(self, "parameter_tree"):
+            self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
+            return
+        selection = self.parameter_tree.selection()
+        if not selection:
+            placeholder = "请选择参数列表中的一项查看详细说明。" if self._current_parameter_items else "当前步骤还没有可展示的参数推荐明细。"
+            self._set_text_widget(self.parameter_detail_text, placeholder)
+            return
+        try:
+            index = int(selection[0])
+        except ValueError:
+            self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
+            return
+        if index < 0 or index >= len(self._current_parameter_items):
+            self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
+            return
+        self._set_text_widget(self.parameter_detail_text, self._format_parameter_detail_item(self._current_parameter_items[index]))
 
     def _find_step_analysis_batch(self, step_id: int) -> dict[str, object] | None:
         if not self.ai_analysis:
@@ -5500,10 +5744,16 @@ class RecorderViewerWindow:
     def _summarize_parameter_suggestions(self, parameters) -> str:
         if not parameters:
             return ""
-        return "; ".join(
-            f"{item.name}={json.dumps(item.suggested_value, ensure_ascii=False, default=str)}"
-            for item in parameters
-        )
+        preview_items = [
+            f"{item.name}={self._format_parameter_value_for_view(item.suggested_value)}"
+            for item in parameters[:2]
+        ]
+        summary = f"{len(parameters)} 个参数"
+        if preview_items:
+            summary += " | " + " | ".join(preview_items)
+        if len(parameters) > 2:
+            summary += " | ..."
+        return summary
 
     def _format_parameter_detail_text(self, suggestion) -> str:
         override = suggestion.candidate_payload.get("viewer_parameter_summary_override", "") if isinstance(suggestion.candidate_payload, dict) else ""
@@ -5512,15 +5762,14 @@ class RecorderViewerWindow:
             f"方法: {suggestion.method_name or '(无)'}",
             f"方法摘要: {suggestion.method_summary or '(无)'}",
             f"模块建议: {suggestion.script_name or '(无)'}",
+            f"模块摘要: {suggestion.script_summary or '(无)'}",
             f"原因: {suggestion.reason or '(无)'}",
             f"置信度: {suggestion.confidence:.2f}",
         ]
-        if str(override).strip():
-            lines.extend(["", f"参数建议摘要(人工修改): {str(override).strip()}"])
         if suggestion.parameters:
             lines.extend(["", "参数推荐:"])
             for item in suggestion.parameters:
-                lines.append(f"- {item.name}: {json.dumps(item.suggested_value, ensure_ascii=False, default=str)} | confidence={item.confidence:.2f}")
+                lines.append(f"- {item.name}: {json.dumps(item.suggested_value, ensure_ascii=False, default=str)} | confidence={item.confidence:.2f} | status={self._build_parameter_status_label(item)}")
                 if item.evidence:
                     lines.append(f"  evidence: {' | '.join(item.evidence)}")
                 if item.missing_reason:
@@ -5856,21 +6105,31 @@ class RecorderViewerWindow:
         if not row_indexes:
             self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
             self._set_text_widget(self.parameter_result_text, "")
+            self._clear_parameter_tree()
+            if hasattr(self, "parameter_detail_text"):
+                self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
             return
         row_index = self._get_primary_selected_row_index()
         if row_index is None:
             self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
             self._set_text_widget(self.parameter_result_text, "")
+            self._clear_parameter_tree()
+            if hasattr(self, "parameter_detail_text"):
+                self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
             return
         suggestion = self._find_suggestion_by_row_index(row_index)
         if suggestion is None:
             prefix = f"已选择 {len(row_indexes)} 步 | " if len(row_indexes) > 1 else ""
             self.parameter_status_var.set(f"{prefix}步骤 {row_index + 1} 暂无调用建议")
             self._set_text_widget(self.parameter_result_text, "")
+            self._clear_parameter_tree()
+            if hasattr(self, "parameter_detail_text"):
+                self._set_text_widget(self.parameter_detail_text, "当前步骤暂无参数推荐说明。")
             return
         prefix = f"已选择 {len(row_indexes)} 步 | " if len(row_indexes) > 1 else ""
         self.parameter_status_var.set(f"{prefix}当前显示步骤 {row_index + 1} | 方法建议: {suggestion.method_name or '(无)'}")
-        self._set_text_widget(self.parameter_result_text, self._format_parameter_detail_text(suggestion))
+        self._set_text_widget(self.parameter_result_text, self._build_parameter_summary_header(suggestion))
+        self._populate_parameter_tree(suggestion)
 
     def _resolve_suggestion_registry_paths(self) -> tuple[Path, Path] | None:
         registry_root = self.project_root / "converter_assets" / "registry"

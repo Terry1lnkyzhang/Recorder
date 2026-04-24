@@ -179,6 +179,31 @@ class DesignStepsOverlay:
         )
         self.step_message.grid(row=1, column=0, sticky="nsew")
 
+        self.all_steps_frame = tk.Frame(content, bg=self._body_bg)
+        self.all_steps_frame.grid(row=1, column=0, sticky="nsew")
+        self.all_steps_frame.columnconfigure(0, weight=1)
+        self.all_steps_frame.rowconfigure(0, weight=1)
+
+        self.all_steps_text = tk.Text(
+            self.all_steps_frame,
+            wrap=tk.WORD,
+            font=("Segoe UI", 11),
+            bg=self._body_bg,
+            fg=self._text_fg,
+            relief=tk.FLAT,
+            borderwidth=0,
+            padx=6,
+            pady=6,
+            highlightthickness=0,
+        )
+        self.all_steps_text.grid(row=0, column=0, sticky="nsew")
+        self.all_steps_text.configure(state=tk.DISABLED)
+
+        self.all_steps_scrollbar = ttk.Scrollbar(self.all_steps_frame, orient=tk.VERTICAL, command=self.all_steps_text.yview)
+        self.all_steps_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.all_steps_text.configure(yscrollcommand=self.all_steps_scrollbar.set)
+        self.all_steps_frame.grid_remove()
+
         self.next_button = tk.Button(
             body,
             text="▶",
@@ -227,6 +252,8 @@ class DesignStepsOverlay:
         self.content_frame.configure(bg=self._body_bg)
         self.step_index_label.configure(bg=self._body_bg, fg=self._muted_fg)
         self.step_message.configure(bg=self._body_bg, fg=self._text_fg)
+        self.all_steps_frame.configure(bg=self._body_bg)
+        self.all_steps_text.configure(bg=self._body_bg, fg=self._text_fg, insertbackground=self._text_fg)
         self.previous_button.configure(bg=self._body_bg, fg=self._text_fg, activebackground=self._body_bg, activeforeground=self._text_fg)
         self.next_button.configure(bg=self._body_bg, fg=self._text_fg, activebackground=self._body_bg, activeforeground=self._text_fg)
 
@@ -302,14 +329,17 @@ class DesignStepsOverlay:
         total = len(self._steps)
         self._current_step_index = min(max(self._current_step_index, 0), total - 1)
         if self._show_all_steps:
-            self.step_text_var.set("\n\n".join(self._steps))
+            self.step_message.grid_remove()
+            self.all_steps_frame.grid()
+            self._set_all_steps_text("\n\n".join(self._steps))
             self.step_index_var.set(f"All Steps · {total} 条")
             self.previous_button.configure(state=tk.DISABLED)
             self.next_button.configure(state=tk.DISABLED)
             self.mode_button.configure(text="Single Step")
-            self.step_message.configure(width=420)
             return
 
+        self.all_steps_frame.grid_remove()
+        self.step_message.grid()
         current_text = self._steps[self._current_step_index]
         self.step_text_var.set(current_text)
         self.step_index_var.set(f"{self._current_step_index + 1} / {total}")
@@ -317,6 +347,13 @@ class DesignStepsOverlay:
         self.next_button.configure(state=tk.NORMAL if self._current_step_index < total - 1 else tk.DISABLED)
         self.mode_button.configure(text="All Steps")
         self.step_message.configure(width=360)
+
+    def _set_all_steps_text(self, text: str) -> None:
+        self.all_steps_text.configure(state=tk.NORMAL)
+        self.all_steps_text.delete("1.0", tk.END)
+        self.all_steps_text.insert("1.0", text)
+        self.all_steps_text.configure(state=tk.DISABLED)
+        self.all_steps_text.yview_moveto(0)
 
     def _split_design_steps(self, design_steps: str) -> list[str]:
         normalized = (design_steps or "").replace("\r\n", "\n").strip()

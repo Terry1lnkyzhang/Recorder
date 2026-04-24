@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageGrab
 
 from src.common.prompt_templates import PromptTemplateRecord, load_checkpoint_prompt_templates
-from src.database import fetch_distinct_baseline_names, fetch_latest_testcase_management_record
+from src.database import fetch_distinct_baseline_names, fetch_latest_baseline_design_steps, fetch_latest_testcase_management_record
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.errors import AIClientError
 from src.ai.remote_service_client import RemoteAIServiceClient
@@ -253,14 +253,18 @@ class SessionMetadataDialog:
         self.settings_store = settings_store or SettingsStore(Path("recorder_settings.json"))
         self.result: SessionMetadataDraft | None = None
         self.ai_running = False
+        self._metadata_canvas: tk.Canvas | None = None
+        self._metadata_canvas_window: int | None = None
         self._testcase_lookup_after_id: str | None = None
         self._testcase_lookup_token = 0
         self._baseline_lookup_token = 0
+        self._baseline_design_steps_after_id: str | None = None
+        self._baseline_design_steps_token = 0
 
         self.window = tk.Toplevel(parent)
         self.window.title("录制元数据")
-        self.window.geometry("800x820")
-        self.window.minsize(740, 720)
+        self.window.geometry("860x980")
+        self.window.minsize(780, 820)
         self.window.transient(parent)
         self.window.grab_set()
 
@@ -275,6 +279,7 @@ class SessionMetadataDialog:
         self.testcase_lookup_status_var = tk.StringVar(value="")
         self.testcase_lookup_details_var = tk.StringVar(value="")
         self.baseline_lookup_status_var = tk.StringVar(value="BaselineName 加载中...")
+        self.baseline_design_steps_status_var = tk.StringVar(value="")
 
         self._build_ui()
         self.window.protocol("WM_DELETE_WINDOW", self.cancel)
@@ -283,13 +288,29 @@ class SessionMetadataDialog:
         self.window.after(0, self._load_baseline_names)
 
     def _build_ui(self) -> None:
-        wrapper = ttk.Frame(self.window, padding=16)
-        wrapper.pack(fill=tk.BOTH, expand=True)
+        outer = ttk.Frame(self.window, padding=0)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._metadata_canvas = canvas
+
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        wrapper = ttk.Frame(canvas, padding=16)
         wrapper.columnconfigure(1, weight=1)
         wrapper.rowconfigure(7, weight=1)
         wrapper.rowconfigure(9, weight=1)
         wrapper.rowconfigure(10, weight=1)
         wrapper.rowconfigure(11, weight=1)
+        self._metadata_canvas_window = canvas.create_window((0, 0), window=wrapper, anchor=tk.NW)
+
+        wrapper.bind("<Configure>", self._on_metadata_wrapper_configure)
+        canvas.bind("<Configure>", self._on_metadata_canvas_configure)
+        canvas.bind_all("<MouseWheel>", self._on_metadata_mousewheel, add="+")
+        self.window.bind("<Destroy>", self._on_metadata_window_destroy, add="+")
 
         ttk.Label(
             wrapper,
@@ -325,7 +346,9 @@ class SessionMetadataDialog:
         baseline_frame.columnconfigure(0, weight=1)
         self.baseline_name_combo = ttk.Combobox(baseline_frame, textvariable=self.baseline_name_var, state="readonly")
         self.baseline_name_combo.grid(row=0, column=0, sticky=tk.EW)
+        self.baseline_name_combo.bind("<<ComboboxSelected>>", self._on_baseline_name_changed, add="+")
         ttk.Label(baseline_frame, textvariable=self.baseline_lookup_status_var).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
+        ttk.Label(baseline_frame, textvariable=self.baseline_design_steps_status_var, wraplength=520, justify=tk.LEFT).grid(row=2, column=0, sticky=tk.W, pady=(2, 0))
 
         self.primary_id_label = ttk.Label(wrapper, text="Testcase ID")
         self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
@@ -402,6 +425,41 @@ class SessionMetadataDialog:
         self._refresh_prs_mode()
         self.primary_id_entry.focus_set()
 
+    def _on_metadata_wrapper_configure(self, _event: tk.Event | None = None) -> None:
+        if self._metadata_canvas is None:
+            return
+        self._metadata_canvas.configure(scrollregion=self._metadata_canvas.bbox("all"))
+
+    def _on_metadata_canvas_configure(self, event: tk.Event) -> None:
+        if self._metadata_canvas is None or self._metadata_canvas_window is None:
+            return
+        self._metadata_canvas.itemconfigure(self._metadata_canvas_window, width=event.width)
+
+    def _on_metadata_mousewheel(self, event: tk.Event) -> None:
+        if self._metadata_canvas is None or not self.window.winfo_exists():
+            return
+        if self.window.focus_displayof() is None:
+            return
+        try:
+            widget = self.window.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            widget = None
+        if widget is None:
+            return
+        if not str(widget).startswith(str(self.window)):
+            return
+        delta = int(-event.delta / 120) if event.delta else 0
+        if delta:
+            self._metadata_canvas.yview_scroll(delta, "units")
+
+    def _on_metadata_window_destroy(self, _event: tk.Event | None = None) -> None:
+        if self._metadata_canvas is None:
+            return
+        try:
+            self._metadata_canvas.unbind_all("<MouseWheel>")
+        except Exception:
+            pass
+
     def _is_prs_recording_selected(self) -> bool:
         return self.is_prs_recording_var.get().strip() != "否"
 
@@ -419,6 +477,7 @@ class SessionMetadataDialog:
             self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=6)
             self.primary_id_entry.focus_set()
             self._schedule_testcase_lookup(immediate=True)
+            self._schedule_baseline_design_steps_lookup(immediate=True)
             return
 
         self.testcase_id_var.set("")
@@ -429,6 +488,7 @@ class SessionMetadataDialog:
         self.secondary_id_entry.grid_remove()
         self.testcase_lookup_status_var.set("")
         self.testcase_lookup_details_var.set("")
+        self.baseline_design_steps_status_var.set("")
         self.name_label.grid(row=4, column=0, sticky=tk.W, pady=6)
         self.name_entry.grid(row=4, column=1, sticky=tk.EW, pady=6)
         self.name_entry.focus_set()
@@ -464,6 +524,7 @@ class SessionMetadataDialog:
                 self.baseline_name_combo.configure(values=["", *baseline_names, current_value])
         else:
             self.baseline_lookup_status_var.set("未查询到可用的 BaselineName")
+        self._schedule_baseline_design_steps_lookup(immediate=True)
 
     def _finish_baseline_lookup_error(self, token: int, message: str) -> None:
         if token != self._baseline_lookup_token:
@@ -473,9 +534,14 @@ class SessionMetadataDialog:
 
     def _on_testcase_id_changed(self, _event: tk.Event | None = None) -> None:
         self._schedule_testcase_lookup(immediate=False)
+        self._schedule_baseline_design_steps_lookup(immediate=False)
 
     def _on_testcase_id_focus_out(self, _event: tk.Event | None = None) -> None:
         self._schedule_testcase_lookup(immediate=True)
+        self._schedule_baseline_design_steps_lookup(immediate=True)
+
+    def _on_baseline_name_changed(self, _event: tk.Event | None = None) -> None:
+        self._schedule_baseline_design_steps_lookup(immediate=True)
 
     def _schedule_testcase_lookup(self, *, immediate: bool) -> None:
         if self._testcase_lookup_after_id is not None:
@@ -495,6 +561,49 @@ class SessionMetadataDialog:
         self.testcase_lookup_details_var.set("")
         delay_ms = 0 if immediate else 350
         self._testcase_lookup_after_id = self.window.after(delay_ms, self._start_testcase_lookup)
+
+    def _schedule_baseline_design_steps_lookup(self, *, immediate: bool) -> None:
+        if self._baseline_design_steps_after_id is not None:
+            try:
+                self.window.after_cancel(self._baseline_design_steps_after_id)
+            except Exception:
+                pass
+            self._baseline_design_steps_after_id = None
+
+        testcase_id = self.testcase_id_var.get().strip()
+        baseline_name = self.baseline_name_var.get().strip()
+        if not self._is_prs_recording_selected() or not testcase_id or not baseline_name:
+            self.baseline_design_steps_status_var.set("")
+            return
+
+        self.baseline_design_steps_status_var.set("正在查询 Baseline Design Steps...")
+        delay_ms = 0 if immediate else 350
+        self._baseline_design_steps_after_id = self.window.after(delay_ms, self._start_baseline_design_steps_lookup)
+
+    def _start_baseline_design_steps_lookup(self) -> None:
+        self._baseline_design_steps_after_id = None
+        testcase_id = self.testcase_id_var.get().strip()
+        baseline_name = self.baseline_name_var.get().strip()
+        if not self._is_prs_recording_selected() or not testcase_id or not baseline_name:
+            self.baseline_design_steps_status_var.set("")
+            return
+
+        self._baseline_design_steps_token += 1
+        token = self._baseline_design_steps_token
+        connection_string = self.settings_store.load().prompt_db_connection_string.strip()
+        if not connection_string:
+            self.baseline_design_steps_status_var.set("未配置数据库连接，无法查询 Design Steps")
+            return
+
+        def worker() -> None:
+            try:
+                record = fetch_latest_baseline_design_steps(connection_string, testcase_id, baseline_name)
+            except Exception as exc:
+                self.window.after(0, lambda: self._finish_baseline_design_steps_lookup_error(token, testcase_id, baseline_name, str(exc)))
+                return
+            self.window.after(0, lambda: self._finish_baseline_design_steps_lookup_success(token, testcase_id, baseline_name, record))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _start_testcase_lookup(self) -> None:
         self._testcase_lookup_after_id = None
@@ -542,6 +651,25 @@ class SessionMetadataDialog:
             return
         self.testcase_lookup_status_var.set("数据库查询失败")
         self.testcase_lookup_details_var.set(message)
+
+    def _finish_baseline_design_steps_lookup_success(self, token: int, testcase_id: str, baseline_name: str, record) -> None:
+        if token != self._baseline_design_steps_token:
+            return
+        if testcase_id != self.testcase_id_var.get().strip() or baseline_name != self.baseline_name_var.get().strip():
+            return
+        if record is None or not getattr(record, "design_steps", "").strip():
+            self.baseline_design_steps_status_var.set("未在 baselinetable 中匹配到 Design Steps")
+            return
+
+        self._set_text_content(self.design_steps_text, record.design_steps)
+        self.baseline_design_steps_status_var.set("已根据 TestcaseID + BaselineName 加载 Design Steps")
+
+    def _finish_baseline_design_steps_lookup_error(self, token: int, testcase_id: str, baseline_name: str, message: str) -> None:
+        if token != self._baseline_design_steps_token:
+            return
+        if testcase_id != self.testcase_id_var.get().strip() or baseline_name != self.baseline_name_var.get().strip():
+            return
+        self.baseline_design_steps_status_var.set(f"Baseline Design Steps 查询失败: {message}")
 
     def save(self) -> None:
         draft = SessionMetadataDraft(

@@ -4,7 +4,7 @@ from contextlib import closing
 import re
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .models import MySQLConnectionInfo, TestcaseManagementRecord
+from .models import BaselineTableRecord, MySQLConnectionInfo, TestcaseManagementRecord
 
 
 _SQL_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -150,3 +150,49 @@ def fetch_distinct_baseline_names(
         if value:
             results.append(value)
     return results
+
+
+def fetch_latest_baseline_design_steps(
+    connection_string: str,
+    testcase_id: str,
+    baseline_name: str,
+    *,
+    table_name: str = "baselinetable",
+    testcase_id_column: str = "TestcaseID",
+    baseline_name_column: str = "BaseLineName",
+    design_steps_column: str = "DesignSteps",
+) -> BaselineTableRecord | None:
+    normalized_testcase_id = (testcase_id or "").strip()
+    normalized_baseline_name = (baseline_name or "").strip()
+    if not normalized_testcase_id or not normalized_baseline_name:
+        return None
+
+    resolved_table_name = validate_sql_identifier(table_name, "table_name")
+    resolved_testcase_id_column = validate_sql_identifier(testcase_id_column, "testcase_id_column")
+    resolved_baseline_name_column = validate_sql_identifier(baseline_name_column, "baseline_name_column")
+    resolved_design_steps_column = validate_sql_identifier(design_steps_column, "design_steps_column")
+
+    query = f"""
+        SELECT
+            `{resolved_testcase_id_column}` AS testcase_id,
+            `{resolved_baseline_name_column}` AS baseline_name,
+                        `{resolved_design_steps_column}` AS design_steps
+        FROM `{resolved_table_name}`
+        WHERE `{resolved_testcase_id_column}` = %s
+          AND `{resolved_baseline_name_column}` = %s
+        LIMIT 1
+    """
+
+    with closing(connect_mysql(connection_string)) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query, (normalized_testcase_id, normalized_baseline_name))
+            row = cursor.fetchone() or None
+
+    if not isinstance(row, dict):
+        return None
+
+    return BaselineTableRecord(
+        testcase_id=str(row.get("testcase_id") or normalized_testcase_id).strip(),
+        baseline_name=str(row.get("baseline_name") or normalized_baseline_name).strip(),
+        design_steps=str(row.get("design_steps") or "").strip(),
+    )

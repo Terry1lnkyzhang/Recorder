@@ -27,3 +27,10 @@ class TestcaseManagementRecord:
     designer: str
     script_version: str
     update_time: str
+
+
+@dataclass(slots=True)
+class BaselineTableRecord:
+    testcase_id: str
+    baseline_name: str
+    design_steps: str
