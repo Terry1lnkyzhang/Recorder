@@ -19,6 +19,8 @@ from .dialogs import (
     open_settings_dialog,
     open_wait_for_image_dialog,
 )
+from .capture import select_region
+from .i18n import pick_text
 from .recorder import RecorderEngine
 from .settings import Settings, SettingsStore
 from src.viewer.window import open_viewer_window
@@ -42,6 +44,7 @@ class DesignStepsOverlay:
         self._body_bg = "#fffaf0"
         self._text_fg = "#2f2a1f"
         self._muted_fg = "#7a6c4d"
+        self._ui_language = settings.ui_language
         self.window = tk.Toplevel(parent)
         self.window.withdraw()
         self.window.overrideredirect(True)
@@ -153,7 +156,7 @@ class DesignStepsOverlay:
         self.content_frame = content
 
         self.step_index_var = tk.StringVar(value="1 / 1")
-        self.step_text_var = tk.StringVar(value="当前 Session 未填写 Design Steps。")
+        self.step_text_var = tk.StringVar(value=self._empty_steps_text())
 
         self.step_index_label = tk.Label(
             content,
@@ -222,6 +225,7 @@ class DesignStepsOverlay:
         self.apply_settings(settings)
 
     def apply_settings(self, settings: Settings) -> None:
+        self._ui_language = settings.ui_language
         self._enabled = bool(settings.show_design_steps_overlay)
         width = max(320, int(settings.design_steps_overlay_width or 520))
         height = max(160, int(settings.design_steps_overlay_height or 220))
@@ -256,6 +260,13 @@ class DesignStepsOverlay:
         self.all_steps_text.configure(bg=self._body_bg, fg=self._text_fg, insertbackground=self._text_fg)
         self.previous_button.configure(bg=self._body_bg, fg=self._text_fg, activebackground=self._body_bg, activeforeground=self._text_fg)
         self.next_button.configure(bg=self._body_bg, fg=self._text_fg, activebackground=self._body_bg, activeforeground=self._text_fg)
+        self.title_label.configure(text=self._t("Design Steps", "Design Steps"))
+        if not self._show_all_steps:
+            self.mode_button.configure(text=self._t("All Steps", "All Steps"))
+        else:
+            self.mode_button.configure(text=self._t("单步", "Single Step"))
+        if not self._steps:
+            self.step_text_var.set(self._empty_steps_text())
 
         if not self._enabled:
             self.hide()
@@ -323,7 +334,7 @@ class DesignStepsOverlay:
 
     def _render_current_step(self) -> None:
         if not self._steps:
-            self._steps = ["当前 Session 未填写 Design Steps。"]
+            self._steps = [self._empty_steps_text()]
             self._current_step_index = 0
 
         total = len(self._steps)
@@ -332,10 +343,10 @@ class DesignStepsOverlay:
             self.step_message.grid_remove()
             self.all_steps_frame.grid()
             self._set_all_steps_text("\n\n".join(self._steps))
-            self.step_index_var.set(f"All Steps · {total} 条")
+            self.step_index_var.set(self._t(f"全部步骤 · {total} 条", f"All Steps · {total}"))
             self.previous_button.configure(state=tk.DISABLED)
             self.next_button.configure(state=tk.DISABLED)
-            self.mode_button.configure(text="Single Step")
+            self.mode_button.configure(text=self._t("单步", "Single Step"))
             return
 
         self.all_steps_frame.grid_remove()
@@ -345,7 +356,7 @@ class DesignStepsOverlay:
         self.step_index_var.set(f"{self._current_step_index + 1} / {total}")
         self.previous_button.configure(state=tk.NORMAL if self._current_step_index > 0 else tk.DISABLED)
         self.next_button.configure(state=tk.NORMAL if self._current_step_index < total - 1 else tk.DISABLED)
-        self.mode_button.configure(text="All Steps")
+        self.mode_button.configure(text=self._t("全部步骤", "All Steps"))
         self.step_message.configure(width=360)
 
     def _set_all_steps_text(self, text: str) -> None:
@@ -358,7 +369,7 @@ class DesignStepsOverlay:
     def _split_design_steps(self, design_steps: str) -> list[str]:
         normalized = (design_steps or "").replace("\r\n", "\n").strip()
         if not normalized:
-            return ["当前 Session 未填写 Design Steps。"]
+            return [self._empty_steps_text()]
 
         numbered_steps = self._split_by_number_prefix(normalized)
         if numbered_steps:
@@ -388,6 +399,12 @@ class DesignStepsOverlay:
             return inline_matches
 
         return []
+
+    def _empty_steps_text(self) -> str:
+        return self._t("当前 Session 未填写 Design Steps。", "No design steps were provided for the current session.")
+
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return pick_text(self._ui_language, zh_text, en_text)
 
     def _position_window(self) -> None:
         if self._collapsed:
@@ -419,7 +436,6 @@ class DesignStepsOverlay:
 class RecorderApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Automation Recorder MVP")
         self.root.geometry("840x470")
         self.root.minsize(760, 420)
         self.logger = get_logger("app")
@@ -434,8 +450,6 @@ class RecorderApp:
             manual_screenshot_request_callback=self._request_manual_screenshot_from_shortcut,
         )
 
-        self.status_var = tk.StringVar(value="Ready")
-        self.session_var = tk.StringVar(value="未开始录制")
         self.output_var = tk.StringVar(value=str(output_dir))
         self.last_session_dir: Path | None = None
         self.stop_in_progress = False
@@ -446,6 +460,8 @@ class RecorderApp:
         self._checkpoint_dialog_open = False
         self._manual_screenshot_in_progress = False
         self.current_settings = self.settings_store.load()
+        self.status_var = tk.StringVar(value=self._t("就绪", "Ready"))
+        self.session_var = tk.StringVar(value=self._t("未开始录制", "Not recording"))
         self.design_steps_overlay = DesignStepsOverlay(self.root, self.current_settings)
         self._session_picker_scan_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
@@ -458,87 +474,80 @@ class RecorderApp:
         wrapper = ttk.Frame(self.root, padding=20)
         wrapper.pack(fill=tk.BOTH, expand=True)
 
-        title = ttk.Label(wrapper, text="Automation Recorder", font=("Segoe UI", 18, "bold"))
-        title.pack(anchor=tk.W)
+        self.title_label = ttk.Label(wrapper, text="", font=("Segoe UI", 18, "bold"))
+        self.title_label.pack(anchor=tk.W)
 
-        desc = ttk.Label(
+        self.desc_label = ttk.Label(
             wrapper,
-            text="录制人工操作、截图和附加上下文，为后续自动化脚本 YAML 转换做准备。",
+            text="",
             wraplength=560,
         )
-        desc.pack(anchor=tk.W, pady=(8, 16))
+        self.desc_label.pack(anchor=tk.W, pady=(8, 16))
 
-        info_frame = ttk.LabelFrame(wrapper, text="Session")
-        info_frame.pack(fill=tk.X)
-        ttk.Label(info_frame, text="状态:").grid(row=0, column=0, sticky=tk.W, padx=12, pady=8)
-        ttk.Label(info_frame, textvariable=self.session_var).grid(row=0, column=1, sticky=tk.W, padx=8, pady=8)
-        ttk.Label(info_frame, text="输出目录:").grid(row=1, column=0, sticky=tk.W, padx=12, pady=8)
-        ttk.Label(info_frame, textvariable=self.output_var, wraplength=420).grid(row=1, column=1, sticky=tk.W, padx=8, pady=8)
+        self.info_frame = ttk.LabelFrame(wrapper, text="")
+        self.info_frame.pack(fill=tk.X)
+        self.session_status_label = ttk.Label(self.info_frame, text="")
+        self.session_status_label.grid(row=0, column=0, sticky=tk.W, padx=12, pady=8)
+        ttk.Label(self.info_frame, textvariable=self.session_var).grid(row=0, column=1, sticky=tk.W, padx=8, pady=8)
+        self.output_dir_label = ttk.Label(self.info_frame, text="")
+        self.output_dir_label.grid(row=1, column=0, sticky=tk.W, padx=12, pady=8)
+        ttk.Label(self.info_frame, textvariable=self.output_var, wraplength=420).grid(row=1, column=1, sticky=tk.W, padx=8, pady=8)
 
-        button_frame = ttk.LabelFrame(wrapper, text="操作")
-        button_frame.pack(fill=tk.X, pady=20)
+        self.button_frame = ttk.LabelFrame(wrapper, text="")
+        self.button_frame.pack(fill=tk.X, pady=20)
 
-        primary_actions = ttk.Frame(button_frame, padding=(12, 10, 12, 6))
+        primary_actions = ttk.Frame(self.button_frame, padding=(12, 10, 12, 6))
         primary_actions.pack(fill=tk.X)
 
-        secondary_actions = ttk.Frame(button_frame, padding=(12, 0, 12, 10))
+        secondary_actions = ttk.Frame(self.button_frame, padding=(12, 0, 12, 10))
         secondary_actions.pack(fill=tk.X)
 
-        self.start_button = ttk.Button(primary_actions, text="开始录制", command=self.start_recording)
+        self.start_button = ttk.Button(primary_actions, text="", command=self.start_recording)
         self.start_button.pack(side=tk.LEFT)
 
-        self.import_button = ttk.Button(primary_actions, text="导入并续录", command=self.import_and_continue_recording)
+        self.import_button = ttk.Button(primary_actions, text="", command=self.import_and_continue_recording)
         self.import_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.stop_button = ttk.Button(primary_actions, text="停止录制", command=self.stop_recording, state=tk.DISABLED)
+        self.stop_button = ttk.Button(primary_actions, text="", command=self.stop_recording, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.save_button = ttk.Button(primary_actions, text="保存", command=self.save_recording, state=tk.DISABLED)
+        self.save_button = ttk.Button(primary_actions, text="", command=self.save_recording, state=tk.DISABLED)
         self.save_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.pause_resume_button = ttk.Button(primary_actions, text="暂停录制", command=self.toggle_pause_resume, state=tk.DISABLED)
+        self.pause_resume_button = ttk.Button(primary_actions, text="", command=self.toggle_pause_resume, state=tk.DISABLED)
         self.pause_resume_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.comment_button = ttk.Button(secondary_actions, text="添加 Comment", command=self.add_comment, state=tk.DISABLED)
+        self.comment_button = ttk.Button(secondary_actions, text="", command=self.add_comment, state=tk.DISABLED)
         self.comment_button.pack(side=tk.LEFT)
 
-        self.wait_button = ttk.Button(secondary_actions, text="添加等待事件", command=self.add_wait_for_image, state=tk.DISABLED)
+        self.wait_button = ttk.Button(secondary_actions, text="", command=self.add_wait_for_image, state=tk.DISABLED)
         self.wait_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.screenshot_button = ttk.Button(secondary_actions, text="记录截图", command=self.capture_manual_screenshot, state=tk.DISABLED)
+        self.screenshot_button = ttk.Button(secondary_actions, text="", command=self.capture_manual_screenshot, state=tk.DISABLED)
         self.screenshot_button.pack(side=tk.LEFT, padx=(10, 0))
 
         self.checkpoint_button = ttk.Button(
             secondary_actions,
-            text="添加 AI Checkpoint",
+            text="",
             command=self.add_checkpoint,
             state=tk.DISABLED,
         )
         self.checkpoint_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.viewer_button = ttk.Button(secondary_actions, text="查看录制内容", command=self.open_viewer)
+        self.viewer_button = ttk.Button(secondary_actions, text="", command=self.open_viewer)
         self.viewer_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        self.settings_button = ttk.Button(secondary_actions, text="Settings", command=self.open_settings)
+        self.settings_button = ttk.Button(secondary_actions, text="", command=self.open_settings)
         self.settings_button.pack(side=tk.LEFT, padx=(10, 0))
 
-        notes_frame = ttk.LabelFrame(wrapper, text="说明")
-        notes_frame.pack(fill=tk.BOTH, expand=True)
-        notes_text = (
-            "1. 点击开始录制后，会先填写本次录制的 Session 元数据，再开始监听键盘、鼠标点击和滚轮事件。\n"
-            "2. Comment 通过鼠标拖拽选择截图区域，再填写大文本说明。\n"
-            "3. 等待事件支持框选等待区域并自动保存截图，当前第一版用于记录等待图片出现的步骤。\n"
-            "4. 记录截图支持手动选区并保存到当前 Session 的 screenshots，可通过 Ctrl+F4 快捷键快速触发。\n"
-            "5. AI Checkpoint 支持两张截图、区域视频录制、Query 调模型并保存返回内容，也支持 Ctrl+F5 快捷键快速打开。\n"
-            "6. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
-            "7. 支持暂停/继续录制，以及导入已有 session 后继续录制。\n"
-            "8. 停止录制会在后台收尾，不再阻塞整个窗口。\n"
-            "9. Session 元数据在录制完成后也可以在 Session Viewer 中继续修改。"
-        )
-        ttk.Label(notes_frame, text=notes_text, justify=tk.LEFT, wraplength=760).pack(anchor=tk.W, padx=12, pady=12)
+        self.notes_frame = ttk.LabelFrame(wrapper, text="")
+        self.notes_frame.pack(fill=tk.BOTH, expand=True)
+        self.notes_label = ttk.Label(self.notes_frame, text="", justify=tk.LEFT, wraplength=760)
+        self.notes_label.pack(anchor=tk.W, padx=12, pady=12)
 
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._apply_ui_language()
 
     def start_recording(self) -> None:
         if self.stop_in_progress or self.save_in_progress or self.import_in_progress:
@@ -548,7 +557,7 @@ class RecorderApp:
         metadata_draft = open_session_metadata_dialog(self.root, self.session_metadata_draft, self.settings_store)
         if metadata_draft is None:
             self.logger.info("Start recording cancelled in session metadata dialog")
-            self._set_status("已取消开始录制")
+            self._set_status(self._t("已取消开始录制", "Start recording canceled"))
             return
 
         self.session_metadata_draft = metadata_draft
@@ -562,7 +571,7 @@ class RecorderApp:
         message = self.engine.start(metadata=metadata_draft.to_dict())
         self.last_session_dir = self.engine.store.session_dir
         self._show_design_steps_overlay(metadata_draft.design_steps)
-        self._set_active_session_text("录制中")
+        self._set_active_session_text(self._t("录制中", "Recording"))
         self._refresh_controls()
         self._set_status(message)
 
@@ -579,8 +588,8 @@ class RecorderApp:
         self.logger.info("Import-and-continue requested | session_dir=%s", session_dir)
         self.import_in_progress = True
         self._refresh_controls()
-        self.session_var.set(f"导入中: {session_dir.name}")
-        self._set_status("正在导入已有录制内容，请稍候...")
+        self.session_var.set(self._t(f"导入中: {session_dir.name}", f"Importing: {session_dir.name}"))
+        self._set_status(self._t("正在导入已有录制内容，请稍候...", "Importing an existing recording. Please wait..."))
 
         def worker() -> None:
             try:
@@ -601,8 +610,8 @@ class RecorderApp:
         self.logger.info("Stop recording requested")
         self.stop_in_progress = True
         self._refresh_controls()
-        self._set_status("正在停止录制并等待后台任务落盘...")
-        self.session_var.set("停止中...")
+        self._set_status(self._t("正在停止录制并等待后台任务落盘...", "Stopping recording and waiting for background tasks to finish..."))
+        self.session_var.set(self._t("停止中...", "Stopping..."))
 
         def worker() -> None:
             try:
@@ -623,7 +632,7 @@ class RecorderApp:
         self.logger.info("Save snapshot requested")
         self.save_in_progress = True
         self._refresh_controls()
-        self._set_status("正在保存当前录制快照...")
+        self._set_status(self._t("正在保存当前录制快照...", "Saving the current recording snapshot..."))
 
         def worker() -> None:
             try:
@@ -645,14 +654,14 @@ class RecorderApp:
             if self.engine.is_paused:
                 self.logger.info("Resume recording requested")
                 message = self.engine.resume_recording()
-                self._set_active_session_text("录制中")
+                self._set_active_session_text(self._t("录制中", "Recording"))
             else:
                 self.logger.info("Pause recording requested")
                 message = self.engine.pause_recording()
-                self._set_active_session_text("已暂停")
+                self._set_active_session_text(self._t("已暂停", "Paused"))
         except RuntimeError as exc:
             self.logger.exception("Pause/resume failed")
-            messagebox.showerror("操作失败", str(exc), parent=self.root)
+            messagebox.showerror(self._t("操作失败", "Operation failed"), str(exc), parent=self.root)
             return
 
         self._refresh_controls()
@@ -699,6 +708,53 @@ class RecorderApp:
             self._checkpoint_dialog_open = False
             self.logger.info("Add AI checkpoint dialog closed")
 
+    def _add_checkpoint_from_shortcut(self) -> None:
+        if not self.engine.is_recording:
+            self.logger.info("AI checkpoint shortcut ignored because recorder is not running")
+            return
+        if self._checkpoint_dialog_open:
+            self.logger.info("AI checkpoint shortcut ignored because dialog is already open")
+            return
+
+        next_slot_index = len(self.ai_checkpoint_draft.image_selections)
+        if self.ai_checkpoint_draft.video_path is not None or next_slot_index >= 5:
+            self.logger.info("AI checkpoint shortcut falls back to dialog open | slot_index=%s | has_video=%s", next_slot_index, self.ai_checkpoint_draft.video_path is not None)
+            self.add_checkpoint()
+            return
+        self.logger.info("AI checkpoint shortcut capture opened | slot_index=%s", next_slot_index)
+        self._checkpoint_dialog_open = True
+        self.engine.suspend()
+        try:
+            selection = select_region(self.root, f"选择 AI Checkpoint 截图区域 {next_slot_index + 1}")
+            if not selection:
+                self._set_status(self._t("已取消 AI Checkpoint 快捷截图", "AI checkpoint quick capture canceled"))
+                return
+
+            relative_path = self.engine.save_manual_image(selection.image, "checkpoint")
+            if not relative_path:
+                messagebox.showerror(self._t("保存失败", "Save failed"), self._t("AI Checkpoint 截图保存失败。", "Failed to save the AI checkpoint screenshot."), parent=self.root)
+                return
+
+            session_dir = self.engine.store.session_dir
+            if session_dir is None:
+                messagebox.showerror(self._t("保存失败", "Save failed"), self._t("当前没有可用的 session 目录。", "No active session directory is available."), parent=self.root)
+                return
+
+            self.ai_checkpoint_draft.video_path = None
+            self.ai_checkpoint_draft.video_region = None
+            self.ai_checkpoint_draft.video_status = "未录制视频"
+            captured_item = ((session_dir / relative_path).resolve(), selection.to_region_dict())
+            if next_slot_index < len(self.ai_checkpoint_draft.image_selections):
+                self.ai_checkpoint_draft.image_selections[next_slot_index] = captured_item
+            else:
+                self.ai_checkpoint_draft.image_selections.append(captured_item)
+
+            open_ai_checkpoint_dialog(self.root, self.engine, self.settings_store, self.ai_checkpoint_draft)
+        finally:
+            self.engine.resume()
+            self._checkpoint_dialog_open = False
+            self.logger.info("AI checkpoint shortcut capture closed")
+
     def capture_manual_screenshot(self) -> None:
         if not self.engine.is_recording:
             self.logger.info("Manual screenshot ignored because recorder is not running")
@@ -713,16 +769,16 @@ class RecorderApp:
             self.root.iconify()
             relative_path = capture_manual_screenshot(self.root, self.engine, "选择要保存到历史截图的区域")
             if relative_path:
-                self._set_status(f"已保存截图: {relative_path}")
+                self._set_status(self._t(f"已保存截图: {relative_path}", f"Screenshot saved: {relative_path}"))
             else:
-                self._set_status("已取消记录截图")
+                self._set_status(self._t("已取消记录截图", "Screenshot capture canceled"))
         finally:
             self.engine.resume()
             self._manual_screenshot_in_progress = False
             self.logger.info("Manual screenshot capture closed")
 
     def _request_ai_checkpoint_from_shortcut(self) -> None:
-        self.root.after(0, self.add_checkpoint)
+        self.root.after(0, self._add_checkpoint_from_shortcut)
 
     def _request_manual_screenshot_from_shortcut(self) -> None:
         self.root.after(0, self.capture_manual_screenshot)
@@ -742,6 +798,7 @@ class RecorderApp:
         self.logger.info("Open settings requested")
         open_settings_dialog(self.root, self.settings_store)
         self.current_settings = self.settings_store.load()
+        self._apply_ui_language()
         self.design_steps_overlay.apply_settings(self.current_settings)
         self.engine.reload_capture_filters()
         if self.engine.is_recording:
@@ -750,41 +807,44 @@ class RecorderApp:
                 self._show_design_steps_overlay(metadata.design_steps)
             elif not self.current_settings.show_design_steps_overlay:
                 self._hide_design_steps_overlay()
-            self._set_status("已更新录制排除规则")
+            self._set_status(self._t("已更新录制排除规则", "Recording exclusion rules updated"))
         self.logger.info("Settings dialog closed")
 
     def _on_stop_success(self, session_dir: Path, suggestions_path: Path) -> None:
         self.stop_in_progress = False
         self._hide_design_steps_overlay()
-        self.session_var.set(f"已停止: {session_dir.name}")
+        self.session_var.set(self._t(f"已停止: {session_dir.name}", f"Stopped: {session_dir.name}"))
         self.last_session_dir = session_dir
         self._refresh_controls()
-        self._set_status(f"已输出: {session_dir} | 建议文件: {suggestions_path.name}")
+        self._set_status(self._t(f"已输出: {session_dir} | 建议文件: {suggestions_path.name}", f"Output saved: {session_dir} | Suggestions: {suggestions_path.name}"))
         self.logger.info("Stop recording completed | session_dir=%s | suggestions=%s", session_dir, suggestions_path)
         messagebox.showinfo(
-            "录制完成",
-            f"录制结果已保存到:\n{session_dir}\n\n复用建议文件:\n{suggestions_path}",
+            self._t("录制完成", "Recording complete"),
+            self._t(
+                f"录制结果已保存到:\n{session_dir}\n\n复用建议文件:\n{suggestions_path}",
+                f"Recording output saved to:\n{session_dir}\n\nSuggestions file:\n{suggestions_path}",
+            ),
         )
 
     def _on_stop_failed(self, message: str) -> None:
         self.stop_in_progress = False
         self._refresh_controls()
         self.logger.error("Stop recording failed | message=%s", message)
-        messagebox.showerror("Stop failed", message)
+        messagebox.showerror(self._t("停止失败", "Stop failed"), message)
 
     def _on_save_success(self, session_dir: Path, suggestions_path: Path) -> None:
         self.save_in_progress = False
         self.last_session_dir = session_dir
-        self._set_active_session_text("已暂停" if self.engine.is_paused else "录制中")
+        self._set_active_session_text(self._t("已暂停", "Paused") if self.engine.is_paused else self._t("录制中", "Recording"))
         self._refresh_controls()
-        self._set_status(f"已保存: {session_dir} | 建议文件: {suggestions_path.name}")
+        self._set_status(self._t(f"已保存: {session_dir} | 建议文件: {suggestions_path.name}", f"Saved: {session_dir} | Suggestions: {suggestions_path.name}"))
         self.logger.info("Save snapshot completed | session_dir=%s | suggestions=%s", session_dir, suggestions_path)
 
     def _on_save_failed(self, message: str) -> None:
         self.save_in_progress = False
         self._refresh_controls()
         self.logger.error("Save snapshot failed | message=%s", message)
-        messagebox.showerror("保存失败", message, parent=self.root)
+        messagebox.showerror(self._t("保存失败", "Save failed"), message, parent=self.root)
 
     def _on_import_success(self, session_dir: Path, message: str) -> None:
         self.import_in_progress = False
@@ -803,7 +863,7 @@ class RecorderApp:
                 scope=metadata.scope,
             )
             self._show_design_steps_overlay(metadata.design_steps)
-        self._set_active_session_text("续录中")
+        self._set_active_session_text(self._t("续录中", "Continuing"))
         self._refresh_controls()
         self._set_status(message)
         self.logger.info("Import-and-continue completed | session_dir=%s", session_dir)
@@ -811,10 +871,10 @@ class RecorderApp:
     def _on_import_failed(self, message: str) -> None:
         self.import_in_progress = False
         self._hide_design_steps_overlay()
-        self.session_var.set("未开始录制")
+        self.session_var.set(self._t("未开始录制", "Not recording"))
         self._refresh_controls()
         self.logger.error("Import-and-continue failed | message=%s", message)
-        messagebox.showerror("导入失败", message, parent=self.root)
+        messagebox.showerror(self._t("导入失败", "Import failed"), message, parent=self.root)
 
     def _show_design_steps_overlay(self, design_steps: str) -> None:
         self.design_steps_overlay.show(design_steps)
@@ -836,7 +896,7 @@ class RecorderApp:
     def _prompt_session_to_continue(self) -> Path | None:
         recordings_root = Path(self.output_var.get())
         dialog = tk.Toplevel(self.root)
-        dialog.title("选择要继续录制的 Session")
+        dialog.title(self._t("选择要继续录制的 Session", "Choose a session to continue"))
         dialog.geometry("760x520")
         dialog.minsize(680, 420)
         dialog.transient(self.root)
@@ -844,20 +904,20 @@ class RecorderApp:
 
         selected_path: Path | None = None
 
-        ttk.Label(dialog, text="请选择一个已有 session 继续录制。", padding=(16, 12, 16, 4)).pack(anchor=tk.W)
+        ttk.Label(dialog, text=self._t("请选择一个已有 session 继续录制。", "Select an existing session to continue recording."), padding=(16, 12, 16, 4)).pack(anchor=tk.W)
         ttk.Label(dialog, text=str(recordings_root), padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
         columns = ("name", "modified", "events")
         tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
-        tree.heading("name", text="Session 目录")
-        tree.heading("modified", text="最后修改时间")
-        tree.heading("events", text="事件数")
+        tree.heading("name", text=self._t("Session 目录", "Session folder"))
+        tree.heading("modified", text=self._t("最后修改时间", "Last modified"))
+        tree.heading("events", text=self._t("事件数", "Events"))
         tree.column("name", width=360, anchor=tk.W)
         tree.column("modified", width=200, anchor=tk.W, stretch=False)
         tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
         tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
 
-        status_var = tk.StringVar(value="正在扫描 Session...")
+        status_var = tk.StringVar(value=self._t("正在扫描 Session...", "Scanning sessions..."))
         ttk.Label(dialog, textvariable=status_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
         button_bar = ttk.Frame(dialog, padding=(16, 0, 16, 16))
@@ -868,7 +928,7 @@ class RecorderApp:
         def populate(force_refresh: bool = False) -> None:
             self._session_picker_scan_token += 1
             token = self._session_picker_scan_token
-            status_var.set("正在扫描 Session...")
+            status_var.set(self._t("正在扫描 Session...", "Scanning sessions..."))
             for item_id in tree.get_children():
                 tree.delete(item_id)
 
@@ -876,7 +936,7 @@ class RecorderApp:
                 try:
                     items = self._find_session_candidates(recordings_root, force_refresh=force_refresh)
                 except Exception as exc:
-                    self.root.after(0, lambda: status_var.set(f"扫描 Session 失败: {exc}"))
+                    self.root.after(0, lambda: status_var.set(self._t(f"扫描 Session 失败: {exc}", f"Failed to scan sessions: {exc}")))
                     return
 
                 def apply_results() -> None:
@@ -884,7 +944,7 @@ class RecorderApp:
                         return
                     sessions.clear()
                     sessions.extend(items)
-                    status_var.set(f"共找到 {len(sessions)} 个 Session")
+                    status_var.set(self._t(f"共找到 {len(sessions)} 个 Session", f"Found {len(sessions)} sessions"))
                     for index, item in enumerate(sessions):
                         tree.insert(
                             "",
@@ -904,14 +964,14 @@ class RecorderApp:
             nonlocal selected_path
             selection = tree.selection()
             if not selection:
-                messagebox.showinfo("提示", "请选择一个 session。", parent=dialog)
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
                 return
             selected_path = Path(str(sessions[int(selection[0])]["path"]))
             dialog.destroy()
 
-        ttk.Button(button_bar, text="刷新", command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
-        ttk.Button(button_bar, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(button_bar, text="继续录制所选 Session", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(button_bar, text=self._t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text=self._t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text=self._t("继续录制所选 Session", "Continue selected session"), command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
 
         tree.bind("<Double-1>", lambda _event: confirm())
         populate()
@@ -919,7 +979,7 @@ class RecorderApp:
         dialog.focus_force()
         self.root.wait_window(dialog)
         if selected_path is None and not sessions:
-            messagebox.showinfo("提示", f"未在以下目录找到可继续录制的 session:\n{recordings_root}", parent=self.root)
+            messagebox.showinfo(self._t("提示", "Notice"), self._t(f"未在以下目录找到可继续录制的 session:\n{recordings_root}", f"No resumable session was found under:\n{recordings_root}"), parent=self.root)
         return selected_path
 
     def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False) -> list[dict[str, object]]:
@@ -938,11 +998,55 @@ class RecorderApp:
         self.stop_button.configure(state=tk.NORMAL if is_recording and not self.stop_in_progress else tk.DISABLED)
         self.save_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.pause_resume_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
-        self.pause_resume_button.configure(text="继续录制" if self.engine.is_paused else "暂停录制")
+        self.pause_resume_button.configure(text=self._t("继续录制", "Resume") if self.engine.is_paused else self._t("暂停录制", "Pause"))
         self.comment_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.wait_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.screenshot_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.checkpoint_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
+
+    def _apply_ui_language(self) -> None:
+        self.root.title(self._t("Automation Recorder", "Automation Recorder"))
+        self.title_label.configure(text=self._t("Automation Recorder", "Automation Recorder"))
+        self.desc_label.configure(text=self._t("录制人工操作、截图和附加上下文，为后续自动化脚本 YAML 转换做准备。", "Record manual operations, screenshots, and context for later YAML automation conversion."))
+        self.info_frame.configure(text=self._t("Session", "Session"))
+        self.session_status_label.configure(text=self._t("状态:", "Status:"))
+        self.output_dir_label.configure(text=self._t("输出目录:", "Output folder:"))
+        self.button_frame.configure(text=self._t("操作", "Actions"))
+        self.start_button.configure(text=self._t("开始录制", "Start Recording"))
+        self.import_button.configure(text=self._t("导入并续录", "Import and Continue"))
+        self.stop_button.configure(text=self._t("停止录制", "Stop Recording"))
+        self.save_button.configure(text=self._t("保存", "Save"))
+        self.comment_button.configure(text=self._t("添加 Comment", "Add Comment"))
+        self.wait_button.configure(text=self._t("添加等待事件", "Add Wait Event"))
+        self.screenshot_button.configure(text=self._t("记录截图", "Capture Screenshot"))
+        self.checkpoint_button.configure(text=self._t("添加 AI Checkpoint", "Add AI Checkpoint"))
+        self.viewer_button.configure(text=self._t("查看录制内容", "Open Viewer"))
+        self.settings_button.configure(text=self._t("设置", "Settings"))
+        self.notes_frame.configure(text=self._t("说明", "Notes"))
+        self.notes_label.configure(text=self._t(
+            "1. 点击开始录制后，会先填写本次录制的 Session 元数据，再开始监听键盘、鼠标点击和滚轮事件。\n"
+            "2. Comment 通过鼠标拖拽选择截图区域，再填写大文本说明。\n"
+            "3. 等待事件支持框选等待区域并自动保存截图，当前第一版用于记录等待图片出现的步骤。\n"
+            "4. 记录截图支持手动选区并保存到当前 Session 的 screenshots，可通过 Ctrl+F4 快捷键快速触发。\n"
+            "5. AI Checkpoint 支持两张截图、区域视频录制、Query 调模型并保存返回内容，也支持 Ctrl+F5 快捷键快速打开。\n"
+            "6. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
+            "7. 支持暂停/继续录制，以及导入已有 session 后继续录制。\n"
+            "8. 停止录制会在后台收尾，不再阻塞整个窗口。\n"
+            "9. Session 元数据在录制完成后也可以在 Session Viewer 中继续修改。",
+            "1. When you start recording, the app first collects session metadata, then listens for keyboard, mouse-click, and wheel events.\n"
+            "2. Comment lets you drag-select a screenshot region and enter a detailed note.\n"
+            "3. Wait events let you select a wait region and save a screenshot for image-appearance wait steps.\n"
+            "4. Capture Screenshot saves a manual region into the current session screenshots folder and can be triggered with Ctrl+F4.\n"
+            "5. AI Checkpoint supports screenshots, region video capture, model queries, and saving the response; Ctrl+F5 also opens it quickly.\n"
+            "6. Save writes the current session snapshot and suggestions immediately.\n"
+            "7. Recording can be paused/resumed, and you can continue from an existing session.\n"
+            "8. Stopping recording completes background cleanup without blocking the window.\n"
+            "9. Session metadata can still be edited later in Session Viewer."
+        ))
+        self._refresh_controls()
+
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return pick_text(self.current_settings.ui_language, zh_text, en_text)
 
 
 def launch_app() -> None:

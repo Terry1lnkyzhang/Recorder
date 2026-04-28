@@ -29,6 +29,7 @@ from src.common.media_utils import load_video_preview_frame
 from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
 from src.common.session_discovery import find_latest_session_dir, scan_session_candidates
 from src.converter.compiler import build_atframework_yaml_dict, export_suggestions_to_atframework_yaml
+from src.recorder.i18n import pick_text
 from src.recorder.models import format_recorded_action, normalize_event_type, normalize_keyboard_key_name
 from src.recorder.dialogs import (
     AICheckpointDraft,
@@ -48,8 +49,10 @@ from .cleaning import CleaningSuggestion, apply_cleaning_suggestions, build_clea
 
 class RecorderViewerWindow:
     def __init__(self, master: tk.Misc, initial_path: Path | None = None) -> None:
+        self.settings_store = SettingsStore(get_settings_path())
+        self.ui_language = self.settings_store.load().ui_language
         self.window = tk.Toplevel(master)
-        self.window.title("Recorder Session Viewer")
+        self.window.title(self._t("Recorder Session Viewer", "Recorder Session Viewer"))
         self.window.geometry("1440x900")
         self.window.minsize(1180, 760)
 
@@ -102,35 +105,33 @@ class RecorderViewerWindow:
         self.export_yaml_running = False
         self.debug_run_running = False
         self.analysis_started_at = 0.0
-        self.analysis_status_base = "未执行 AI 分析"
+        self.analysis_status_base = self._t("未执行 AI 分析", "AI analysis has not been run")
         self.analysis_status_token = 0
         project_root = get_resource_root()
         self.project_root = project_root
         self.recordings_root = get_recordings_dir()
-        self.settings_store = SettingsStore(get_settings_path())
-
-        self.path_var = tk.StringVar(value="未加载 session")
-        self.summary_var = tk.StringVar(value="请选择录制目录")
+        self.path_var = tk.StringVar(value=self._t("未加载 session", "No session loaded"))
+        self.summary_var = tk.StringVar(value=self._t("请选择录制目录", "Select a recordings directory"))
         self.load_status_var = tk.StringVar(value="")
-        self.cleaning_var = tk.StringVar(value="未分析清洗建议")
-        self.ai_var = tk.StringVar(value="未执行 AI 分析")
-        self.suggestion_var = tk.StringVar(value="未生成调用建议")
-        self.parameter_progress_var = tk.StringVar(value="参数推荐批处理未执行")
-        self.coverage_status_var = tk.StringVar(value="请先执行 AI 分析，再进行覆盖判断")
-        self.parameter_status_var = tk.StringVar(value="请选择左侧步骤并先生成调用建议。")
+        self.cleaning_var = tk.StringVar(value=self._t("未分析清洗建议", "Cleaning suggestions have not been analyzed"))
+        self.ai_var = tk.StringVar(value=self._t("未执行 AI 分析", "AI analysis has not been run"))
+        self.suggestion_var = tk.StringVar(value=self._t("未生成调用建议", "No method suggestions generated"))
+        self.parameter_progress_var = tk.StringVar(value=self._t("参数推荐批处理未执行", "Parameter recommendation batch has not been run"))
+        self.coverage_status_var = tk.StringVar(value=self._t("请先执行 AI 分析，再进行覆盖判断", "Run AI analysis before checking coverage"))
+        self.parameter_status_var = tk.StringVar(value=self._t("请选择左侧步骤并先生成调用建议。", "Select steps on the left and generate method suggestions first."))
         self.preview_single_monitor_var = tk.BooleanVar(value=False)
-        self.media_summary_var = tk.StringVar(value="当前事件无媒体")
-        self.process_filter_var = tk.StringVar(value="全部进程")
-        self.event_type_filter_var = tk.StringVar(value="全部类型")
-        self.action_filter_var = tk.StringVar(value="全部动作")
-        self.process_filter_values: tuple[str, ...] = ("全部进程",)
-        self.event_type_filter_values: tuple[str, ...] = ("全部类型",)
-        self.action_filter_values: tuple[str, ...] = ("全部动作",)
+        self.media_summary_var = tk.StringVar(value=self._t("当前事件无媒体", "No media for the current event"))
+        self.process_filter_var = tk.StringVar(value=self._t("全部进程", "All Processes"))
+        self.event_type_filter_var = tk.StringVar(value=self._t("全部类型", "All Types"))
+        self.action_filter_var = tk.StringVar(value=self._t("全部动作", "All Actions"))
+        self.process_filter_values: tuple[str, ...] = (self._t("全部进程", "All Processes"),)
+        self.event_type_filter_values: tuple[str, ...] = (self._t("全部类型", "All Types"),)
+        self.action_filter_values: tuple[str, ...] = (self._t("全部动作", "All Actions"),)
         self.session_testcase_id_var = tk.StringVar()
         self.session_version_number_var = tk.StringVar()
         self.session_name_var = tk.StringVar()
         self.session_recorder_person_var = tk.StringVar()
-        self.session_is_prs_recording_var = tk.StringVar(value="是")
+        self.session_is_prs_recording_var = tk.StringVar(value=self._t("是", "Yes"))
         self.session_scope_var = tk.StringVar(value="All")
         self.session_metadata_ai_running = False
 
@@ -158,33 +159,33 @@ class RecorderViewerWindow:
         toolbar = ttk.Frame(self.window, padding=(16, 12))
         toolbar.pack(fill=tk.X)
 
-        ttk.Button(toolbar, text="选择 Session 目录", command=self.select_session_dir).pack(side=tk.LEFT)
-        ttk.Button(toolbar, text="打开当前 Session 目录", command=self.open_current_session_dir).pack(side=tk.LEFT, padx=(8, 0))
-        self.ai_button = ttk.Button(toolbar, text="AI分析", command=self.run_ai_analysis)
+        ttk.Button(toolbar, text=self._t("选择 Session 目录", "Select Session Folder"), command=self.select_session_dir).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text=self._t("打开当前 Session 目录", "Open Current Session Folder"), command=self.open_current_session_dir).pack(side=tk.LEFT, padx=(8, 0))
+        self.ai_button = ttk.Button(toolbar, text=self._t("AI分析", "AI Analysis"), command=self.run_ai_analysis)
         self.ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.selected_ai_button = ttk.Button(toolbar, text="AI分析选中行", command=self.run_selected_ai_analysis)
+        self.selected_ai_button = ttk.Button(toolbar, text=self._t("AI分析选中行", "Analyze Selected Rows"), command=self.run_selected_ai_analysis)
         self.selected_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.ai_process_summary_button = ttk.Button(toolbar, text="AI总结", command=self.run_ai_process_summary)
+        self.ai_process_summary_button = ttk.Button(toolbar, text=self._t("AI总结", "AI Summary"), command=self.run_ai_process_summary)
         self.ai_process_summary_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.load_ai_button = ttk.Button(toolbar, text="加载历史AI结果", command=self.load_historical_ai_analysis, state=tk.DISABLED)
+        self.load_ai_button = ttk.Button(toolbar, text=self._t("加载历史AI结果", "Load Historical AI Results"), command=self.load_historical_ai_analysis, state=tk.DISABLED)
         self.load_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.cancel_ai_button = ttk.Button(toolbar, text="终止AI分析", command=self.cancel_ai_analysis, state=tk.DISABLED)
+        self.cancel_ai_button = ttk.Button(toolbar, text=self._t("终止AI分析", "Cancel AI Analysis"), command=self.cancel_ai_analysis, state=tk.DISABLED)
         self.cancel_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.generate_suggestion_button = ttk.Button(toolbar, text="为当前步骤生成方法建议", command=self.run_method_suggestion_generation)
+        self.generate_suggestion_button = ttk.Button(toolbar, text=self._t("为当前步骤生成方法建议", "Generate Method Suggestions for Current Steps"), command=self.run_method_suggestion_generation)
         self.generate_suggestion_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.parameter_recommend_button = ttk.Button(toolbar, text="为当前步骤生成参数推荐", command=self.run_parameter_recommendation)
+        self.parameter_recommend_button = ttk.Button(toolbar, text=self._t("为当前步骤生成参数推荐", "Generate Parameter Suggestions for Current Steps"), command=self.run_parameter_recommendation)
         self.parameter_recommend_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.export_yaml_button = ttk.Button(toolbar, text="转成ATFramework YAML", command=self.export_atframework_yaml)
+        self.export_yaml_button = ttk.Button(toolbar, text=self._t("转成ATFramework YAML", "Export to ATFramework YAML"), command=self.export_atframework_yaml)
         self.export_yaml_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.debug_run_button = ttk.Button(toolbar, text="调试", command=self.debug_atframework_steps)
+        self.debug_run_button = ttk.Button(toolbar, text=self._t("调试", "Debug"), command=self.debug_atframework_steps)
         self.debug_run_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="全选步骤", command=self.select_all_events).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="应用AI删除建议", command=self.apply_ai_deletions).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="数据清洗", command=self.preview_cleaning).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="应用清洗", command=self.apply_cleaning,).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="清除高亮", command=self.clear_cleaning_highlight).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text="弹出事件列表", command=self.open_event_list_window).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(toolbar, text="进程筛选").pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(toolbar, text=self._t("全选步骤", "Select All Steps"), command=self.select_all_events).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text=self._t("应用AI删除建议", "Apply AI Deletion Suggestions"), command=self.apply_ai_deletions).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text=self._t("数据清洗", "Preview Cleaning"), command=self.preview_cleaning).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text=self._t("应用清洗", "Apply Cleaning"), command=self.apply_cleaning,).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text=self._t("清除高亮", "Clear Highlights"), command=self.clear_cleaning_highlight).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text=self._t("弹出事件列表", "Open Event List"), command=self.open_event_list_window).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(toolbar, text=self._t("进程筛选", "Process Filter")).pack(side=tk.LEFT, padx=(12, 0))
         self.process_filter_combo = ttk.Combobox(toolbar, textvariable=self.process_filter_var, state="readonly", width=24)
         self.process_filter_combo.pack(side=tk.LEFT, padx=(6, 0))
         self.process_filter_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_filter_changed())
@@ -207,13 +208,13 @@ class RecorderViewerWindow:
         content.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
 
         top = ttk.Panedwindow(content, orient=tk.HORIZONTAL)
-        table_frame = ttk.LabelFrame(content, text="事件列表")
+        table_frame = ttk.LabelFrame(content, text=self._t("事件列表", "Event List"))
         content.add(top, weight=6)
         content.add(table_frame, weight=4)
         content.bind("<Configure>", lambda _event: self._set_vertical_paned_ratio(content, 0.56), add="+")
 
-        image_frame = ttk.LabelFrame(top, text="媒体预览")
-        right = ttk.LabelFrame(top, text="事件明细")
+        image_frame = ttk.LabelFrame(top, text=self._t("媒体预览", "Media Preview"))
+        right = ttk.LabelFrame(top, text=self._t("事件明细", "Event Details"))
         top.add(image_frame, weight=7)
         top.add(right, weight=3)
         top.bind("<Configure>", lambda _event: self._set_paned_ratio(top, 0.75), add="+")
@@ -222,7 +223,7 @@ class RecorderViewerWindow:
         image_toolbar.pack(fill=tk.X, padx=12, pady=(8, 0))
         ttk.Checkbutton(
             image_toolbar,
-            text="仅预览有操作的单屏",
+            text=self._t("仅预览有操作的单屏", "Preview Only the Active Screen"),
             variable=self.preview_single_monitor_var,
             command=self._on_preview_mode_changed,
         ).pack(side=tk.LEFT)
@@ -242,14 +243,14 @@ class RecorderViewerWindow:
         self.tree.heading("idx", text="#")
         self.tree.heading("event_type", text=self._build_filter_heading_text("type"))
         self.tree.heading("action", text=self._build_filter_heading_text("action"))
-        self.tree.heading("time", text="时间")
+        self.tree.heading("time", text=self._t("时间", "Time"))
         self.tree.heading("process_name", text=self._build_filter_heading_text("process"))
-        self.tree.heading("method_suggestion", text="方法建议")
-        self.tree.heading("parameter_suggestion", text="参数建议")
+        self.tree.heading("method_suggestion", text=self._t("方法建议", "Method Suggestion"))
+        self.tree.heading("parameter_suggestion", text=self._t("参数建议", "Parameter Suggestion"))
         self.tree.heading("comment", text="Comment")
-        self.tree.heading("ai_note", text="AI看图")
-        self.tree.heading("ai_summary", text="AI总结")
-        self.tree.heading("module_suggestion", text="模块建议")
+        self.tree.heading("ai_note", text=self._t("AI看图", "AI Observation"))
+        self.tree.heading("ai_summary", text=self._t("AI总结", "AI Summary"))
+        self.tree.heading("module_suggestion", text=self._t("模块建议", "Module Suggestion"))
         self.tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
         self.tree.column("event_type", width=110, minwidth=92, anchor=tk.W, stretch=False)
         self.tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
@@ -290,11 +291,11 @@ class RecorderViewerWindow:
         self.ai_tab = ttk.Frame(self.details_notebook)
         self.ai_chat_tab = ttk.Frame(self.details_notebook)
         coverage_tab = ttk.Frame(self.details_notebook)
-        self.details_notebook.add(event_tab, text="事件明细")
-        self.details_notebook.add(metadata_tab, text="Session 元数据")
-        self.details_notebook.add(self.ai_tab, text="AI看图")
+        self.details_notebook.add(event_tab, text=self._t("事件明细", "Event Details"))
+        self.details_notebook.add(metadata_tab, text=self._t("Session 元数据", "Session Metadata"))
+        self.details_notebook.add(self.ai_tab, text=self._t("AI看图", "AI Observation"))
         self.details_notebook.add(self.ai_chat_tab, text="AI Chat")
-        self.details_notebook.add(coverage_tab, text="AI总结/覆盖")
+        self.details_notebook.add(coverage_tab, text=self._t("AI总结/覆盖", "AI Summary/Coverage"))
 
         self.details_text = tk.Text(event_tab, wrap=tk.WORD, font=("Consolas", 10))
         self.details_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
@@ -315,8 +316,8 @@ class RecorderViewerWindow:
         parent.rowconfigure(7, weight=1)
         parent.rowconfigure(8, weight=1)
 
-        ttk.Label(parent, text="是否PRS用例录制").grid(row=0, column=0, sticky=tk.W, padx=8, pady=(12, 6))
-        self.session_prs_combo = ttk.Combobox(parent, textvariable=self.session_is_prs_recording_var, state="readonly", values=("是", "否"), width=12)
+        ttk.Label(parent, text=self._t("是否PRS用例录制", "PRS Test Case Recording")).grid(row=0, column=0, sticky=tk.W, padx=8, pady=(12, 6))
+        self.session_prs_combo = ttk.Combobox(parent, textvariable=self.session_is_prs_recording_var, state="readonly", values=(self._t("是", "Yes"), self._t("否", "No")), width=12)
         self.session_prs_combo.grid(row=0, column=1, sticky=tk.W, padx=8, pady=(12, 6))
         self.session_prs_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_session_metadata_mode())
 
@@ -333,22 +334,22 @@ class RecorderViewerWindow:
         self.session_name_label = ttk.Label(parent, text="Name")
         self.session_name_entry = ttk.Entry(parent, textvariable=self.session_name_var)
 
-        ttk.Label(parent, text="录制人员").grid(row=3, column=0, sticky=tk.W, padx=8, pady=6)
+        ttk.Label(parent, text=self._t("录制人员", "Recorder")).grid(row=3, column=0, sticky=tk.W, padx=8, pady=6)
         ttk.Entry(parent, textvariable=self.session_recorder_person_var).grid(row=3, column=1, sticky=tk.EW, padx=8, pady=6)
 
         ttk.Label(parent, text="Design Steps").grid(row=4, column=0, sticky=tk.NW, padx=8, pady=6)
         self.session_design_steps_text = tk.Text(parent, height=10, wrap=tk.WORD, font=("Consolas", 10))
         self.session_design_steps_text.grid(row=4, column=1, sticky="nsew", padx=8, pady=6)
 
-        ttk.Label(parent, text="前置条件").grid(row=6, column=0, sticky=tk.NW, padx=8, pady=6)
+        ttk.Label(parent, text=self._t("前置条件", "Preconditions")).grid(row=6, column=0, sticky=tk.NW, padx=8, pady=6)
         self.session_preconditions_text = tk.Text(parent, height=4, wrap=tk.WORD, font=("Consolas", 10))
         self.session_preconditions_text.grid(row=6, column=1, sticky="nsew", padx=8, pady=6)
 
-        ttk.Label(parent, text="配置要求").grid(row=7, column=0, sticky=tk.NW, padx=8, pady=6)
+        ttk.Label(parent, text=self._t("配置要求", "Configuration Requirements")).grid(row=7, column=0, sticky=tk.NW, padx=8, pady=6)
         self.session_configuration_requirements_text = tk.Text(parent, height=4, wrap=tk.WORD, font=("Consolas", 10))
         self.session_configuration_requirements_text.grid(row=7, column=1, sticky="nsew", padx=8, pady=6)
 
-        ttk.Label(parent, text="额外设备").grid(row=8, column=0, sticky=tk.NW, padx=8, pady=6)
+        ttk.Label(parent, text=self._t("额外设备", "Extra Devices")).grid(row=8, column=0, sticky=tk.NW, padx=8, pady=6)
         self.session_extra_devices_text = tk.Text(parent, height=4, wrap=tk.WORD, font=("Consolas", 10))
         self.session_extra_devices_text.grid(row=8, column=1, sticky="nsew", padx=8, pady=6)
 
@@ -356,19 +357,19 @@ class RecorderViewerWindow:
         self.session_scope_combo = ttk.Combobox(parent, textvariable=self.session_scope_var, state="readonly", values=("All", "Sub"), width=12)
         self.session_scope_combo.grid(row=9, column=1, sticky=tk.W, padx=8, pady=6)
 
-        ttk.Label(parent, text="以上 3 项建议按词语/短语填写，每行一个。", justify=tk.LEFT).grid(row=10, column=1, sticky=tk.W, padx=8, pady=(0, 4))
+        ttk.Label(parent, text=self._t("以上 3 项建议按词语/短语填写，每行一个。", "For the three fields above, use short words or phrases, one per line."), justify=tk.LEFT).grid(row=10, column=1, sticky=tk.W, padx=8, pady=(0, 4))
 
         actions = ttk.Frame(parent)
         actions.grid(row=11, column=0, columnspan=2, sticky=tk.EW, padx=8, pady=(6, 12))
-        self.session_metadata_ai_button = ttk.Button(actions, text="AI分析", command=self.run_session_metadata_ai_analysis)
+        self.session_metadata_ai_button = ttk.Button(actions, text=self._t("AI分析", "AI Analysis"), command=self.run_session_metadata_ai_analysis)
         self.session_metadata_ai_button.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="保存 Session 元数据", command=self.save_session_metadata).pack(side=tk.LEFT)
+        ttk.Button(actions, text=self._t("保存 Session 元数据", "Save Session Metadata"), command=self.save_session_metadata).pack(side=tk.LEFT)
         self.session_metadata_status_var = tk.StringVar(value="")
         ttk.Label(actions, textvariable=self.session_metadata_status_var).pack(side=tk.LEFT, padx=(12, 0))
         self._refresh_session_metadata_mode()
 
     def _is_session_prs_recording_selected(self) -> bool:
-        return self.session_is_prs_recording_var.get().strip() != "否"
+        return self.session_is_prs_recording_var.get().strip() != self._t("否", "No")
 
     def _refresh_session_metadata_mode(self) -> None:
         is_prs = self._is_session_prs_recording_selected()
@@ -418,10 +419,10 @@ class RecorderViewerWindow:
 
     def open_current_session_dir(self) -> None:
         if not self.session_dir:
-            messagebox.showinfo("提示", "当前还没有加载 Session，请先选择 Session 目录。", parent=self.window)
+            messagebox.showinfo(self._t("提示", "Notice"), self._t("当前还没有加载 Session，请先选择 Session 目录。", "No session is loaded. Select a session folder first."), parent=self.window)
             return
         if not self.session_dir.exists():
-            messagebox.showerror("打开失败", f"目录不存在:\n{self.session_dir}", parent=self.window)
+            messagebox.showerror(self._t("打开失败", "Open failed"), self._t(f"目录不存在:\n{self.session_dir}", f"Folder does not exist:\n{self.session_dir}"), parent=self.window)
             return
         self._open_path(self.session_dir)
 
@@ -439,26 +440,26 @@ class RecorderViewerWindow:
 
     def _show_session_picker(self) -> None:
         dialog = tk.Toplevel(self.window)
-        dialog.title("选择 Session")
+        dialog.title(self._t("选择 Session", "Select Session"))
         dialog.geometry("760x520")
         dialog.transient(self.window)
         dialog.grab_set()
 
-        ttk.Label(dialog, text="从 recordings 中选择一个 session。", padding=(16, 12, 16, 4)).pack(anchor=tk.W)
+        ttk.Label(dialog, text=self._t("从 recordings 中选择一个 session。", "Select a session from recordings."), padding=(16, 12, 16, 4)).pack(anchor=tk.W)
         path_var = tk.StringVar(value=str(self.recordings_root))
         ttk.Label(dialog, textvariable=path_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
         columns = ("name", "modified", "events")
         tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
-        tree.heading("name", text="Session 目录")
-        tree.heading("modified", text="最后修改时间")
-        tree.heading("events", text="事件数")
+        tree.heading("name", text=self._t("Session 目录", "Session Folder"))
+        tree.heading("modified", text=self._t("最后修改时间", "Last Modified"))
+        tree.heading("events", text=self._t("事件数", "Events"))
         tree.column("name", width=330, anchor=tk.W)
         tree.column("modified", width=180, anchor=tk.W, stretch=False)
         tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
         tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
 
-        status_var = tk.StringVar(value="正在扫描 Session...")
+        status_var = tk.StringVar(value=self._t("正在扫描 Session...", "Scanning sessions..."))
         ttk.Label(dialog, textvariable=status_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
         button_bar = ttk.Frame(dialog, padding=(16, 0, 16, 16))
@@ -469,7 +470,7 @@ class RecorderViewerWindow:
         def populate(force_refresh: bool = False) -> None:
             self._session_picker_scan_token += 1
             token = self._session_picker_scan_token
-            status_var.set("正在扫描 Session...")
+            status_var.set(self._t("正在扫描 Session...", "Scanning sessions..."))
             for item_id in tree.get_children():
                 tree.delete(item_id)
 
@@ -477,7 +478,7 @@ class RecorderViewerWindow:
                 try:
                     items = self._find_session_candidates(self.recordings_root, force_refresh=force_refresh)
                 except Exception as exc:
-                    self.window.after(0, lambda: status_var.set(f"扫描 Session 失败: {exc}"))
+                    self.window.after(0, lambda: status_var.set(self._t(f"扫描 Session 失败: {exc}", f"Failed to scan sessions: {exc}")))
                     return
 
                 def apply_results() -> None:
@@ -486,7 +487,7 @@ class RecorderViewerWindow:
                     sessions.clear()
                     sessions.extend(items)
                     path_var.set(str(self.recordings_root))
-                    status_var.set(f"共找到 {len(sessions)} 个 Session")
+                    status_var.set(self._t(f"共找到 {len(sessions)} 个 Session", f"Found {len(sessions)} sessions"))
                     for index, item in enumerate(sessions):
                         tree.insert(
                             "",
@@ -505,16 +506,16 @@ class RecorderViewerWindow:
         def confirm() -> None:
             selection = tree.selection()
             if not selection:
-                messagebox.showinfo("提示", "请选择一个 session。", parent=dialog)
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
                 return
             session_dir = Path(str(sessions[int(selection[0])]["path"]))
             dialog.destroy()
             self.load_session(session_dir)
 
-        ttk.Button(button_bar, text="刷新", command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
-        ttk.Button(button_bar, text="打开 recordings 目录", command=lambda: self._open_path(self.recordings_root)).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(button_bar, text="加载所选 Session", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(button_bar, text=self._t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text=self._t("打开 recordings 目录", "Open recordings folder"), command=lambda: self._open_path(self.recordings_root)).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text=self._t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text=self._t("加载所选 Session", "Load Selected Session"), command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
 
         tree.bind("<Double-1>", lambda _event: confirm())
         populate()
@@ -524,11 +525,11 @@ class RecorderViewerWindow:
     def _prompt_session_to_import(self) -> Path | None:
         sessions = self._find_session_candidates(self.recordings_root)
         if not sessions:
-            messagebox.showinfo("提示", f"未在以下目录找到可导入的 session:\n{self.recordings_root}", parent=self.window)
+            messagebox.showinfo(self._t("提示", "Notice"), self._t(f"未在以下目录找到可导入的 session:\n{self.recordings_root}", f"No importable sessions were found under:\n{self.recordings_root}"), parent=self.window)
             return None
 
         dialog = tk.Toplevel(self.window)
-        dialog.title("选择要导入的 Session")
+        dialog.title(self._t("选择要导入的 Session", "Select a Session to Import"))
         dialog.geometry("760x520")
         dialog.minsize(680, 420)
         dialog.transient(self.window)
@@ -536,14 +537,14 @@ class RecorderViewerWindow:
 
         selected_path: Path | None = None
 
-        ttk.Label(dialog, text="请选择一个已有 session 导入到当前插入位置。", padding=(16, 12, 16, 4)).pack(anchor=tk.W)
+        ttk.Label(dialog, text=self._t("请选择一个已有 session 导入到当前插入位置。", "Select an existing session to import at the current insertion point."), padding=(16, 12, 16, 4)).pack(anchor=tk.W)
         ttk.Label(dialog, text=str(self.recordings_root), padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
         columns = ("name", "modified", "events")
         tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
-        tree.heading("name", text="Session 目录")
-        tree.heading("modified", text="最后修改时间")
-        tree.heading("events", text="事件数")
+        tree.heading("name", text=self._t("Session 目录", "Session Folder"))
+        tree.heading("modified", text=self._t("最后修改时间", "Last Modified"))
+        tree.heading("events", text=self._t("事件数", "Events"))
         tree.column("name", width=360, anchor=tk.W)
         tree.column("modified", width=200, anchor=tk.W, stretch=False)
         tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
@@ -568,17 +569,17 @@ class RecorderViewerWindow:
             nonlocal selected_path
             selection = tree.selection()
             if not selection:
-                messagebox.showinfo("提示", "请选择一个 session。", parent=dialog)
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
                 return
             candidate = Path(str(sessions[int(selection[0])]["path"])).resolve()
             if self.session_dir and candidate == self.session_dir.resolve():
-                messagebox.showinfo("提示", "不能导入当前正在查看的 session。", parent=dialog)
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("不能导入当前正在查看的 session。", "You cannot import the session currently being viewed."), parent=dialog)
                 return
             selected_path = candidate
             dialog.destroy()
 
-        ttk.Button(button_bar, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(button_bar, text="导入所选 Session", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(button_bar, text=self._t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text=self._t("导入所选 Session", "Import Selected Session"), command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
 
         tree.bind("<Double-1>", lambda _event: confirm())
         dialog.lift()
@@ -595,18 +596,18 @@ class RecorderViewerWindow:
             return
 
         popup = tk.Toplevel(self.window)
-        popup.title("事件列表")
+        popup.title(self._t("事件列表", "Event List"))
         popup.geometry("1320x720")
         popup.minsize(960, 520)
         self.event_list_window = popup
 
         toolbar = ttk.Frame(popup, padding=(12, 12, 12, 0))
         toolbar.pack(fill=tk.X)
-        ttk.Label(toolbar, text="进程筛选").pack(side=tk.LEFT)
+        ttk.Label(toolbar, text=self._t("进程筛选", "Process Filter")).pack(side=tk.LEFT)
         popup_filter = ttk.Combobox(toolbar, textvariable=self.process_filter_var, state="readonly", width=24)
         popup_filter.pack(side=tk.LEFT, padx=(6, 0))
         popup_filter.bind("<<ComboboxSelected>>", lambda _event: self._on_filter_changed())
-        self.event_list_status_var = tk.StringVar(value="准备加载事件列表")
+        self.event_list_status_var = tk.StringVar(value=self._t("准备加载事件列表", "Preparing to load the event list"))
         ttk.Label(toolbar, textvariable=self.event_list_status_var).pack(side=tk.LEFT, padx=(12, 0))
         self.popup_process_filter_combo = popup_filter
         self._sync_filter_combo_values()
@@ -648,14 +649,14 @@ class RecorderViewerWindow:
         tree.heading("idx", text="#")
         tree.heading("event_type", text=self._build_filter_heading_text("type"))
         tree.heading("action", text=self._build_filter_heading_text("action"))
-        tree.heading("time", text="时间")
+        tree.heading("time", text=self._t("时间", "Time"))
         tree.heading("process_name", text=self._build_filter_heading_text("process"))
-        tree.heading("method_suggestion", text="方法建议")
-        tree.heading("parameter_suggestion", text="参数建议")
+        tree.heading("method_suggestion", text=self._t("方法建议", "Method Suggestion"))
+        tree.heading("parameter_suggestion", text=self._t("参数建议", "Parameter Suggestion"))
         tree.heading("comment", text="Comment")
-        tree.heading("ai_note", text="AI看图")
-        tree.heading("ai_summary", text="AI总结")
-        tree.heading("module_suggestion", text="模块建议")
+        tree.heading("ai_note", text=self._t("AI看图", "AI Observation"))
+        tree.heading("ai_summary", text=self._t("AI总结", "AI Summary"))
+        tree.heading("module_suggestion", text=self._t("模块建议", "Module Suggestion"))
         tree.column("idx", width=42, minwidth=36, anchor=tk.CENTER, stretch=False)
         tree.column("event_type", width=110, minwidth=92, anchor=tk.W, stretch=False)
         tree.column("action", width=92, minwidth=76, anchor=tk.W, stretch=False)
@@ -677,7 +678,7 @@ class RecorderViewerWindow:
         self._sync_filter_combo_values()
         total = len(self._pending_event_list_rows)
         if self.event_list_status_var is not None:
-            self.event_list_status_var.set(f"正在加载事件 0/{total}")
+            self.event_list_status_var.set(self._t(f"正在加载事件 0/{total}", f"Loading events 0/{total}"))
         if not total:
             return
         self._load_next_event_list_batch(0)
@@ -711,12 +712,12 @@ class RecorderViewerWindow:
         inserted_count += len(batch)
         total = inserted_count + len(self._pending_event_list_rows)
         if self.event_list_status_var is not None:
-            self.event_list_status_var.set(f"正在加载事件 {inserted_count}/{total}")
+            self.event_list_status_var.set(self._t(f"正在加载事件 {inserted_count}/{total}", f"Loading events {inserted_count}/{total}"))
 
         if inserted_count >= total:
             self._event_list_reload_after_id = None
             if self.event_list_status_var is not None:
-                self.event_list_status_var.set(f"已加载 {total} 条事件")
+                self.event_list_status_var.set(self._t(f"已加载 {total} 条事件", f"Loaded {total} events"))
             row_index = self._get_primary_selected_row_index()
             if row_index is not None and self.event_list_tree.exists(str(row_index)):
                 self.event_list_tree.selection_set(str(row_index))
@@ -732,11 +733,20 @@ class RecorderViewerWindow:
         selection = self.event_list_tree.selection()
         if not selection:
             return
-        try:
-            row_index = int(selection[0])
-        except ValueError:
+        row_indexes: list[int] = []
+        for item_id in selection:
+            try:
+                row_indexes.append(int(item_id))
+            except ValueError:
+                continue
+        row_indexes = sorted(set(row_indexes))
+        if not row_indexes:
             return
-        self._select_row_index(row_index, source_tree=self.event_list_tree)
+        try:
+            focus_index = int(self.event_list_tree.focus() or selection[0])
+        except ValueError:
+            focus_index = row_indexes[0]
+        self._set_selected_row_indexes(row_indexes, focus_index=focus_index, source_tree=self.event_list_tree)
 
     def _close_event_list_window(self) -> None:
         self._cancel_event_list_reload()
@@ -760,19 +770,19 @@ class RecorderViewerWindow:
     def load_session(self, session_dir: Path) -> None:
         session_path = session_dir / "session.json"
         if not session_path.exists():
-            messagebox.showerror("加载失败", f"未找到 session.json:\n{session_path}", parent=self.window)
+            messagebox.showerror(self._t("加载失败", "Load failed"), self._t(f"未找到 session.json:\n{session_path}", f"session.json was not found:\n{session_path}"), parent=self.window)
             return
 
         self._session_load_token += 1
         token = self._session_load_token
         self.path_var.set(str(session_dir))
-        self.load_status_var.set(f"正在加载 Session: {session_dir.name}")
+        self.load_status_var.set(self._t(f"正在加载 Session: {session_dir.name}", f"Loading session: {session_dir.name}"))
 
         def worker() -> None:
             try:
                 payload = json.loads(session_path.read_text(encoding="utf-8"))
                 if not isinstance(payload, dict):
-                    raise ValueError("session.json 格式无效")
+                    raise ValueError(self._t("session.json 格式无效", "session.json has an invalid format"))
             except Exception as exc:
                 self.window.after(0, lambda: self._on_load_session_failed(token, session_path, str(exc)))
                 return
@@ -785,7 +795,7 @@ class RecorderViewerWindow:
         if token != self._session_load_token:
             return
         self.load_status_var.set("")
-        messagebox.showerror("加载失败", f"无法读取 session.json:\n{session_path}\n\n{message}", parent=self.window)
+        messagebox.showerror(self._t("加载失败", "Load failed"), self._t(f"无法读取 session.json:\n{session_path}\n\n{message}", f"Unable to read session.json:\n{session_path}\n\n{message}"), parent=self.window)
 
     def _apply_loaded_session(self, token: int, session_dir: Path, payload: dict[str, object]) -> None:
         if token != self._session_load_token:
@@ -804,11 +814,11 @@ class RecorderViewerWindow:
         self.step_module_suggestions = {}
         self.step_parameter_summaries = {}
         self._clear_parameter_chat_history()
-        self.cleaning_var.set("未分析清洗建议")
+        self.cleaning_var.set(self._t("未分析清洗建议", "Cleaning suggestions have not been analyzed"))
         self.ai_var.set(self._build_initial_ai_status_text(session_dir))
         self.suggestion_var.set(self._build_initial_suggestion_status_text(session_dir))
-        self.parameter_progress_var.set("参数推荐批处理未执行")
-        self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
+        self.parameter_progress_var.set(self._t("参数推荐批处理未执行", "Parameter recommendation batch has not been run"))
+        self.parameter_status_var.set(self._t("请选择左侧步骤并先生成调用建议。", "Select steps on the left and generate method suggestions first."))
         self._set_text_widget(self.parameter_result_text, "")
         self._update_historical_ai_button_state()
         self._restore_historical_analysis_outputs()
@@ -821,7 +831,7 @@ class RecorderViewerWindow:
 
     def _build_session_summary_text(self) -> str:
         if not self.session_data:
-            return "请选择录制目录"
+            return self._t("请选择录制目录", "Select a recordings directory")
         metadata = self._get_session_metadata()
         is_prs_recording = metadata.get("is_prs_recording", True)
         testcase_id = metadata.get("testcase_id", "")
@@ -842,11 +852,11 @@ class RecorderViewerWindow:
         if not is_prs_recording and name:
             metadata_bits.append(f"Name={name}")
         if recorder_person:
-            metadata_bits.append(f"录制人员={recorder_person}")
+            metadata_bits.append(self._t(f"录制人员={recorder_person}", f"Recorder={recorder_person}"))
         metadata_text = f" | {' | '.join(metadata_bits)}" if metadata_bits else ""
-        return (
-            f"session_id={self.session_data.get('session_id', '')} | 事件数={len(self.event_rows)} | 评论数={len(self.session_data.get('comments', []))} "
-            f"| checkpoint数={len(self.session_data.get('checkpoints', []))}{metadata_text}"
+        return self._t(
+            f"session_id={self.session_data.get('session_id', '')} | 事件数={len(self.event_rows)} | 评论数={len(self.session_data.get('comments', []))} | checkpoint数={len(self.session_data.get('checkpoints', []))}{metadata_text}",
+            f"session_id={self.session_data.get('session_id', '')} | events={len(self.event_rows)} | comments={len(self.session_data.get('comments', []))} | checkpoints={len(self.session_data.get('checkpoints', []))}{metadata_text}",
         )
 
     def _get_session_metadata(self) -> dict[str, object]:
@@ -895,7 +905,7 @@ class RecorderViewerWindow:
 
     def _load_session_metadata_editor(self) -> None:
         metadata = self._get_session_metadata()
-        self.session_is_prs_recording_var.set("是" if bool(metadata["is_prs_recording"]) else "否")
+        self.session_is_prs_recording_var.set(self._t("是", "Yes") if bool(metadata["is_prs_recording"]) else self._t("否", "No"))
         self.session_testcase_id_var.set(metadata["testcase_id"])
         self.session_version_number_var.set(metadata["version_number"])
         self.session_name_var.set(str(metadata["name"]))
@@ -927,7 +937,7 @@ class RecorderViewerWindow:
         if not str(payload.get("design_steps", "")).strip():
             return "请输入 Design Steps。"
         if str(payload.get("scope", "")).strip() not in {"All", "Sub"}:
-            return "请选择 Scope。"
+            return self._t("请选择 Scope。", "Select a scope.")
         return None
 
     def run_session_metadata_ai_analysis(self) -> None:
@@ -937,11 +947,11 @@ class RecorderViewerWindow:
         metadata_payload = self._collect_session_metadata_payload()
         error_message = self._validate_session_metadata_payload(metadata_payload)
         if error_message:
-            messagebox.showerror("元数据未填写完整", error_message, parent=self.window)
+            messagebox.showerror(self._t("元数据未填写完整", "Incomplete metadata"), error_message, parent=self.window)
             return
 
         self.session_metadata_ai_running = True
-        self.session_metadata_status_var.set("AI分析中...")
+        self.session_metadata_status_var.set(self._t("AI分析中...", "AI analysis in progress..."))
         self.session_metadata_ai_button.configure(state=tk.DISABLED)
 
         def worker() -> None:
@@ -956,18 +966,18 @@ class RecorderViewerWindow:
 
     def save_session_metadata(self) -> None:
         if not self.session_data or not self.session_dir:
-            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            messagebox.showinfo(self._t("提示", "Notice"), self._t("请先加载 Session。", "Load a session first."), parent=self.window)
             return
 
         metadata_payload = self._collect_session_metadata_payload()
         error_message = self._validate_session_metadata_payload(metadata_payload)
         if error_message:
-            messagebox.showerror("元数据未填写完整", error_message, parent=self.window)
+            messagebox.showerror(self._t("元数据未填写完整", "Incomplete metadata"), error_message, parent=self.window)
             return
         if should_prompt_ai_analysis(metadata_payload):
-            if messagebox.askyesno("AI分析", "前置条件、配置要求、额外设备当前都为空，是否先让 AI 根据 Design Steps 生成建议？", parent=self.window):
+            if messagebox.askyesno(self._t("AI分析", "AI Analysis"), self._t("前置条件、配置要求、额外设备当前都为空，是否先让 AI 根据 Design Steps 生成建议？", "Preconditions, configuration requirements, and extra devices are empty. Let AI generate suggestions from the design steps first?"), parent=self.window):
                 self.session_metadata_ai_running = True
-                self.session_metadata_status_var.set("AI分析中...")
+                self.session_metadata_status_var.set(self._t("AI分析中...", "AI analysis in progress..."))
                 self.session_metadata_ai_button.configure(state=tk.DISABLED)
 
                 def worker() -> None:
@@ -1018,7 +1028,7 @@ class RecorderViewerWindow:
     def _on_session_metadata_ai_success(self, result, save_after: bool, metadata_payload: dict[str, object]) -> None:
         self.session_metadata_ai_running = False
         self.session_metadata_ai_button.configure(state=tk.NORMAL)
-        self.session_metadata_status_var.set("AI分析完成")
+        self.session_metadata_status_var.set(self._t("AI分析完成", "AI analysis complete"))
         self._set_text_widget(self.session_preconditions_text, merge_keyword_text(self.session_preconditions_text.get("1.0", tk.END), result.preconditions))
         self._set_text_widget(
             self.session_configuration_requirements_text,
@@ -1031,13 +1041,13 @@ class RecorderViewerWindow:
             return
         summary = build_missing_summary(result)
         if summary:
-            messagebox.showinfo("AI分析建议", summary, parent=self.window)
+            messagebox.showinfo(self._t("AI分析建议", "AI suggestions"), summary, parent=self.window)
 
     def _on_session_metadata_ai_failed(self, message: str) -> None:
         self.session_metadata_ai_running = False
         self.session_metadata_ai_button.configure(state=tk.NORMAL)
-        self.session_metadata_status_var.set("AI分析失败")
-        messagebox.showerror("AI分析失败", message, parent=self.window)
+        self.session_metadata_status_var.set(self._t("AI分析失败", "AI analysis failed"))
+        messagebox.showerror(self._t("AI分析失败", "AI analysis failed"), message, parent=self.window)
 
     def _on_session_metadata_validation_failed(self, metadata_payload: dict[str, object], message: str) -> None:
         self.session_metadata_ai_running = False
@@ -1169,6 +1179,28 @@ class RecorderViewerWindow:
         if self.popup_process_filter_combo and self.popup_process_filter_combo.winfo_exists():
             self.popup_process_filter_combo.configure(values=process_values)
 
+    def _default_filter_value(self, column_name: str) -> str:
+        if column_name == "process":
+            return self._t("全部进程", "All Processes")
+        if column_name == "type":
+            return self._t("全部类型", "All Types")
+        if column_name == "action":
+            return self._t("全部动作", "All Actions")
+        return ""
+
+    def _default_filter_aliases(self, column_name: str) -> set[str]:
+        if column_name == "process":
+            return {"全部进程", "All Processes"}
+        if column_name == "type":
+            return {"全部类型", "All Types"}
+        if column_name == "action":
+            return {"全部动作", "All Actions"}
+        return set()
+
+    def _is_default_filter_selection(self, column_name: str, selected_value: str) -> bool:
+        value = selected_value.strip()
+        return not value or value in self._default_filter_aliases(column_name)
+
     def _refresh_filter_options(self) -> None:
         process_names = sorted(
             {
@@ -1177,12 +1209,12 @@ class RecorderViewerWindow:
                 if self._extract_process_name(event) and self._matches_filter_selection(event, ignore_filter="process")
             }
         )
-        process_values = ["全部进程", *process_names]
+        process_values = [self._default_filter_value("process"), *process_names]
         self.process_filter_values = tuple(process_values)
         self.process_filter_combo.configure(values=process_values)
         current_process = self.process_filter_var.get().strip()
         if current_process not in process_values:
-            self.process_filter_var.set("全部进程")
+            self.process_filter_var.set(self._default_filter_value("process"))
 
         event_types = sorted(
             {
@@ -1191,11 +1223,11 @@ class RecorderViewerWindow:
                 if self._extract_event_type(event) and self._matches_filter_selection(event, ignore_filter="type")
             }
         )
-        type_values = ["全部类型", *event_types]
+        type_values = [self._default_filter_value("type"), *event_types]
         self.event_type_filter_values = tuple(type_values)
         current_type = self.event_type_filter_var.get().strip()
         if current_type not in type_values:
-            self.event_type_filter_var.set("全部类型")
+            self.event_type_filter_var.set(self._default_filter_value("type"))
 
         actions = sorted(
             {
@@ -1204,11 +1236,11 @@ class RecorderViewerWindow:
                 if self._extract_event_action(event) and self._matches_filter_selection(event, ignore_filter="action")
             }
         )
-        action_values = ["全部动作", *actions]
+        action_values = [self._default_filter_value("action"), *actions]
         self.action_filter_values = tuple(action_values)
         current_action = self.action_filter_var.get().strip()
         if current_action not in action_values:
-            self.action_filter_var.set("全部动作")
+            self.action_filter_var.set(self._default_filter_value("action"))
 
         self._sync_filter_combo_values()
         self._update_filter_headings()
@@ -1220,19 +1252,16 @@ class RecorderViewerWindow:
     def _build_filter_heading_text(self, column_name: str) -> str:
         if column_name == "process":
             selected_value = self.process_filter_var.get().strip()
-            base_text = "进程"
-            default_value = "全部进程"
+            base_text = self._t("进程", "Process")
         elif column_name == "type":
             selected_value = self.event_type_filter_var.get().strip()
-            base_text = "类型"
-            default_value = "全部类型"
+            base_text = self._t("类型", "Type")
         elif column_name == "action":
             selected_value = self.action_filter_var.get().strip()
-            base_text = "动作"
-            default_value = "全部动作"
+            base_text = self._t("动作", "Action")
         else:
             return column_name
-        suffix = " ▼*" if selected_value and selected_value != default_value else " ▼"
+        suffix = " ▼*" if not self._is_default_filter_selection(column_name, selected_value) else " ▼"
         return f"{base_text}{suffix}"
 
     def _update_filter_headings(self) -> None:
@@ -1265,15 +1294,15 @@ class RecorderViewerWindow:
     def _show_tree_column_filter_menu(self, column_name: str, x_root: int, y_root: int) -> None:
         menu = tk.Menu(self.window, tearoff=False)
         if column_name == "process":
-            title = "进程筛选"
+            title = self._t("进程筛选", "Process Filter")
             values = self.process_filter_values
             selected_var = self.process_filter_var
         elif column_name == "type":
-            title = "类型筛选"
+            title = self._t("类型筛选", "Type Filter")
             values = self.event_type_filter_values
             selected_var = self.event_type_filter_var
         else:
-            title = "动作筛选"
+            title = self._t("动作筛选", "Action Filter")
             values = self.action_filter_values
             selected_var = self.action_filter_var
 
@@ -1324,7 +1353,8 @@ class RecorderViewerWindow:
         menu.add_cascade(label="插入步骤", menu=insert_steps_menu)
         menu.add_command(label="插入 CheckPoint", command=lambda idx=row_index: self.insert_checkpoint_after_row(idx))
         menu.add_separator()
-        menu.add_command(label="复制当前行", command=lambda idx=row_index: self.copy_event_row(idx))
+        copy_label = "复制选中行" if len(selected_rows) > 1 else "复制当前行"
+        menu.add_command(label=copy_label, command=lambda idx=row_index: self.copy_event_row(idx))
         paste_state = tk.NORMAL if self.copied_event_rows else tk.DISABLED
         menu.add_command(label="粘贴", command=lambda idx=row_index: self.paste_event_rows_after_row(idx), state=paste_state)
         menu.add_separator()
@@ -1400,15 +1430,15 @@ class RecorderViewerWindow:
     def _matches_filter_selection(self, event: dict[str, object], ignore_filter: str | None = None) -> bool:
         if ignore_filter != "process":
             selected_process = self.process_filter_var.get().strip()
-            if selected_process and selected_process != "全部进程" and self._extract_process_name(event) != selected_process:
+            if not self._is_default_filter_selection("process", selected_process) and self._extract_process_name(event) != selected_process:
                 return False
         if ignore_filter != "type":
             selected_type = self.event_type_filter_var.get().strip()
-            if selected_type and selected_type != "全部类型" and self._extract_event_type(event) != selected_type:
+            if not self._is_default_filter_selection("type", selected_type) and self._extract_event_type(event) != selected_type:
                 return False
         if ignore_filter != "action":
             selected_action = self.action_filter_var.get().strip()
-            if selected_action and selected_action != "全部动作" and self._extract_event_action(event) != selected_action:
+            if not self._is_default_filter_selection("action", selected_action) and self._extract_event_action(event) != selected_action:
                 return False
         return True
 
@@ -1679,29 +1709,73 @@ class RecorderViewerWindow:
         if not confirmed:
             return
 
-        self.event_rows = apply_cleaning_suggestions(self.event_rows, self.cleaning_suggestions)
+        original_events = [copy.deepcopy(event) for event in self.event_rows]
+        cleaned_events = apply_cleaning_suggestions(self.event_rows, self.cleaning_suggestions)
+        step_id_mapping = self._build_step_id_mapping_after_cleaning(original_events, cleaned_events)
+        affected_row_indexes = self._build_cleaning_affected_row_indexes(step_id_mapping)
+        self.event_rows = cleaned_events
         if self.session_data is not None:
             self.session_data["events"] = self.event_rows
-        self.ai_analysis = None
-        self.ai_step_tags = {}
-        self.ai_step_texts = {}
-        self.ai_process_summary_texts = {}
-        self.suggestion_result = None
-        self.step_method_suggestions = {}
-        self.step_module_suggestions = {}
-        self.step_parameter_summaries = {}
-        self._clear_parameter_chat_history()
-        self.ai_var.set("AI 分析结果已过期，请重新执行 AI 分析")
-        self.suggestion_var.set("调用建议结果已过期，请点击“生成方法建议”，或重新应用清洗自动生成")
-        self.parameter_progress_var.set("参数推荐批处理结果已过期，请重新生成")
-        self.parameter_status_var.set("参数推荐结果已过期，请先重新生成方法建议；如需参数推荐也要重新执行 AI 分析")
-        self._set_text_widget(self.parameter_result_text, "")
+        if step_id_mapping:
+            self._remap_outputs_after_row_deletion(step_id_mapping)
+        self._invalidate_ai_outputs_for_rows(
+            affected_row_indexes,
+            "AI 分析结果已按清洗后的事件列表重排；合并/变更的步骤请按需重新执行 AI 分析。",
+        )
+        self._invalidate_suggestion_outputs_for_rows(
+            affected_row_indexes,
+            "调用建议结果已按清洗后的事件列表重排；合并/变更的步骤请重新生成方法建议。",
+        )
         self._refresh_coverage_summary()
         self._persist_session()
         self.cleaning_var.set(f"已应用 {len(self.cleaning_suggestions)} 条清洗建议")
         self.cleaning_suggestions = []
         self._reload_tree()
-        self._generate_method_suggestions_async(status_message="数据清洗完成，正在生成方法建议...")
+        if affected_row_indexes:
+            self._generate_method_suggestions_async(
+                selected_rows=affected_row_indexes,
+                status_message="数据清洗完成，正在为受影响步骤重新生成方法建议...",
+            )
+
+    def _build_step_id_mapping_after_cleaning(
+        self,
+        original_events: list[dict[str, object]],
+        cleaned_events: list[dict[str, object]],
+    ) -> dict[int, int]:
+        step_id_mapping: dict[int, int] = {}
+        matched_cleaned_indexes: set[int] = set()
+        for original_index, original_event in enumerate(original_events):
+            matched_index = self._find_matching_event_index(cleaned_events, original_event, matched_cleaned_indexes)
+            if matched_index is None:
+                continue
+            matched_cleaned_indexes.add(matched_index)
+            step_id_mapping[original_index + 1] = matched_index + 1
+        return step_id_mapping
+
+    def _find_matching_event_index(
+        self,
+        events: list[dict[str, object]],
+        target_event: dict[str, object],
+        excluded_indexes: set[int],
+    ) -> int | None:
+        for index, event in enumerate(events):
+            if index in excluded_indexes:
+                continue
+            if self._event_identity_matches(event, target_event):
+                return index
+        return None
+
+    def _build_cleaning_affected_row_indexes(self, step_id_mapping: dict[int, int]) -> list[int]:
+        affected_row_indexes: set[int] = set()
+        for suggestion in self.cleaning_suggestions:
+            if suggestion.kind != "merge_keypress" or not suggestion.row_indexes:
+                continue
+            first_step_id = suggestion.row_indexes[0] + 1
+            mapped_step_id = step_id_mapping.get(first_step_id)
+            if mapped_step_id is None:
+                continue
+            affected_row_indexes.add(mapped_step_id - 1)
+        return sorted(affected_row_indexes)
 
     def clear_cleaning_highlight(self) -> None:
         for item_id in self.tree.get_children():
@@ -3076,6 +3150,69 @@ class RecorderViewerWindow:
         )
         return analysis
 
+    def _invalidate_ai_outputs_for_rows(self, row_indexes: list[int], message: str) -> None:
+        target_step_ids = {row_index + 1 for row_index in row_indexes if row_index >= 0}
+
+        analysis = copy.deepcopy(self.ai_analysis) if isinstance(self.ai_analysis, dict) else None
+        if analysis is None and self.session_dir:
+            analysis = self._load_ai_analysis(self.session_dir)
+
+        if not isinstance(analysis, dict):
+            self.ai_analysis = None
+            self.ai_step_tags = {}
+            self.ai_step_texts = {}
+            self.ai_process_summary_texts = {}
+            self.ai_var.set(message)
+            return
+
+        if target_step_ids:
+            analysis["step_observations"] = [
+                item
+                for item in analysis.get("step_observations", [])
+                if isinstance(item, dict) and int(item.get("step_id", 0) or 0) not in target_step_ids
+            ]
+            analysis["step_insights"] = [
+                item
+                for item in analysis.get("step_insights", [])
+                if isinstance(item, dict) and int(item.get("step_id", 0) or 0) not in target_step_ids
+            ]
+            analysis["wait_suggestions"] = [
+                item
+                for item in analysis.get("wait_suggestions", [])
+                if isinstance(item, dict) and int(item.get("step_id", 0) or 0) not in target_step_ids
+            ]
+            analysis["invalid_steps"] = [
+                item
+                for item in analysis.get("invalid_steps", [])
+                if isinstance(item, dict)
+                and not any(isinstance(step_id, int) and step_id in target_step_ids for step_id in item.get("step_ids", []))
+            ]
+            analysis["batches"] = [
+                item
+                for item in analysis.get("batches", [])
+                if isinstance(item, dict)
+                and not any(isinstance(step_id, int) and step_id in target_step_ids for step_id in item.get("event_indexes", []))
+            ]
+            analysis["process_summaries"] = [
+                item
+                for item in analysis.get("process_summaries", [])
+                if isinstance(item, dict)
+                and not any(isinstance(step_id, int) and step_id in target_step_ids for step_id in item.get("step_ids", []))
+            ]
+            overview = analysis.get("process_summary_overview", {}) if isinstance(analysis.get("process_summary_overview", {}), dict) else {}
+            if overview:
+                analysis["process_summary_overview"] = self._remap_process_summary_overview(overview, {
+                    step_id: step_id for step_id in range(1, len(self.event_rows) + 1) if step_id not in target_step_ids
+                })
+
+        self.ai_analysis = analysis
+        self.ai_step_tags = self._build_ai_step_tags(analysis)
+        self.ai_step_texts = self._build_ai_step_texts(analysis)
+        self.ai_process_summary_texts = self._build_ai_process_summary_texts(analysis)
+        self._persist_ai_analysis(analysis)
+        self.ai_var.set(message)
+        self._refresh_ai_panels()
+
     def _invalidate_suggestion_outputs_for_rows(self, row_indexes: list[int], message: str) -> None:
         target_step_ids = {row_index + 1 for row_index in row_indexes if row_index >= 0}
         if not target_step_ids:
@@ -3490,17 +3627,36 @@ class RecorderViewerWindow:
         return row_indexes[0]
 
     def _select_row_index(self, row_index: int, source_tree: ttk.Treeview | None = None) -> None:
-        row_id = str(row_index)
+        self._set_selected_row_indexes([row_index], focus_index=row_index, source_tree=source_tree)
+
+    def _set_selected_row_indexes(
+        self,
+        row_indexes: list[int],
+        focus_index: int | None = None,
+        source_tree: ttk.Treeview | None = None,
+    ) -> None:
+        unique_row_indexes = sorted({row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)})
+        if not unique_row_indexes:
+            return
+        if focus_index not in unique_row_indexes:
+            focus_index = unique_row_indexes[0]
+        row_ids = [str(row_index) for row_index in unique_row_indexes]
+        focus_row_id = str(focus_index)
         self._synchronizing_tree_selection = True
         try:
-            if self.tree.exists(row_id):
-                self.tree.selection_set(row_id)
-                self.tree.focus(row_id)
-                self.tree.see(row_id)
-            if self.event_list_tree and self.event_list_tree.winfo_exists() and self.event_list_tree.exists(row_id):
-                self.event_list_tree.selection_set(row_id)
-                self.event_list_tree.focus(row_id)
-                self.event_list_tree.see(row_id)
+            tree_row_ids = [item_id for item_id in row_ids if self.tree.exists(item_id)]
+            if tree_row_ids:
+                self.tree.selection_set(tree_row_ids)
+                if self.tree.exists(focus_row_id):
+                    self.tree.focus(focus_row_id)
+                    self.tree.see(focus_row_id)
+            if self.event_list_tree and self.event_list_tree.winfo_exists():
+                popup_row_ids = [item_id for item_id in row_ids if self.event_list_tree.exists(item_id)]
+                if popup_row_ids:
+                    self.event_list_tree.selection_set(popup_row_ids)
+                    if self.event_list_tree.exists(focus_row_id):
+                        self.event_list_tree.focus(focus_row_id)
+                        self.event_list_tree.see(focus_row_id)
         finally:
             self._synchronizing_tree_selection = False
         if source_tree is self.event_list_tree or source_tree is None:
@@ -3624,8 +3780,25 @@ class RecorderViewerWindow:
     def copy_event_row(self, row_index: int) -> None:
         if not (0 <= row_index < len(self.event_rows)):
             return
-        self.copied_event_rows = [copy.deepcopy(self.event_rows[row_index])]
-        self.load_status_var.set(f"已复制步骤 {row_index + 1}")
+        selected_rows = self._get_selected_row_indexes()
+        if row_index not in selected_rows:
+            selected_rows = [row_index]
+        normalized_row_indexes = [item for item in sorted(set(selected_rows)) if 0 <= item < len(self.event_rows)]
+        if not normalized_row_indexes:
+            return
+        self.copied_event_rows = []
+        for selected_row_index in normalized_row_indexes:
+            suggestion = self._find_suggestion_by_row_index(selected_row_index)
+            self.copied_event_rows.append(
+                {
+                    "event": copy.deepcopy(self.event_rows[selected_row_index]),
+                    "suggestion": copy.deepcopy(suggestion) if suggestion is not None else None,
+                }
+            )
+        if len(normalized_row_indexes) == 1:
+            self.load_status_var.set(f"已复制步骤 {normalized_row_indexes[0] + 1}")
+        else:
+            self.load_status_var.set(f"已复制 {len(normalized_row_indexes)} 个步骤")
 
     def paste_event_rows_after_row(self, row_index: int) -> None:
         if not self.session_dir or not self.session_data:
@@ -4135,7 +4308,41 @@ class RecorderViewerWindow:
     def _insert_copied_events_after_row(self, row_index: int, copied_events: list[dict[str, object]]) -> None:
         if not self.session_dir:
             return
-        self._insert_recorded_events_after_row(row_index, copied_events, self.session_dir)
+        clipboard_events = [
+            copy.deepcopy(item.get("event"))
+            for item in copied_events
+            if isinstance(item, dict) and isinstance(item.get("event"), dict)
+        ]
+        if not clipboard_events:
+            return
+        self._insert_recorded_events_after_row(row_index, clipboard_events, self.session_dir)
+        self._apply_copied_suggestions_after_insertion(row_index, copied_events)
+
+    def _apply_copied_suggestions_after_insertion(self, row_index: int, copied_events: list[dict[str, object]]) -> None:
+        result = self._load_existing_suggestion_result()
+        if result is None:
+            return
+
+        inserted_suggestions = []
+        for offset, item in enumerate(copied_events, start=1):
+            if not isinstance(item, dict):
+                continue
+            suggestion = item.get("suggestion")
+            if suggestion is None:
+                continue
+            copied_suggestion = copy.deepcopy(suggestion)
+            copied_suggestion.step_id = row_index + offset + 1
+            inserted_suggestions.append(copied_suggestion)
+
+        if not inserted_suggestions:
+            return
+
+        result.suggestions.extend(inserted_suggestions)
+        result.suggestions = sorted(result.suggestions, key=lambda item: int(getattr(item, "step_id", 0) or 0))
+        self.suggestion_result = result
+        self._persist_suggestion_result()
+        self._reload_tree()
+        self._select_row_index(row_index + 1)
 
     def _clone_recorded_event_for_current_session(
         self,
@@ -4295,10 +4502,10 @@ class RecorderViewerWindow:
             self.ai_var.set(self._build_initial_ai_status_text(self.session_dir))
             self.suggestion_var.set(self._build_initial_suggestion_status_text(self.session_dir))
         else:
-            self.ai_var.set("未执行 AI 分析")
-            self.suggestion_var.set("未生成调用建议")
-        self.parameter_progress_var.set("参数推荐批处理未执行")
-        self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
+            self.ai_var.set(self._t("未执行 AI 分析", "AI analysis has not been run"))
+            self.suggestion_var.set(self._t("未生成调用建议", "No method suggestions generated"))
+        self.parameter_progress_var.set(self._t("参数推荐批处理未执行", "Parameter recommendation batch has not been run"))
+        self.parameter_status_var.set(self._t("请选择左侧步骤并先生成调用建议。", "Select steps on the left and generate method suggestions first."))
         self._set_text_widget(self.parameter_result_text, "")
         self._refresh_coverage_summary()
         self._update_historical_ai_button_state()
@@ -4316,10 +4523,10 @@ class RecorderViewerWindow:
 
         summary_tab = ttk.Frame(notebook)
         coverage_tab = ttk.Frame(notebook)
-        notebook.add(summary_tab, text="AI总结")
-        notebook.add(coverage_tab, text="覆盖判断")
+        notebook.add(summary_tab, text=self._t("AI总结", "AI Summary"))
+        notebook.add(coverage_tab, text=self._t("覆盖判断", "Coverage Check"))
 
-        summary_frame = ttk.LabelFrame(summary_tab, text="统一操作总结")
+        summary_frame = ttk.LabelFrame(summary_tab, text=self._t("统一操作总结", "Overall Workflow Summary"))
         summary_frame.pack(fill=tk.BOTH, expand=True)
         self.coverage_summary_text = tk.Text(summary_frame, height=8, wrap=tk.WORD, font=("Segoe UI", 10))
         self.coverage_summary_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
@@ -4327,7 +4534,7 @@ class RecorderViewerWindow:
         summary_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
         self.coverage_summary_text.configure(yscrollcommand=summary_scroll.set, state=tk.DISABLED)
 
-        review_frame = ttk.LabelFrame(summary_tab, text="可能无效 / 回退 / 被覆盖的步骤")
+        review_frame = ttk.LabelFrame(summary_tab, text=self._t("可能无效 / 回退 / 被覆盖的步骤", "Possibly Invalid / Rolled Back / Overwritten Steps"))
         review_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.coverage_review_text = tk.Text(review_frame, height=10, wrap=tk.WORD, font=("Segoe UI", 10))
         self.coverage_review_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
@@ -4335,38 +4542,38 @@ class RecorderViewerWindow:
         review_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
         self.coverage_review_text.configure(yscrollcommand=review_scroll.set, state=tk.DISABLED)
 
-        input_frame = ttk.LabelFrame(coverage_tab, text="覆盖目标判断")
+        input_frame = ttk.LabelFrame(coverage_tab, text=self._t("覆盖目标判断", "Coverage Target Check"))
         input_frame.pack(fill=tk.BOTH, expand=True)
         ttk.Label(input_frame, textvariable=self.coverage_status_var).pack(anchor=tk.W, padx=8, pady=(8, 4))
-        ttk.Label(input_frame, text="请输入想验证是否已覆盖的需求或场景说明:").pack(anchor=tk.W, padx=8)
+        ttk.Label(input_frame, text=self._t("请输入想验证是否已覆盖的需求或场景说明:", "Enter the requirement or scenario you want to verify for coverage:")).pack(anchor=tk.W, padx=8)
         self.coverage_input_text = tk.Text(input_frame, height=4, wrap=tk.WORD, font=("Segoe UI", 10))
         self.coverage_input_text.pack(fill=tk.X, padx=8, pady=(4, 8))
 
         button_bar = ttk.Frame(input_frame)
         button_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
-        self.coverage_button = ttk.Button(button_bar, text="判断是否覆盖", command=self.run_coverage_check)
+        self.coverage_button = ttk.Button(button_bar, text=self._t("判断是否覆盖", "Check Coverage"), command=self.run_coverage_check)
         self.coverage_button.pack(side=tk.RIGHT)
 
         self.coverage_result_text = tk.Text(input_frame, height=8, wrap=tk.WORD, font=("Consolas", 10))
         self.coverage_result_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.coverage_result_text.configure(state=tk.DISABLED)
-        self._set_text_widget(self.coverage_summary_text, "请先执行 AI 总结。")
-        self._set_text_widget(self.coverage_review_text, "请先执行 AI 总结。")
+        self._set_text_widget(self.coverage_summary_text, self._t("请先执行 AI 总结。", "Run AI summary first."))
+        self._set_text_widget(self.coverage_review_text, self._t("请先执行 AI 总结。", "Run AI summary first."))
         self._set_text_widget(self.coverage_result_text, "")
 
     def _build_ai_panel(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
 
-        workflow_frame = ttk.LabelFrame(parent, text="流程聚合 AI 总结")
+        workflow_frame = ttk.LabelFrame(parent, text=self._t("流程聚合 AI 总结", "Workflow AI Summary"))
         workflow_frame.pack(fill=tk.BOTH, expand=True)
         self.ai_summary_text = tk.Text(workflow_frame, height=18, wrap=tk.WORD, font=("Consolas", 10))
         self.ai_summary_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
         ai_summary_scroll = ttk.Scrollbar(workflow_frame, orient=tk.VERTICAL, command=self.ai_summary_text.yview)
         ai_summary_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
         self.ai_summary_text.configure(yscrollcommand=ai_summary_scroll.set, state=tk.DISABLED)
-        self._set_text_widget(self.ai_summary_text, "请先执行 AI 分析。")
+        self._set_text_widget(self.ai_summary_text, self._t("请先执行 AI 分析。", "Run AI analysis first."))
 
-        suggestion_frame = ttk.LabelFrame(parent, text="方法建议 / 参数推荐")
+        suggestion_frame = ttk.LabelFrame(parent, text=self._t("方法建议 / 参数推荐", "Method Suggestions / Parameter Recommendations"))
         suggestion_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         ttk.Label(suggestion_frame, textvariable=self.parameter_status_var).pack(anchor=tk.W, padx=8, pady=(8, 4))
         self.parameter_result_text = tk.Text(suggestion_frame, height=7, wrap=tk.WORD, font=("Consolas", 10))
@@ -4374,7 +4581,7 @@ class RecorderViewerWindow:
         self.parameter_result_text.configure(state=tk.DISABLED)
         self._set_text_widget(self.parameter_result_text, "")
 
-        parameter_table_frame = ttk.LabelFrame(suggestion_frame, text="参数列表")
+        parameter_table_frame = ttk.LabelFrame(suggestion_frame, text=self._t("参数列表", "Parameters"))
         parameter_table_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         parameter_table_frame.columnconfigure(0, weight=1)
         parameter_table_frame.rowconfigure(0, weight=1)
@@ -4386,10 +4593,10 @@ class RecorderViewerWindow:
             height=6,
             selectmode="browse",
         )
-        self.parameter_tree.heading("name", text="参数名")
-        self.parameter_tree.heading("value", text="推荐值")
-        self.parameter_tree.heading("confidence", text="置信度")
-        self.parameter_tree.heading("status", text="说明")
+        self.parameter_tree.heading("name", text=self._t("参数名", "Parameter"))
+        self.parameter_tree.heading("value", text=self._t("推荐值", "Suggested Value"))
+        self.parameter_tree.heading("confidence", text=self._t("置信度", "Confidence"))
+        self.parameter_tree.heading("status", text=self._t("说明", "Notes"))
         self.parameter_tree.column("name", width=160, minwidth=120, anchor=tk.W, stretch=False)
         self.parameter_tree.column("value", width=340, minwidth=220, anchor=tk.W, stretch=True)
         self.parameter_tree.column("confidence", width=80, minwidth=70, anchor=tk.CENTER, stretch=False)
@@ -4403,20 +4610,20 @@ class RecorderViewerWindow:
         parameter_tree_x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
         self.parameter_tree.configure(yscrollcommand=parameter_tree_scroll.set, xscrollcommand=parameter_tree_x_scroll.set)
 
-        parameter_detail_frame = ttk.LabelFrame(suggestion_frame, text="参数说明")
+        parameter_detail_frame = ttk.LabelFrame(suggestion_frame, text=self._t("参数说明", "Parameter Details"))
         parameter_detail_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
         self.parameter_detail_text = tk.Text(parameter_detail_frame, height=7, wrap=tk.WORD, font=("Consolas", 10))
         self.parameter_detail_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT, padx=8, pady=8)
         parameter_detail_scroll = ttk.Scrollbar(parameter_detail_frame, orient=tk.VERTICAL, command=self.parameter_detail_text.yview)
         parameter_detail_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=8)
         self.parameter_detail_text.configure(yscrollcommand=parameter_detail_scroll.set, state=tk.DISABLED)
-        self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
+        self._set_text_widget(self.parameter_detail_text, self._t("请选择参数列表中的一项查看详细说明。", "Select a parameter to view details."))
 
     def _build_ai_chat_panel(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
 
-        chat_frame = ttk.LabelFrame(parent, text="AI 原始交互")
+        chat_frame = ttk.LabelFrame(parent, text=self._t("AI 原始交互", "Raw AI Interaction"))
         chat_frame.grid(row=0, column=0, sticky="nsew")
         chat_frame.columnconfigure(0, weight=1)
         chat_frame.rowconfigure(0, weight=1)
@@ -4426,13 +4633,13 @@ class RecorderViewerWindow:
         chat_scroll = ttk.Scrollbar(chat_frame, orient=tk.VERTICAL, command=self.ai_chat_text.yview)
         chat_scroll.grid(row=0, column=1, sticky="ns", pady=8)
         self.ai_chat_text.configure(yscrollcommand=chat_scroll.set, state=tk.DISABLED)
-        self._set_text_widget(self.ai_chat_text, "请选择一个步骤以查看 AI 分析与参数推荐交互内容。")
+        self._set_text_widget(self.ai_chat_text, self._t("请选择一个步骤以查看 AI 分析与参数推荐交互内容。", "Select a step to view AI analysis and parameter recommendation interactions."))
 
     def _clear_parameter_chat_history(self) -> None:
         self.parameter_prompt_by_step = {}
         self.parameter_response_by_step = {}
         if hasattr(self, "ai_chat_text"):
-            self._set_text_widget(self.ai_chat_text, "请选择一个步骤以查看 AI 分析与参数推荐交互内容。")
+            self._set_text_widget(self.ai_chat_text, self._t("请选择一个步骤以查看 AI 分析与参数推荐交互内容。", "Select a step to view AI analysis and parameter recommendation interactions."))
 
     def _clear_parameter_tree(self) -> None:
         self._current_parameter_items = []
@@ -4443,7 +4650,7 @@ class RecorderViewerWindow:
 
     def _format_parameter_value_for_view(self, value: object) -> str:
         if value is None:
-            return "(未提供)"
+            return self._t("(未提供)", "(not provided)")
         text = json.dumps(value, ensure_ascii=False, default=str)
         return text if len(text) <= 120 else f"{text[:117]}..."
 
@@ -4784,7 +4991,7 @@ class RecorderViewerWindow:
             if cached is None:
                 view.clear(f"无法加载媒体: {prepared_path.name}")
             else:
-                view.set_image(cached)
+                view.set_image(cached, source_path=prepared_path if media_type == "image" else None)
             return
 
         if view.original_image is None:
@@ -4808,7 +5015,7 @@ class RecorderViewerWindow:
                 if loaded is None:
                     view.clear(f"无法加载媒体: {prepared_path.name}")
                     return
-                view.set_image(loaded)
+                view.set_image(loaded, source_path=prepared_path if media_type == "image" else None)
 
             self.window.after(0, apply)
 
@@ -5095,7 +5302,7 @@ class RecorderViewerWindow:
 
     def _build_ai_summary_text(self, analysis: dict[str, object] | None) -> str:
         if not analysis:
-            return "未执行 AI 分析"
+            return self._t("未执行 AI 分析", "AI analysis has not been run")
         status = str(analysis.get("status", "completed"))
         step_count = len(analysis.get("step_insights", [])) if isinstance(analysis.get("step_insights", []), list) else 0
         invalid_count = len(analysis.get("invalid_steps", [])) if isinstance(analysis.get("invalid_steps", []), list) else 0
@@ -5103,20 +5310,29 @@ class RecorderViewerWindow:
         wait_count = len(analysis.get("wait_suggestions", [])) if isinstance(analysis.get("wait_suggestions", []), list) else 0
         batch_count = len(analysis.get("batches", [])) if isinstance(analysis.get("batches", []), list) else 0
         if status == "partial_failed":
-            return f"AI 分析部分完成: 已生成步骤建议 {step_count} 条 | 批次 {batch_count} | 无效步骤候选 {invalid_count} | 模块建议 {module_count} | 等待建议 {wait_count}"
-        return f"AI 分析结果: 批次 {batch_count} | 无效步骤候选 {invalid_count} | 模块建议 {module_count} | 等待建议 {wait_count}"
+            return self._t(
+                f"AI 分析部分完成: 已生成步骤建议 {step_count} 条 | 批次 {batch_count} | 无效步骤候选 {invalid_count} | 模块建议 {module_count} | 等待建议 {wait_count}",
+                f"AI analysis partially completed: step insights={step_count} | batches={batch_count} | invalid candidates={invalid_count} | module suggestions={module_count} | wait suggestions={wait_count}",
+            )
+        return self._t(
+            f"AI 分析结果: 批次 {batch_count} | 无效步骤候选 {invalid_count} | 模块建议 {module_count} | 等待建议 {wait_count}",
+            f"AI analysis result: batches={batch_count} | invalid candidates={invalid_count} | module suggestions={module_count} | wait suggestions={wait_count}",
+        )
 
     def _build_initial_ai_status_text(self, session_dir: Path) -> str:
         analysis_path = session_dir / "ai_analysis.json"
         if analysis_path.exists():
-            return "检测到历史 AI 分析结果，但当前未加载。可点击“加载历史AI结果”，或点击“AI分析”重新生成。"
-        return "未执行 AI 分析"
+            return self._t("检测到历史 AI 分析结果，但当前未加载。可点击“加载历史AI结果”，或点击“AI分析”重新生成。", "Historical AI analysis results were found but are not loaded. Click 'Load Historical AI Results' or run 'AI Analysis' again.")
+        return self._t("未执行 AI 分析", "AI analysis has not been run")
 
     def _build_initial_suggestion_status_text(self, session_dir: Path) -> str:
         suggestion_path = session_dir / "conversion_suggestions.json"
         if suggestion_path.exists():
-            return "检测到历史调用建议结果，可直接使用，也可点击“生成方法建议”重新生成。"
-        return "未生成调用建议"
+            return self._t("检测到历史调用建议结果，可直接使用，也可点击“生成方法建议”重新生成。", "Historical method suggestions were found. You can use them directly or regenerate them with 'Generate Method Suggestions'.")
+        return self._t("未生成调用建议", "No method suggestions generated")
+
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return pick_text(self.ui_language, zh_text, en_text)
 
     def _on_ai_analysis_success(self, analysis: dict[str, object]) -> None:
         self.analysis_running = False
@@ -5383,14 +5599,14 @@ class RecorderViewerWindow:
         if hasattr(self, "coverage_review_text"):
             self._set_text_widget(self.coverage_review_text, self._build_process_summary_review_text())
         if self.ai_analysis:
-            self.coverage_status_var.set("可输入目标，让 AI 判断当前录制是否已覆盖。")
+            self.coverage_status_var.set(self._t("可输入目标，让 AI 判断当前录制是否已覆盖。", "Enter a target and let AI determine whether the current recording covers it."))
         else:
-            self.coverage_status_var.set("请先执行 AI 分析，再进行覆盖判断")
+            self.coverage_status_var.set(self._t("请先执行 AI 分析，再进行覆盖判断", "Run AI analysis before checking coverage"))
         self._set_text_widget(self.coverage_result_text, "")
 
     def _build_process_summary_review_text(self) -> str:
         if not self.ai_analysis:
-            return "请先执行 AI 总结。"
+            return self._t("请先执行 AI 总结。", "Run AI summary first.")
         overview = self.ai_analysis.get("process_summary_overview", {}) if isinstance(self.ai_analysis.get("process_summary_overview", {}), dict) else {}
         candidates = overview.get("rollback_candidates", []) if isinstance(overview.get("rollback_candidates", []), list) else []
         notes = overview.get("notes", []) if isinstance(overview.get("notes", []), list) else []
@@ -6003,6 +6219,8 @@ class RecorderViewerWindow:
                             event=event,
                             ai_observation_text=ai_observation,
                         )
+                        if isinstance(getattr(suggestion, "candidate_payload", None), dict):
+                            suggestion.candidate_payload.pop("viewer_parameter_summary_override", None)
                         completed_rows.append(row_index)
                         self.parameter_prompt_by_step.pop(row_index, None)
                         self.parameter_response_by_step.pop(row_index, None)
@@ -6130,6 +6348,66 @@ class RecorderViewerWindow:
             "Expectresult": step.get("Expect result", ""),
         }
 
+    def _convert_debug_payload_paths_to_absolute(self, payload: dict[str, object]) -> dict[str, object]:
+        converted = dict(payload)
+        for field_name in ("ParameterValue", "CheckParameterValue"):
+            raw_value = converted.get(field_name)
+            converted[field_name] = self._convert_debug_parameter_blob_paths(raw_value)
+        return converted
+
+    def _convert_debug_parameter_blob_paths(self, raw_value: object) -> object:
+        if not isinstance(raw_value, str):
+            return raw_value
+        text = raw_value.strip()
+        if not text:
+            return raw_value
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return raw_value
+        converted = self._convert_path_like_values_recursive(parsed)
+        if converted is parsed:
+            return raw_value
+        return json.dumps(converted, ensure_ascii=False)
+
+    def _convert_path_like_values_recursive(self, value: object, parent_key: str = "") -> object:
+        if isinstance(value, dict):
+            changed = False
+            converted_dict: dict[object, object] = {}
+            for key, item in value.items():
+                key_text = str(key)
+                converted_item = self._convert_path_like_values_recursive(item, parent_key=key_text)
+                if converted_item is not item:
+                    changed = True
+                converted_dict[key] = converted_item
+            return converted_dict if changed else value
+
+        if isinstance(value, list):
+            changed = False
+            converted_list: list[object] = []
+            for item in value:
+                converted_item = self._convert_path_like_values_recursive(item, parent_key=parent_key)
+                if converted_item is not item:
+                    changed = True
+                converted_list.append(converted_item)
+            return converted_list if changed else value
+
+        if isinstance(value, str) and "path" in parent_key.lower():
+            absolute_path = self._resolve_debug_path_to_absolute(value)
+            if absolute_path != value:
+                return absolute_path
+        return value
+
+    def _resolve_debug_path_to_absolute(self, raw_value: str) -> str:
+        candidate_text = raw_value.strip()
+        if not candidate_text or self.session_dir is None:
+            return raw_value
+        candidate_path = Path(candidate_text)
+        if candidate_path.is_absolute():
+            return str(candidate_path)
+        absolute_path = (self.session_dir / candidate_path).resolve()
+        return str(absolute_path)
+
     def _build_debug_request_payload(self, debug_payloads: list[dict[str, object]]) -> dict[str, object] | list[dict[str, object]]:
         if len(debug_payloads) == 1:
             return debug_payloads[0]
@@ -6153,7 +6431,11 @@ class RecorderViewerWindow:
             steps = yaml_payload.get("Steps", []) if isinstance(yaml_payload, dict) else []
             if not isinstance(steps, list):
                 steps = []
-            debug_payloads = [self._convert_atframework_step_to_debug_payload(step) for step in steps if isinstance(step, dict)]
+            debug_payloads = [
+                self._convert_debug_payload_paths_to_absolute(self._convert_atframework_step_to_debug_payload(step))
+                for step in steps
+                if isinstance(step, dict)
+            ]
         except Exception as exc:
             messagebox.showerror("调试失败", str(exc), parent=self.window)
             self.load_status_var.set(f"本地ATFramework调试调用失败: {exc}")
@@ -6265,19 +6547,19 @@ class RecorderViewerWindow:
             return
         row_indexes = self._get_selected_row_indexes()
         if not row_indexes:
-            self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
+            self.parameter_status_var.set(self._t("请选择左侧步骤并先生成调用建议。", "Select steps on the left and generate method suggestions first."))
             self._set_text_widget(self.parameter_result_text, "")
             self._clear_parameter_tree()
             if hasattr(self, "parameter_detail_text"):
-                self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
+                self._set_text_widget(self.parameter_detail_text, self._t("请选择参数列表中的一项查看详细说明。", "Select a parameter to view details."))
             return
         row_index = self._get_primary_selected_row_index()
         if row_index is None:
-            self.parameter_status_var.set("请选择左侧步骤并先生成调用建议。")
+            self.parameter_status_var.set(self._t("请选择左侧步骤并先生成调用建议。", "Select steps on the left and generate method suggestions first."))
             self._set_text_widget(self.parameter_result_text, "")
             self._clear_parameter_tree()
             if hasattr(self, "parameter_detail_text"):
-                self._set_text_widget(self.parameter_detail_text, "请选择参数列表中的一项查看详细说明。")
+                self._set_text_widget(self.parameter_detail_text, self._t("请选择参数列表中的一项查看详细说明。", "Select a parameter to view details."))
             return
         suggestion = self._find_suggestion_by_row_index(row_index)
         if suggestion is None:

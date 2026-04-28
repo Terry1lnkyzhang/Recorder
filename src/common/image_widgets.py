@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import messagebox, ttk
 
 from PIL import Image, ImageTk
 
@@ -11,6 +13,7 @@ class ZoomableImageView(ttk.Frame):
         super().__init__(master)
         self.empty_text = empty_text
         self.original_image: Image.Image | None = None
+        self.image_source_path: Path | None = None
         self.display_image: ImageTk.PhotoImage | None = None
         self.zoom = 1.0
         self.fit_zoom = 1.0
@@ -51,10 +54,28 @@ class ZoomableImageView(ttk.Frame):
             pady=1,
         )
         self.fullscreen_button.place(relx=1.0, x=-8, y=8, anchor="ne")
+
+        self.paint_button = tk.Button(
+            self,
+            text="Paint",
+            font=("Segoe UI", 9, "bold"),
+            bd=0,
+            relief=tk.FLAT,
+            bg="#1f1f1f",
+            fg="#ffffff",
+            activebackground="#3a3a3a",
+            activeforeground="#ffffff",
+            cursor="hand2",
+            command=self.open_in_paint,
+            padx=6,
+            pady=2,
+        )
+        self.paint_button.place(relx=1.0, x=-44, y=8, anchor="ne")
         self._sync_fullscreen_button_state()
 
-    def set_image(self, image: Image.Image | None) -> None:
+    def set_image(self, image: Image.Image | None, source_path: Path | None = None) -> None:
         self.original_image = image.copy() if image else None
+        self.image_source_path = Path(source_path) if source_path else None
         self.zoom = 1.0
         self.fit_zoom = 1.0
         self.offset_x = 0.0
@@ -68,6 +89,7 @@ class ZoomableImageView(ttk.Frame):
     def clear(self, text: str | None = None) -> None:
         self._cancel_scheduled_renders()
         self.original_image = None
+        self.image_source_path = None
         self.display_image = None
         self._ensure_canvas_items()
         self.canvas.itemconfigure(self._image_item, image="", state="hidden")
@@ -99,6 +121,14 @@ class ZoomableImageView(ttk.Frame):
             fill="#d0d0d0",
             state="normal",
         )
+
+    def open_in_paint(self) -> None:
+        if self.image_source_path is None or not self.image_source_path.exists():
+            return
+        try:
+            subprocess.Popen(["mspaint.exe", str(self.image_source_path)])
+        except Exception as exc:
+            messagebox.showerror("打开 Paint 失败", f"无法使用 Paint 打开图片。\n\n{exc}", parent=self.winfo_toplevel())
 
     def open_fullscreen(self) -> None:
         if self.original_image is None:
@@ -139,10 +169,13 @@ class ZoomableImageView(ttk.Frame):
         if self.original_image is None:
             self._fullscreen_view.clear(self.empty_text)
         else:
-            self._fullscreen_view.set_image(self.original_image)
+            self._fullscreen_view.set_image(self.original_image, source_path=self.image_source_path)
 
     def _sync_fullscreen_button_state(self) -> None:
-        self.fullscreen_button.configure(state=tk.NORMAL if self.original_image is not None else tk.DISABLED)
+        has_image = self.original_image is not None
+        has_source_path = self.image_source_path is not None and self.image_source_path.exists()
+        self.fullscreen_button.configure(state=tk.NORMAL if has_image else tk.DISABLED)
+        self.paint_button.configure(state=tk.NORMAL if has_source_path else tk.DISABLED)
 
     def _on_configure(self, _event: tk.Event) -> None:
         if not self.original_image:

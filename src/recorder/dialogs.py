@@ -10,10 +10,12 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageGrab
 
 from src.common.prompt_templates import PromptTemplateRecord, load_checkpoint_prompt_templates
+from src.common.runtime_paths import get_settings_path
 from src.database import fetch_distinct_baseline_names, fetch_latest_baseline_design_steps, fetch_latest_testcase_management_record
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.errors import AIClientError
 from src.ai.remote_service_client import RemoteAIServiceClient
+from .i18n import pick_text, ui_language_from_label, ui_language_labels, ui_language_to_label
 from .settings import Settings, SettingsStore
 from .session_metadata_ai import (
     analyze_session_metadata,
@@ -78,6 +80,18 @@ AI_CHECKPOINT_SCROLLBAR_WIDTH = 18
 def _set_text(widget: tk.Text, text: str) -> None:
     widget.delete("1.0", tk.END)
     widget.insert(tk.END, text)
+
+
+def _resolve_ui_language(settings_store: SettingsStore | None = None) -> str:
+    try:
+        settings = settings_store.load() if settings_store is not None else SettingsStore(get_settings_path()).load()
+    except Exception:
+        return "zh-CN"
+    return getattr(settings, "ui_language", "zh-CN")
+
+
+def _ui_text(language: str, zh_text: str, en_text: str) -> str:
+    return pick_text(language, zh_text, en_text)
 
 
 @dataclass(slots=True)
@@ -260,15 +274,20 @@ class SessionMetadataDialog:
         self._baseline_lookup_token = 0
         self._baseline_design_steps_after_id: str | None = None
         self._baseline_design_steps_token = 0
+        self.ui_language = _resolve_ui_language(self.settings_store)
+        self.prs_recording_options = [
+            (self._t("是", "Yes"), True),
+            (self._t("否", "No"), False),
+        ]
 
         self.window = tk.Toplevel(parent)
-        self.window.title("录制元数据")
+        self.window.title(self._t("录制元数据", "Session Metadata"))
         self.window.geometry("860x980")
         self.window.minsize(780, 820)
         self.window.transient(parent)
         self.window.grab_set()
 
-        self.is_prs_recording_var = tk.StringVar(value="是" if self.draft.is_prs_recording else "否")
+        self.is_prs_recording_var = tk.StringVar(value=self.prs_recording_options[0][0] if self.draft.is_prs_recording else self.prs_recording_options[1][0])
         self.testcase_id_var = tk.StringVar(value=self.draft.testcase_id)
         self.version_number_var = tk.StringVar(value=self.draft.version_number)
         self.project_var = tk.StringVar(value=self.draft.project or "Taichi")
@@ -278,7 +297,7 @@ class SessionMetadataDialog:
         self.scope_var = tk.StringVar(value=self.draft.scope if self.draft.scope in SESSION_SCOPE_OPTIONS else "All")
         self.testcase_lookup_status_var = tk.StringVar(value="")
         self.testcase_lookup_details_var = tk.StringVar(value="")
-        self.baseline_lookup_status_var = tk.StringVar(value="BaselineName 加载中...")
+        self.baseline_lookup_status_var = tk.StringVar(value=self._t("BaselineName 加载中...", "Loading BaselineName..."))
         self.baseline_design_steps_status_var = tk.StringVar(value="")
 
         self._build_ui()
@@ -314,17 +333,20 @@ class SessionMetadataDialog:
 
         ttk.Label(
             wrapper,
-            text="开始录制前可填写本次录制相关元数据，这些字段之后也可以在 Session Viewer 中继续修改。当前版本仅支持 PRS 用例录制。",
+            text=self._t(
+                "开始录制前可填写本次录制相关元数据，这些字段之后也可以在 Session Viewer 中继续修改。当前版本仅支持 PRS 用例录制。",
+                "Fill in session metadata before recording starts. These fields can also be edited later in Session Viewer. The current version only supports PRS test case recording.",
+            ),
             wraplength=640,
             justify=tk.LEFT,
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 12))
 
-        ttk.Label(wrapper, text="是否PRS用例录制").grid(row=1, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text=self._t("是否PRS用例录制", "PRS test case recording")).grid(row=1, column=0, sticky=tk.W, pady=6)
         self.prs_combo = ttk.Combobox(
             wrapper,
             textvariable=self.is_prs_recording_var,
             state="readonly",
-            values=[label for label, _value in PRS_RECORDING_OPTIONS],
+            values=[label for label, _value in self.prs_recording_options],
             width=16,
         )
         self.prs_combo.grid(row=1, column=1, sticky=tk.W, pady=6)
@@ -340,7 +362,7 @@ class SessionMetadataDialog:
         )
         self.project_combo.grid(row=2, column=1, sticky=tk.W, pady=6)
 
-        ttk.Label(wrapper, text="BaselineName").grid(row=3, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text=self._t("BaselineName", "Baseline Name")).grid(row=3, column=0, sticky=tk.W, pady=6)
         baseline_frame = ttk.Frame(wrapper)
         baseline_frame.grid(row=3, column=1, sticky=tk.EW, pady=6)
         baseline_frame.columnconfigure(0, weight=1)
@@ -350,7 +372,7 @@ class SessionMetadataDialog:
         ttk.Label(baseline_frame, textvariable=self.baseline_lookup_status_var).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
         ttk.Label(baseline_frame, textvariable=self.baseline_design_steps_status_var, wraplength=520, justify=tk.LEFT).grid(row=2, column=0, sticky=tk.W, pady=(2, 0))
 
-        self.primary_id_label = ttk.Label(wrapper, text="Testcase ID")
+        self.primary_id_label = ttk.Label(wrapper, text=self._t("Testcase ID", "Test Case ID"))
         self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
         testcase_frame = ttk.Frame(wrapper)
         testcase_frame.grid(row=4, column=1, sticky=tk.EW, pady=6)
@@ -369,15 +391,15 @@ class SessionMetadataDialog:
             pady=(2, 0),
         )
 
-        self.secondary_id_label = ttk.Label(wrapper, text="Version Number")
+        self.secondary_id_label = ttk.Label(wrapper, text=self._t("Version Number", "Version Number"))
         self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, pady=6)
         self.secondary_id_entry = ttk.Entry(wrapper, textvariable=self.version_number_var)
         self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=6)
 
-        self.name_label = ttk.Label(wrapper, text="Name")
+        self.name_label = ttk.Label(wrapper, text=self._t("Name", "Name"))
         self.name_entry = ttk.Entry(wrapper, textvariable=self.name_var)
 
-        ttk.Label(wrapper, text="录制人员").grid(row=6, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text=self._t("录制人员", "Recorder")).grid(row=6, column=0, sticky=tk.W, pady=6)
         ttk.Entry(wrapper, textvariable=self.recorder_person_var).grid(row=6, column=1, sticky=tk.EW, pady=6)
 
         ttk.Label(wrapper, text="Design Steps").grid(row=7, column=0, sticky=tk.NW, pady=6)
@@ -385,24 +407,27 @@ class SessionMetadataDialog:
         self.design_steps_text.grid(row=7, column=1, sticky="nsew", pady=6)
         self.design_steps_text.insert("1.0", self.draft.design_steps)
 
-        ttk.Label(wrapper, text="前置条件").grid(row=9, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text=self._t("前置条件", "Preconditions")).grid(row=9, column=0, sticky=tk.NW, pady=6)
         self.preconditions_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
         self.preconditions_text.grid(row=9, column=1, sticky="nsew", pady=6)
         self.preconditions_text.insert("1.0", self.draft.preconditions)
 
-        ttk.Label(wrapper, text="配置要求").grid(row=10, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text=self._t("配置要求", "Configuration Requirements")).grid(row=10, column=0, sticky=tk.NW, pady=6)
         self.configuration_requirements_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
         self.configuration_requirements_text.grid(row=10, column=1, sticky="nsew", pady=6)
         self.configuration_requirements_text.insert("1.0", self.draft.configuration_requirements)
 
-        ttk.Label(wrapper, text="额外设备").grid(row=11, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text=self._t("额外设备", "Extra Devices")).grid(row=11, column=0, sticky=tk.NW, pady=6)
         self.extra_devices_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
         self.extra_devices_text.grid(row=11, column=1, sticky="nsew", pady=6)
         self.extra_devices_text.insert("1.0", self.draft.extra_devices)
 
         ttk.Label(
             wrapper,
-            text="以上 3 项请尽量按‘词语/短语’填写，每行一个，例如：第一次启动、倾斜、systemphantom。",
+            text=self._t(
+                "以上 3 项请尽量按‘词语/短语’填写，每行一个，例如：第一次启动、倾斜、systemphantom。",
+                "For the three fields above, use short words or phrases when possible, one per line, for example: first startup, tilt, systemphantom.",
+            ),
             wraplength=560,
             justify=tk.LEFT,
         ).grid(row=12, column=1, sticky=tk.W, pady=(2, 0))
@@ -416,10 +441,10 @@ class SessionMetadataDialog:
 
         buttons = ttk.Frame(wrapper)
         buttons.grid(row=15, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
-        ttk.Button(buttons, text="取消", command=self.cancel).pack(side=tk.RIGHT)
-        self.save_button = ttk.Button(buttons, text="开始录制", command=self.save)
+        ttk.Button(buttons, text=self._t("取消", "Cancel"), command=self.cancel).pack(side=tk.RIGHT)
+        self.save_button = ttk.Button(buttons, text=self._t("开始录制", "Start Recording"), command=self.save)
         self.save_button.pack(side=tk.RIGHT, padx=(0, 8))
-        self.ai_button = ttk.Button(buttons, text="AI分析", command=self.run_ai_analysis)
+        self.ai_button = ttk.Button(buttons, text=self._t("AI分析", "AI Analysis"), command=self.run_ai_analysis)
         self.ai_button.pack(side=tk.RIGHT, padx=(0, 8))
 
         self._refresh_prs_mode()
@@ -461,7 +486,7 @@ class SessionMetadataDialog:
             pass
 
     def _is_prs_recording_selected(self) -> bool:
-        return self.is_prs_recording_var.get().strip() != "否"
+        return self.is_prs_recording_var.get().strip() != self.prs_recording_options[1][0]
 
     def _refresh_prs_mode(self) -> None:
         is_prs = self._is_prs_recording_selected()
@@ -469,8 +494,8 @@ class SessionMetadataDialog:
             self.name_var.set("")
             self.name_label.grid_remove()
             self.name_entry.grid_remove()
-            self.primary_id_label.configure(text="Testcase ID")
-            self.secondary_id_label.configure(text="Version Number")
+            self.primary_id_label.configure(text=self._t("Testcase ID", "Test Case ID"))
+            self.secondary_id_label.configure(text=self._t("Version Number", "Version Number"))
             self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
             self.primary_id_entry.master.grid(row=4, column=1, sticky=tk.EW, pady=6)
             self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, pady=6)
@@ -498,7 +523,7 @@ class SessionMetadataDialog:
         token = self._baseline_lookup_token
         connection_string = self.settings_store.load().prompt_db_connection_string.strip()
         if not connection_string:
-            self.baseline_lookup_status_var.set("未配置数据库连接")
+            self.baseline_lookup_status_var.set(self._t("未配置数据库连接", "Database connection is not configured"))
             self.baseline_name_combo.configure(values=[])
             return
 
@@ -518,19 +543,19 @@ class SessionMetadataDialog:
         combo_values = [""] + baseline_names
         self.baseline_name_combo.configure(values=combo_values)
         if baseline_names:
-            self.baseline_lookup_status_var.set(f"已加载 {len(baseline_names)} 个 BaselineName")
+            self.baseline_lookup_status_var.set(self._t(f"已加载 {len(baseline_names)} 个 BaselineName", f"Loaded {len(baseline_names)} baseline names"))
             current_value = self.baseline_name_var.get().strip()
             if current_value and current_value not in baseline_names:
                 self.baseline_name_combo.configure(values=["", *baseline_names, current_value])
         else:
-            self.baseline_lookup_status_var.set("未查询到可用的 BaselineName")
+            self.baseline_lookup_status_var.set(self._t("未查询到可用的 BaselineName", "No baseline names were found"))
         self._schedule_baseline_design_steps_lookup(immediate=True)
 
     def _finish_baseline_lookup_error(self, token: int, message: str) -> None:
         if token != self._baseline_lookup_token:
             return
         self.baseline_name_combo.configure(values=[])
-        self.baseline_lookup_status_var.set(f"BaselineName 加载失败: {message}")
+        self.baseline_lookup_status_var.set(self._t(f"BaselineName 加载失败: {message}", f"Failed to load baseline names: {message}"))
 
     def _on_testcase_id_changed(self, _event: tk.Event | None = None) -> None:
         self._schedule_testcase_lookup(immediate=False)
@@ -557,7 +582,7 @@ class SessionMetadataDialog:
             self.testcase_lookup_details_var.set("")
             return
 
-        self.testcase_lookup_status_var.set("测试用例查询中...")
+        self.testcase_lookup_status_var.set(self._t("测试用例查询中...", "Looking up test case..."))
         self.testcase_lookup_details_var.set("")
         delay_ms = 0 if immediate else 350
         self._testcase_lookup_after_id = self.window.after(delay_ms, self._start_testcase_lookup)
@@ -576,7 +601,7 @@ class SessionMetadataDialog:
             self.baseline_design_steps_status_var.set("")
             return
 
-        self.baseline_design_steps_status_var.set("正在查询 Baseline Design Steps...")
+        self.baseline_design_steps_status_var.set(self._t("正在查询 Baseline Design Steps...", "Loading baseline design steps..."))
         delay_ms = 0 if immediate else 350
         self._baseline_design_steps_after_id = self.window.after(delay_ms, self._start_baseline_design_steps_lookup)
 
@@ -592,7 +617,7 @@ class SessionMetadataDialog:
         token = self._baseline_design_steps_token
         connection_string = self.settings_store.load().prompt_db_connection_string.strip()
         if not connection_string:
-            self.baseline_design_steps_status_var.set("未配置数据库连接，无法查询 Design Steps")
+            self.baseline_design_steps_status_var.set(self._t("未配置数据库连接，无法查询 Design Steps", "Database connection is not configured, so design steps cannot be loaded"))
             return
 
         def worker() -> None:
@@ -633,11 +658,11 @@ class SessionMetadataDialog:
         if testcase_id != self.testcase_id_var.get().strip():
             return
         if record is None:
-            self.testcase_lookup_status_var.set("未找到该 Testcase ID 的数据库记录")
+            self.testcase_lookup_status_var.set(self._t("未找到该 Testcase ID 的数据库记录", "No database record was found for this test case ID"))
             self.testcase_lookup_details_var.set("")
             return
 
-        self.testcase_lookup_status_var.set("已匹配到最新数据库记录")
+        self.testcase_lookup_status_var.set(self._t("已匹配到最新数据库记录", "Matched the latest database record"))
         self.testcase_lookup_details_var.set(
             f"Status: {record.status or '-'} | Designer: {record.designer or '-'} | ScriptVersion: {record.script_version or '-'} | UpdateTime: {record.update_time or '-'}"
         )
@@ -649,7 +674,7 @@ class SessionMetadataDialog:
             return
         if testcase_id != self.testcase_id_var.get().strip():
             return
-        self.testcase_lookup_status_var.set("数据库查询失败")
+        self.testcase_lookup_status_var.set(self._t("数据库查询失败", "Database query failed"))
         self.testcase_lookup_details_var.set(message)
 
     def _finish_baseline_design_steps_lookup_success(self, token: int, testcase_id: str, baseline_name: str, record) -> None:
@@ -658,18 +683,18 @@ class SessionMetadataDialog:
         if testcase_id != self.testcase_id_var.get().strip() or baseline_name != self.baseline_name_var.get().strip():
             return
         if record is None or not getattr(record, "design_steps", "").strip():
-            self.baseline_design_steps_status_var.set("未在 baselinetable 中匹配到 Design Steps")
+            self.baseline_design_steps_status_var.set(self._t("未在 baselinetable 中匹配到 Design Steps", "No design steps were found in baselinetable"))
             return
 
         self._set_text_content(self.design_steps_text, record.design_steps)
-        self.baseline_design_steps_status_var.set("已根据 TestcaseID + BaselineName 加载 Design Steps")
+        self.baseline_design_steps_status_var.set(self._t("已根据 TestcaseID + BaselineName 加载 Design Steps", "Loaded design steps from Test Case ID and Baseline Name"))
 
     def _finish_baseline_design_steps_lookup_error(self, token: int, testcase_id: str, baseline_name: str, message: str) -> None:
         if token != self._baseline_design_steps_token:
             return
         if testcase_id != self.testcase_id_var.get().strip() or baseline_name != self.baseline_name_var.get().strip():
             return
-        self.baseline_design_steps_status_var.set(f"Baseline Design Steps 查询失败: {message}")
+        self.baseline_design_steps_status_var.set(self._t(f"Baseline Design Steps 查询失败: {message}", f"Failed to load baseline design steps: {message}"))
 
     def save(self) -> None:
         draft = SessionMetadataDraft(
@@ -688,11 +713,11 @@ class SessionMetadataDialog:
         )
         error_message = draft.validate()
         if error_message:
-            messagebox.showerror("元数据未填写完整", error_message, parent=self.window)
+            messagebox.showerror(self._t("元数据未填写完整", "Incomplete metadata"), error_message, parent=self.window)
             return
         payload = draft.to_dict()
         if should_prompt_ai_analysis(payload):
-            if messagebox.askyesno("AI分析", "前置条件、配置要求、额外设备当前都为空，是否先让 AI 根据 Design Steps 生成建议？", parent=self.window):
+            if messagebox.askyesno(self._t("AI分析", "AI Analysis"), self._t("前置条件、配置要求、额外设备当前都为空，是否先让 AI 根据 Design Steps 生成建议？", "Preconditions, configuration requirements, and extra devices are all empty. Do you want AI to suggest them from the design steps first?"), parent=self.window):
                 self._run_ai_analysis(save_after=True)
                 return
 
@@ -721,11 +746,11 @@ class SessionMetadataDialog:
         )
         error_message = draft.validate()
         if error_message:
-            messagebox.showerror("元数据未填写完整", error_message, parent=self.window)
+            messagebox.showerror(self._t("元数据未填写完整", "Incomplete metadata"), error_message, parent=self.window)
             return
 
         self.ai_running = True
-        self.ai_status_var.set("AI分析中...")
+        self.ai_status_var.set(self._t("AI分析中...", "AI analysis in progress..."))
         self.save_button.configure(state=tk.DISABLED)
         self.ai_button.configure(state=tk.DISABLED)
 
@@ -741,7 +766,7 @@ class SessionMetadataDialog:
 
     def _on_ai_analysis_success(self, result, draft: SessionMetadataDraft, save_after: bool) -> None:
         self.ai_running = False
-        self.ai_status_var.set("AI分析完成")
+        self.ai_status_var.set(self._t("AI分析完成", "AI analysis complete"))
         self.save_button.configure(state=tk.NORMAL)
         self.ai_button.configure(state=tk.NORMAL)
 
@@ -772,18 +797,18 @@ class SessionMetadataDialog:
 
         summary = build_missing_summary(result)
         if summary:
-            messagebox.showinfo("AI分析建议", summary, parent=self.window)
+            messagebox.showinfo(self._t("AI分析建议", "AI suggestions"), summary, parent=self.window)
 
     def _on_ai_analysis_failed(self, message: str) -> None:
         self.ai_running = False
-        self.ai_status_var.set("AI分析失败")
+        self.ai_status_var.set(self._t("AI分析失败", "AI analysis failed"))
         self.save_button.configure(state=tk.NORMAL)
         self.ai_button.configure(state=tk.NORMAL)
-        messagebox.showerror("AI分析失败", message, parent=self.window)
+        messagebox.showerror(self._t("AI分析失败", "AI analysis failed"), message, parent=self.window)
 
     def _validate_with_ai_before_save(self, draft: SessionMetadataDraft) -> None:
         self.ai_running = True
-        self.ai_status_var.set("AI校验中...")
+        self.ai_status_var.set(self._t("AI校验中...", "AI validation in progress..."))
         self.save_button.configure(state=tk.DISABLED)
         self.ai_button.configure(state=tk.DISABLED)
 
@@ -799,10 +824,10 @@ class SessionMetadataDialog:
 
     def _on_ai_validation_failed(self, draft: SessionMetadataDraft, message: str) -> None:
         self.ai_running = False
-        self.ai_status_var.set("AI校验失败")
+        self.ai_status_var.set(self._t("AI校验失败", "AI validation failed"))
         self.save_button.configure(state=tk.NORMAL)
         self.ai_button.configure(state=tk.NORMAL)
-        if messagebox.askyesno("AI校验失败", f"AI 校验失败:\n{message}\n\n是否忽略并继续保存？", parent=self.window):
+        if messagebox.askyesno(self._t("AI校验失败", "AI validation failed"), self._t(f"AI 校验失败:\n{message}\n\n是否忽略并继续保存？", f"AI validation failed:\n{message}\n\nIgnore it and continue saving?"), parent=self.window):
             self.result = draft
             self.window.destroy()
 
@@ -814,8 +839,8 @@ class SessionMetadataDialog:
         summary = build_missing_summary(result)
         if summary:
             should_continue = messagebox.askyesno(
-                "AI校验建议",
-                "AI 认为当前内容可能还有遗漏:\n\n" + summary + "\n\n是否仍然继续保存？",
+                self._t("AI校验建议", "AI validation suggestions"),
+                self._t("AI 认为当前内容可能还有遗漏:\n\n", "AI thinks some information may still be missing:\n\n") + summary + self._t("\n\n是否仍然继续保存？", "\n\nDo you still want to save?"),
                 parent=self.window,
             )
             if not should_continue:
@@ -832,6 +857,9 @@ class SessionMetadataDialog:
         self.result = None
         self.window.destroy()
 
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return _ui_text(self.ui_language, zh_text, en_text)
+
 
 class SettingsDialog:
     def __init__(self, parent: tk.Misc, settings_store: SettingsStore) -> None:
@@ -846,11 +874,14 @@ class SettingsDialog:
         self.query_running = False
         self._settings_canvas: tk.Canvas | None = None
         self._settings_canvas_window: int | None = None
+        self.ui_language = self.settings.ui_language
 
         self.window = tk.Toplevel(parent)
-        self.window.title("Settings")
+        self.window.title(self._t("设置", "Settings"))
         self.window.geometry("1020x760")
         self.window.minsize(860, 620)
+
+        self.ui_language_var = tk.StringVar(value=ui_language_to_label(self.settings.ui_language))
 
         self.endpoint_var = tk.StringVar(value=self.settings.endpoint)
         self.api_key_var = tk.StringVar(value=self.settings.api_key)
@@ -874,7 +905,7 @@ class SettingsDialog:
         self.design_steps_overlay_height_var = tk.StringVar(value=str(self.settings.design_steps_overlay_height))
         self.design_steps_overlay_bg_color_var = tk.StringVar(value=self.settings.design_steps_overlay_bg_color)
         self.design_steps_overlay_opacity_var = tk.StringVar(value=str(self.settings.design_steps_overlay_opacity))
-        self.connection_status_var = tk.StringVar(value="AI 连接状态: 未检测")
+        self.connection_status_var = tk.StringVar(value=self._t("AI 连接状态: 未检测", "AI connection: not checked"))
         self.prompt_db_connection_var = tk.StringVar(value=self.settings.prompt_db_connection_string)
         self.checkpoint_prompt_table_var = tk.StringVar(value=self.settings.checkpoint_prompt_table)
         self.checkpoint_prompt_key_column_var = tk.StringVar(value=self.settings.checkpoint_prompt_key_column)
@@ -911,7 +942,7 @@ class SettingsDialog:
         config_tab = ttk.Frame(notebook, padding=12)
         prompts_tab = ttk.Frame(notebook, padding=12)
         playground_tab = ttk.Frame(notebook, padding=12)
-        notebook.add(config_tab, text="配置")
+        notebook.add(config_tab, text=self._t("配置", "Configuration"))
         notebook.add(prompts_tab, text="Prompts")
         notebook.add(playground_tab, text="Playground")
 
@@ -921,8 +952,8 @@ class SettingsDialog:
 
         buttons = ttk.Frame(wrapper)
         buttons.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        ttk.Button(buttons, text="保存", command=self.save).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="取消", command=self.window.destroy).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(buttons, text=self._t("保存", "Save"), command=self.save).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text=self._t("取消", "Cancel"), command=self.window.destroy).pack(side=tk.RIGHT, padx=(0, 8))
 
     def _on_settings_wrapper_configure(self, _event: tk.Event | None = None) -> None:
         if self._settings_canvas is None:
@@ -965,39 +996,49 @@ class SettingsDialog:
         form.columnconfigure(1, weight=1)
 
         rows = [
+            (self._t("显示语言", "Display Language"), self.ui_language_var),
             ("Endpoint", self.endpoint_var),
             ("API Key", self.api_key_var),
             ("Model", self.model_var),
             ("Timeout(s)", self.timeout_var),
             ("Temperature", self.temperature_var),
-            ("视频抽帧数", self.video_frames_var),
-            ("视频录制FPS", self.video_fps_var),
-            ("分析批次步数", self.analysis_batch_size_var),
+            (self._t("视频抽帧数", "Video Frames"), self.video_frames_var),
+            (self._t("视频录制FPS", "Video FPS"), self.video_fps_var),
+            (self._t("分析批次步数", "Analysis Batch Size"), self.analysis_batch_size_var),
         ]
         for row_index, (label, variable) in enumerate(rows):
             ttk.Label(form, text=label).grid(row=row_index, column=0, sticky=tk.W, pady=6)
             show = "*" if label == "API Key" else ""
-            ttk.Entry(form, textvariable=variable, show=show).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
+            if variable is self.ui_language_var:
+                ttk.Combobox(form, textvariable=variable, state="readonly", values=ui_language_labels(), width=18).grid(row=row_index, column=1, sticky=tk.W, pady=6)
+            else:
+                ttk.Entry(form, textvariable=variable, show=show).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
 
         check_frame = ttk.Frame(parent)
         check_frame.pack(fill=tk.X, pady=(12, 0))
         ttk.Checkbutton(check_frame, text="enable_thinking", variable=self.enable_thinking_var).pack(side=tk.LEFT)
-        ttk.Checkbutton(check_frame, text="直接发送原始视频给 AI", variable=self.send_video_directly_var).pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Checkbutton(check_frame, text="发送全屏截图给 AI", variable=self.send_fullscreen_var).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Checkbutton(check_frame, text=self._t("直接发送原始视频给 AI", "Send raw video directly to AI"), variable=self.send_video_directly_var).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Checkbutton(check_frame, text=self._t("发送全屏截图给 AI", "Send full-screen screenshots to AI"), variable=self.send_fullscreen_var).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(check_frame, textvariable=self.connection_status_var).pack(side=tk.LEFT, padx=12)
-        ttk.Button(check_frame, text="检测连接", command=self.check_connection).pack(side=tk.RIGHT)
+        ttk.Button(check_frame, text=self._t("检测连接", "Check Connection"), command=self.check_connection).pack(side=tk.RIGHT)
 
         ttk.Label(
             parent,
-            text="提示: 默认会直接发送原始视频给模型；如服务端不兼容，可关闭该选项回退到旧的抽帧分析逻辑。双屏整图场景下默认只发送当前操作所在屏幕，也可切换为发送全屏截图。",
+            text=self._t(
+                "提示: 默认会直接发送原始视频给模型；如服务端不兼容，可关闭该选项回退到旧的抽帧分析逻辑。双屏整图场景下默认只发送当前操作所在屏幕，也可切换为发送全屏截图。",
+                "Tip: Raw video is sent to the model by default. If your service is incompatible, turn this off to fall back to frame-based analysis. In multi-monitor setups, only the active screen is sent by default, but you can switch to full-screen screenshots.",
+            ),
             wraplength=860,
         ).pack(anchor=tk.W, pady=(8, 0))
 
-        observation_filter_frame = ttk.LabelFrame(parent, text="AI看图发送过滤", padding=12)
+        observation_filter_frame = ttk.LabelFrame(parent, text=self._t("AI看图发送过滤", "AI Image Filter"), padding=12)
         observation_filter_frame.pack(fill=tk.X, pady=(12, 0))
         ttk.Label(
             observation_filter_frame,
-            text="以下进程名命中时，对应步骤截图不会发送给 AI看图。每行一个，默认排除 explorer、msedge、notepad，以及 WordPad 常见进程名 wordpad/write。",
+            text=self._t(
+                "以下进程名命中时，对应步骤截图不会发送给 AI看图。每行一个，默认排除 explorer、msedge、notepad，以及 WordPad 常见进程名 wordpad/write。",
+                "If a process name below matches, its screenshots will not be sent to AI image analysis. One process per line. By default explorer, msedge, notepad, and WordPad process names wordpad/write are excluded.",
+            ),
             wraplength=820,
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
@@ -1005,38 +1046,41 @@ class SettingsDialog:
         self.ai_observation_excluded_process_text.pack(fill=tk.X, pady=(8, 0))
         _set_text(self.ai_observation_excluded_process_text, self.settings.ai_observation_excluded_process_names)
 
-        remote_service_frame = ttk.LabelFrame(parent, text="远端共享 AI 服务", padding=12)
+        remote_service_frame = ttk.LabelFrame(parent, text=self._t("远端共享 AI 服务", "Shared Remote AI Service"), padding=12)
         remote_service_frame.pack(fill=tk.X, pady=(12, 0))
         remote_service_frame.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             remote_service_frame,
-            text="启用远端共享服务处理 AI 分析/方法建议/参数推荐",
+            text=self._t("启用远端共享服务处理 AI 分析/方法建议/参数推荐", "Use the shared remote service for AI analysis, method suggestions, and parameter recommendations"),
             variable=self.use_remote_ai_service_var,
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
         remote_rows = [
-            ("服务地址", self.remote_ai_service_url_var, ""),
-            ("服务 API Key", self.remote_ai_service_api_key_var, "*"),
-            ("服务超时(s)", self.remote_ai_service_timeout_var, ""),
+            (self._t("服务地址", "Service URL"), self.remote_ai_service_url_var, ""),
+            (self._t("服务 API Key", "Service API Key"), self.remote_ai_service_api_key_var, "*"),
+            (self._t("服务超时(s)", "Service Timeout(s)"), self.remote_ai_service_timeout_var, ""),
         ]
         for row_index, (label, variable, show) in enumerate(remote_rows, start=1):
             ttk.Label(remote_service_frame, text=label).grid(row=row_index, column=0, sticky=tk.W, pady=6)
             ttk.Entry(remote_service_frame, textvariable=variable, show=show).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
         ttk.Label(
             remote_service_frame,
-            text="启用后，Viewer 的 AI 分析、方法建议和参数推荐会统一走远端共享服务；AI Checkpoint 仍使用下方配置的模型 endpoint。",
+            text=self._t(
+                "启用后，Viewer 的 AI 分析、方法建议和参数推荐会统一走远端共享服务；AI Checkpoint 仍使用下方配置的模型 endpoint。",
+                "When enabled, Viewer AI analysis, method suggestions, and parameter recommendations will use the shared remote service. AI Checkpoint still uses the model endpoint configured below.",
+            ),
             wraplength=820,
             justify=tk.LEFT,
         ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
-        prompt_db_frame = ttk.LabelFrame(parent, text="AI Checkpoint 模板数据库", padding=12)
+        prompt_db_frame = ttk.LabelFrame(parent, text=self._t("AI Checkpoint 模板数据库", "AI Checkpoint Template Database"), padding=12)
         prompt_db_frame.pack(fill=tk.X, pady=(12, 0))
         prompt_db_frame.columnconfigure(1, weight=1)
         database_rows = [
-            ("MySQL 连接串", self.prompt_db_connection_var),
-            ("模板表名", self.checkpoint_prompt_table_var),
-            ("Key 列名", self.checkpoint_prompt_key_column_var),
-            ("显示列名", self.checkpoint_prompt_label_column_var),
-            ("内容列名", self.checkpoint_prompt_content_column_var),
+            (self._t("MySQL 连接串", "MySQL Connection String"), self.prompt_db_connection_var),
+            (self._t("模板表名", "Template Table"), self.checkpoint_prompt_table_var),
+            (self._t("Key 列名", "Key Column"), self.checkpoint_prompt_key_column_var),
+            (self._t("显示列名", "Label Column"), self.checkpoint_prompt_label_column_var),
+            (self._t("内容列名", "Content Column"), self.checkpoint_prompt_content_column_var),
         ]
         for row_index, (label, variable) in enumerate(database_rows):
             ttk.Label(prompt_db_frame, text=label).grid(row=row_index, column=0, sticky=tk.W, pady=6)
@@ -1045,47 +1089,49 @@ class SettingsDialog:
         ttk.Label(
             prompt_db_frame,
             text=(
-                "连接串示例: mysql+pymysql://root:password@130.147.129.203:3306/ATFrameworkDB?charset=utf8mb4\n"
-                "默认表名为 agentprompt；如果 Key 列名 / 显示列名留空，会自动尝试常见列名。"
+                self._t(
+                    "连接串示例: mysql+pymysql://root:password@130.147.129.203:3306/ATFrameworkDB?charset=utf8mb4\n默认表名为 agentprompt；如果 Key 列名 / 显示列名留空，会自动尝试常见列名。",
+                    "Connection string example: mysql+pymysql://root:password@130.147.129.203:3306/ATFrameworkDB?charset=utf8mb4\nThe default table name is agentprompt. If the key or label column is blank, common column names are tried automatically.",
+                )
             ),
             wraplength=820,
             justify=tk.LEFT,
         ).grid(row=len(database_rows), column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
-        overlay_frame = ttk.LabelFrame(parent, text="Design Steps 悬浮窗", padding=12)
+        overlay_frame = ttk.LabelFrame(parent, text=self._t("Design Steps 悬浮窗", "Design Steps Overlay"), padding=12)
         overlay_frame.pack(fill=tk.X, pady=(12, 0))
         overlay_frame.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             overlay_frame,
-            text="录制时显示 Design Steps 悬浮窗",
+            text=self._t("录制时显示 Design Steps 悬浮窗", "Show the Design Steps overlay while recording"),
             variable=self.show_design_steps_overlay_var,
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
         overlay_rows = [
-            ("宽度", self.design_steps_overlay_width_var),
-            ("高度", self.design_steps_overlay_height_var),
-            ("背景色", self.design_steps_overlay_bg_color_var),
-            ("透明度(0-1)", self.design_steps_overlay_opacity_var),
+            (self._t("宽度", "Width"), self.design_steps_overlay_width_var),
+            (self._t("高度", "Height"), self.design_steps_overlay_height_var),
+            (self._t("背景色", "Background Color"), self.design_steps_overlay_bg_color_var),
+            (self._t("透明度(0-1)", "Opacity (0-1)"), self.design_steps_overlay_opacity_var),
         ]
         for row_index, (label, variable) in enumerate(overlay_rows, start=1):
             ttk.Label(overlay_frame, text=label).grid(row=row_index, column=0, sticky=tk.W, pady=6)
             ttk.Entry(overlay_frame, textvariable=variable).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
         ttk.Label(
             overlay_frame,
-            text="背景色支持 #RRGGBB；宽高为像素；透明度范围为 0 到 1。",
+            text=self._t("背景色支持 #RRGGBB；宽高为像素；透明度范围为 0 到 1。", "Background color accepts #RRGGBB. Width and height are in pixels. Opacity must be between 0 and 1."),
             wraplength=820,
             justify=tk.LEFT,
         ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
-        exclusion_frame = ttk.LabelFrame(parent, text="录制排除规则", padding=12)
+        exclusion_frame = ttk.LabelFrame(parent, text=self._t("录制排除规则", "Recording Exclusions"), padding=12)
         exclusion_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
         ttk.Checkbutton(
             exclusion_frame,
-            text="默认排除 Automation Recorder 自身进程的所有窗口和弹窗",
+            text=self._t("默认排除 Automation Recorder 自身进程的所有窗口和弹窗", "Exclude all Automation Recorder windows and pop-ups by default"),
             variable=self.exclude_recorder_windows_var,
         ).pack(anchor=tk.W)
         ttk.Label(
             exclusion_frame,
-            text="排除进程名关键字，每行一个；命中后该进程窗口内的键盘/鼠标/滚轮事件都不录制。",
+            text=self._t("排除进程名关键字，每行一个；命中后该进程窗口内的键盘/鼠标/滚轮事件都不录制。", "Excluded process keywords, one per line. Matching processes will have keyboard, mouse, and wheel events ignored."),
             wraplength=840,
         ).pack(anchor=tk.W, pady=(10, 4))
         self.excluded_process_text = tk.Text(exclusion_frame, height=4, wrap=tk.WORD, font=("Consolas", 10))
@@ -1094,7 +1140,7 @@ class SettingsDialog:
 
         ttk.Label(
             exclusion_frame,
-            text="排除窗口关键字，每行一个；会匹配窗口标题和窗口类名。",
+            text=self._t("排除窗口关键字，每行一个；会匹配窗口标题和窗口类名。", "Excluded window keywords, one per line. Matches both window title and class name."),
             wraplength=840,
         ).pack(anchor=tk.W, pady=(10, 4))
         self.excluded_window_text = tk.Text(exclusion_frame, height=5, wrap=tk.WORD, font=("Consolas", 10))
@@ -1122,16 +1168,16 @@ class SettingsDialog:
 
         controls = ttk.Frame(parent)
         controls.pack(fill=tk.X)
-        ttk.Button(controls, text="选择图片", command=self.add_playground_images).pack(side=tk.LEFT)
-        ttk.Button(controls, text="从剪切板粘贴图片", command=self.paste_playground_images).pack(side=tk.LEFT, padx=8)
-        ttk.Button(controls, text="选择视频", command=self.add_playground_videos).pack(side=tk.LEFT)
-        ttk.Button(controls, text="清空附件", command=self.clear_playground_attachments).pack(side=tk.LEFT, padx=8)
-        ttk.Button(controls, text="发送到模型", command=self.run_playground_query).pack(side=tk.RIGHT)
+        ttk.Button(controls, text=self._t("选择图片", "Select Images"), command=self.add_playground_images).pack(side=tk.LEFT)
+        ttk.Button(controls, text=self._t("从剪切板粘贴图片", "Paste Images from Clipboard"), command=self.paste_playground_images).pack(side=tk.LEFT, padx=8)
+        ttk.Button(controls, text=self._t("选择视频", "Select Videos"), command=self.add_playground_videos).pack(side=tk.LEFT)
+        ttk.Button(controls, text=self._t("清空附件", "Clear Attachments"), command=self.clear_playground_attachments).pack(side=tk.LEFT, padx=8)
+        ttk.Button(controls, text=self._t("发送到模型", "Send to Model"), command=self.run_playground_query).pack(side=tk.RIGHT)
 
-        self.attachment_var = tk.StringVar(value="未添加附件")
+        self.attachment_var = tk.StringVar(value=self._t("未添加附件", "No attachments added"))
         ttk.Label(parent, textvariable=self.attachment_var).pack(anchor=tk.W, pady=(8, 8))
 
-        attachment_frame = ttk.LabelFrame(parent, text="附件列表")
+        attachment_frame = ttk.LabelFrame(parent, text=self._t("附件列表", "Attachments"))
         attachment_frame.pack(fill=tk.BOTH, expand=False)
         self.attachment_list = tk.Listbox(attachment_frame, height=6)
         self.attachment_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -1141,20 +1187,21 @@ class SettingsDialog:
         self.playground_system_prompt_text.pack(fill=tk.BOTH, expand=False)
         _set_text(self.playground_system_prompt_text, self.settings.default_system_prompt)
 
-        self.playground_status_var = tk.StringVar(value="未发送")
+        self.playground_status_var = tk.StringVar(value=self._t("未发送", "Not sent"))
         ttk.Label(parent, textvariable=self.playground_status_var).pack(anchor=tk.W, pady=(8, 4))
 
-        ttk.Label(parent, text="模型回答").pack(anchor=tk.W, pady=(8, 4))
+        ttk.Label(parent, text=self._t("模型回答", "Model Response")).pack(anchor=tk.W, pady=(8, 4))
         self.playground_response_text = tk.Text(parent, height=16, wrap=tk.WORD, font=("Consolas", 10))
         self.playground_response_text.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(parent, text="对话输入").pack(anchor=tk.W, pady=(12, 4))
+        ttk.Label(parent, text=self._t("对话输入", "User Prompt")).pack(anchor=tk.W, pady=(12, 4))
         self.playground_input_text = tk.Text(parent, height=10, wrap=tk.WORD, font=("Segoe UI", 11))
         self.playground_input_text.pack(fill=tk.BOTH, expand=False)
 
     def save(self) -> None:
         try:
             settings = Settings(
+                ui_language=ui_language_from_label(self.ui_language_var.get().strip()),
                 endpoint=self.endpoint_var.get().strip(),
                 api_key=self.api_key_var.get().strip(),
                 model=self.model_var.get().strip(),
@@ -1193,14 +1240,14 @@ class SettingsDialog:
             SettingsStore.parse_pattern_list(settings.excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_window_keywords)
             if settings.design_steps_overlay_width < 320:
-                raise ValueError("Design Steps 悬浮窗宽度不能小于 320")
+                raise ValueError(self._t("Design Steps 悬浮窗宽度不能小于 320", "Design Steps overlay width must be at least 320"))
             if settings.design_steps_overlay_height < 160:
-                raise ValueError("Design Steps 悬浮窗高度不能小于 160")
+                raise ValueError(self._t("Design Steps 悬浮窗高度不能小于 160", "Design Steps overlay height must be at least 160"))
             if not 0.1 <= settings.design_steps_overlay_opacity <= 1.0:
-                raise ValueError("Design Steps 悬浮窗透明度必须在 0.1 到 1 之间")
+                raise ValueError(self._t("Design Steps 悬浮窗透明度必须在 0.1 到 1 之间", "Design Steps overlay opacity must be between 0.1 and 1"))
             self.window.winfo_rgb(settings.design_steps_overlay_bg_color)
         except Exception as exc:
-            messagebox.showerror("保存失败", str(exc), parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), str(exc), parent=self.window)
             return
 
         self.settings_store.save(settings)
@@ -1211,7 +1258,7 @@ class SettingsDialog:
         if self.connectivity_running:
             return
         self.connectivity_running = True
-        self.connection_status_var.set("AI 连接状态: 检测中...")
+        self.connection_status_var.set(self._t("AI 连接状态: 检测中...", "AI connection: checking..."))
 
         def worker() -> None:
             try:
@@ -1230,7 +1277,7 @@ class SettingsDialog:
     def add_playground_images(self) -> None:
         paths = filedialog.askopenfilenames(
             parent=self.window,
-            title="选择图片",
+            title=self._t("选择图片", "Select Images"),
             filetypes=[("Image Files", "*.png;*.jpg;*.jpeg;*.bmp;*.webp"), ("All Files", "*.*")],
         )
         for path in paths:
@@ -1252,12 +1299,12 @@ class SettingsDialog:
                     self.playground_image_paths.append(path)
             self._refresh_playground_attachments()
             return
-        messagebox.showinfo("提示", "剪切板中没有可用图片。", parent=self.window)
+        messagebox.showinfo(self._t("提示", "Notice"), self._t("剪切板中没有可用图片。", "No usable image was found in the clipboard."), parent=self.window)
 
     def add_playground_videos(self) -> None:
         paths = filedialog.askopenfilenames(
             parent=self.window,
-            title="选择视频",
+            title=self._t("选择视频", "Select Videos"),
             filetypes=[("Video Files", "*.mp4;*.mov;*.avi;*.mkv;*.webm"), ("All Files", "*.*")],
         )
         for path in paths:
@@ -1277,11 +1324,11 @@ class SettingsDialog:
             return
         prompt = self.playground_input_text.get("1.0", tk.END).strip()
         if not prompt:
-            messagebox.showerror("发送失败", "请输入对话内容。", parent=self.window)
+            messagebox.showerror(self._t("发送失败", "Send failed"), self._t("请输入对话内容。", "Enter a prompt first."), parent=self.window)
             return
 
         self.query_running = True
-        self.playground_status_var.set("发送中...")
+        self.playground_status_var.set(self._t("发送中...", "Sending..."))
 
         def worker() -> None:
             try:
@@ -1303,6 +1350,7 @@ class SettingsDialog:
 
     def _build_settings_from_ui(self) -> Settings:
         return Settings(
+            ui_language=ui_language_from_label(self.ui_language_var.get().strip()),
             endpoint=self.endpoint_var.get().strip(),
             api_key=self.api_key_var.get().strip(),
             model=self.model_var.get().strip(),
@@ -1334,7 +1382,7 @@ class SettingsDialog:
 
     def _on_connection_checked(self, ok: bool, message: str) -> None:
         self.connectivity_running = False
-        prefix = "连接状态: 正常" if ok else "连接状态: 失败"
+        prefix = self._t("连接状态: 正常", "Connection: OK") if ok else self._t("连接状态: 失败", "Connection: failed")
         self.connection_status_var.set(f"{prefix} | {message}")
 
     def _refresh_playground_attachments(self) -> None:
@@ -1346,17 +1394,20 @@ class SettingsDialog:
         for path in self.playground_video_paths:
             self.attachment_list.insert(tk.END, f"video: {path}")
         total = len(self.playground_image_paths) + len(self.playground_inline_images)
-        self.attachment_var.set(f"图片 {total} 张 | 视频 {len(self.playground_video_paths)} 个")
+        self.attachment_var.set(self._t(f"图片 {total} 张 | 视频 {len(self.playground_video_paths)} 个", f"Images: {total} | Videos: {len(self.playground_video_paths)}"))
 
     def _on_playground_query_success(self, result: dict[str, object]) -> None:
         self.query_running = False
-        self.playground_status_var.set("发送完成")
+        self.playground_status_var.set(self._t("发送完成", "Sent"))
         _set_text(self.playground_response_text, str(result.get("response_text", "")))
 
     def _on_playground_query_failed(self, message: str) -> None:
         self.query_running = False
-        self.playground_status_var.set("发送失败")
-        messagebox.showerror("发送失败", message, parent=self.window)
+        self.playground_status_var.set(self._t("发送失败", "Send failed"))
+        messagebox.showerror(self._t("发送失败", "Send failed"), message, parent=self.window)
+
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return _ui_text(self.ui_language, zh_text, en_text)
 
 
 class CommentDialog:
@@ -1365,9 +1416,10 @@ class CommentDialog:
         self.engine = engine
         self.selection = None
         self._parent_was_iconic_on_open = self.parent.wm_state() == "iconic"
+        self.ui_language = _resolve_ui_language()
 
         self.window = tk.Toplevel(parent)
-        self.window.title("添加 Comment")
+        self.window.title(self._t("添加 Comment", "Add Comment"))
         self.window.geometry("900x720")
         self.window.minsize(760, 620)
         self.window.transient(parent)
@@ -1387,29 +1439,29 @@ class CommentDialog:
 
         top = ttk.Frame(wrapper)
         top.pack(fill=tk.X)
-        ttk.Button(top, text="选择截图区域", command=self.capture_region).pack(side=tk.LEFT)
-        self.selection_var = tk.StringVar(value="尚未选择区域")
+        ttk.Button(top, text=self._t("选择截图区域", "Select Region"), command=self.capture_region).pack(side=tk.LEFT)
+        self.selection_var = tk.StringVar(value=self._t("尚未选择区域", "No region selected"))
         ttk.Label(top, textvariable=self.selection_var).pack(side=tk.LEFT, padx=12)
 
-        preview_frame = ttk.LabelFrame(wrapper, text="截图预览")
+        preview_frame = ttk.LabelFrame(wrapper, text=self._t("截图预览", "Screenshot Preview"))
         preview_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 12))
-        self.preview_view = ZoomableImageView(preview_frame, empty_text="请先选择截图区域")
+        self.preview_view = ZoomableImageView(preview_frame, empty_text=self._t("请先选择截图区域", "Select a region first"))
         self.preview_view.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        ttk.Label(wrapper, text="Comment 文本").pack(anchor=tk.W)
+        ttk.Label(wrapper, text=self._t("Comment 文本", "Comment Text")).pack(anchor=tk.W)
         self.note_text = tk.Text(wrapper, height=10, wrap=tk.WORD, font=("Segoe UI", 11))
         self.note_text.pack(fill=tk.BOTH, expand=False, pady=(4, 12))
 
         buttons = ttk.Frame(wrapper)
         buttons.pack(fill=tk.X)
-        ttk.Button(buttons, text="保存", command=self.save).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="取消", command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(buttons, text=self._t("保存", "Save"), command=self.save).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text=self._t("取消", "Cancel"), command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
 
     def capture_region(self) -> None:
         self.selection = _select_region_with_window_management(
             self.parent,
             self.window,
-            "选择 Comment 截图区域",
+            self._t("选择 Comment 截图区域", "Select a comment screenshot region"),
             dialog_hide_mode="withdraw",
             parent_restore_mode="keep_iconified",
         )
@@ -1418,16 +1470,16 @@ class CommentDialog:
             return
 
         region = self.selection.to_region_dict()
-        self.selection_var.set(f"区域: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})")
+        self.selection_var.set(self._t(f"区域: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})", f"Region: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})"))
         self.preview_view.set_image(self.selection.image)
 
     def save(self) -> None:
         note = self.note_text.get("1.0", tk.END).strip()
         if not self.selection:
-            messagebox.showerror("保存失败", "请先选择截图区域。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请先选择截图区域。", "Select a screenshot region first."), parent=self.window)
             return
         if not note:
-            messagebox.showerror("保存失败", "请输入 comment 文本。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请输入 comment 文本。", "Enter comment text first."), parent=self.window)
             return
 
         self.engine.add_comment_with_media(note, self.selection.image, self.selection.to_region_dict())
@@ -1439,6 +1491,9 @@ class CommentDialog:
             self.parent.lift()
         self.window.destroy()
 
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return _ui_text(self.ui_language, zh_text, en_text)
+
 
 class WaitForImageDialog:
     def __init__(self, parent: tk.Misc, engine: RecorderEngine) -> None:
@@ -1446,9 +1501,10 @@ class WaitForImageDialog:
         self.engine = engine
         self.selection = None
         self._parent_was_iconic_on_open = self.parent.wm_state() == "iconic"
+        self.ui_language = _resolve_ui_language()
 
         self.window = tk.Toplevel(parent)
-        self.window.title("添加等待事件")
+        self.window.title(self._t("添加等待事件", "Add Wait Event"))
         self.window.geometry("900x720")
         self.window.minsize(760, 620)
         self.window.transient(parent)
@@ -1472,10 +1528,10 @@ class WaitForImageDialog:
         header = ttk.Frame(wrapper)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="添加等待事件", font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(header, text=self._t("添加等待事件", "Add Wait Event"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky=tk.W)
         ttk.Label(
             header,
-            text="框选等待区域后，可填写等待说明和最大等待时间，再保存为新的等待事件。",
+            text=self._t("框选等待区域后，可填写等待说明和最大等待时间，再保存为新的等待事件。", "After selecting a wait region, enter a description and maximum wait time, then save it as a wait event."),
             justify=tk.LEFT,
             wraplength=820,
         ).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
@@ -1483,8 +1539,8 @@ class WaitForImageDialog:
         top = ttk.Frame(wrapper)
         top.grid(row=1, column=0, sticky="ew", pady=(14, 12))
         top.columnconfigure(1, weight=1)
-        ttk.Button(top, text="选择等待区域", command=self.capture_region).grid(row=0, column=0, sticky=tk.W)
-        self.selection_var = tk.StringVar(value="尚未选择区域")
+        ttk.Button(top, text=self._t("选择等待区域", "Select Wait Region"), command=self.capture_region).grid(row=0, column=0, sticky=tk.W)
+        self.selection_var = tk.StringVar(value=self._t("尚未选择区域", "No region selected"))
         ttk.Label(top, textvariable=self.selection_var, wraplength=640, justify=tk.LEFT).grid(row=0, column=1, sticky="ew", padx=(12, 0))
 
         content = ttk.Frame(wrapper)
@@ -1493,46 +1549,46 @@ class WaitForImageDialog:
         content.columnconfigure(1, weight=2)
         content.rowconfigure(0, weight=1)
 
-        preview_frame = ttk.LabelFrame(content, text="等待区域截图预览")
+        preview_frame = ttk.LabelFrame(content, text=self._t("等待区域截图预览", "Wait Region Preview"))
         preview_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        self.preview_view = ZoomableImageView(preview_frame, empty_text="请先选择等待区域")
+        self.preview_view = ZoomableImageView(preview_frame, empty_text=self._t("请先选择等待区域", "Select a wait region first"))
         self.preview_view.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        form_frame = ttk.LabelFrame(content, text="等待配置")
+        form_frame = ttk.LabelFrame(content, text=self._t("等待配置", "Wait Settings"))
         form_frame.grid(row=0, column=1, sticky="nsew")
         form_frame.columnconfigure(1, weight=1)
         form_frame.rowconfigure(1, weight=1)
 
-        ttk.Label(form_frame, text="最大等待时间").grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 6))
+        ttk.Label(form_frame, text=self._t("最大等待时间", "Max Wait Time")).grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 6))
         timeout_input = ttk.Frame(form_frame)
         timeout_input.grid(row=0, column=1, sticky="w", padx=12, pady=(12, 6))
         ttk.Entry(timeout_input, textvariable=self.timeout_seconds_var, width=10).pack(side=tk.LEFT)
-        ttk.Label(timeout_input, text="秒").pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(timeout_input, text=self._t("秒", "s")).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(form_frame, text="等待说明").grid(row=1, column=0, sticky=tk.NW, padx=12, pady=(4, 12))
+        ttk.Label(form_frame, text=self._t("等待说明", "Wait Description")).grid(row=1, column=0, sticky=tk.NW, padx=12, pady=(4, 12))
         self.note_text = tk.Text(form_frame, height=5, wrap=tk.WORD, font=("Segoe UI", 11))
         self.note_text.grid(row=1, column=1, sticky="nsew", padx=(12, 12), pady=(4, 12))
-        self.note_text.insert("1.0", "等待此区域中的目标图片出现")
+        self.note_text.insert("1.0", self._t("等待此区域中的目标图片出现", "Wait until the target image appears in this region"))
 
         info_frame = ttk.Frame(wrapper)
         info_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         ttk.Label(
             info_frame,
-            text="说明: 当前第一版仅记录等待图片步骤，会保存框选范围、截图和最大等待时间，用于后续人工审查或转换。",
+            text=self._t("说明: 当前第一版仅记录等待图片步骤，会保存框选范围、截图和最大等待时间，用于后续人工审查或转换。", "Note: This first version only records image-wait steps. It saves the selected area, screenshot, and maximum wait time for later review or conversion."),
             wraplength=820,
             justify=tk.LEFT,
         ).pack(anchor=tk.W)
 
         buttons = ttk.Frame(wrapper)
         buttons.grid(row=4, column=0, sticky="ew", pady=(14, 0))
-        ttk.Button(buttons, text="保存", command=self.save).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="取消", command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(buttons, text=self._t("保存", "Save"), command=self.save).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text=self._t("取消", "Cancel"), command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
 
     def capture_region(self) -> None:
         self.selection = _select_region_with_window_management(
             self.parent,
             self.window,
-            "选择等待事件区域",
+            self._t("选择等待事件区域", "Select a wait-event region"),
             dialog_hide_mode="withdraw",
             parent_restore_mode="keep_iconified",
         )
@@ -1541,24 +1597,24 @@ class WaitForImageDialog:
             return
 
         region = self.selection.to_region_dict()
-        self.selection_var.set(f"区域: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})")
+        self.selection_var.set(self._t(f"区域: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})", f"Region: {region['width']}x{region['height']} @ ({region['left']}, {region['top']})"))
         self.preview_view.set_image(self.selection.image)
 
     def save(self) -> None:
         note = self.note_text.get("1.0", tk.END).strip()
         if not self.selection:
-            messagebox.showerror("保存失败", "请先选择等待区域。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请先选择等待区域。", "Select a wait region first."), parent=self.window)
             return
         if not note:
-            messagebox.showerror("保存失败", "请输入等待说明。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请输入等待说明。", "Enter a wait description first."), parent=self.window)
             return
         try:
             timeout_seconds = int(self.timeout_seconds_var.get().strip())
         except ValueError:
-            messagebox.showerror("保存失败", "最大等待时间必须是整数秒。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("最大等待时间必须是整数秒。", "The maximum wait time must be an integer number of seconds."), parent=self.window)
             return
         if timeout_seconds <= 0:
-            messagebox.showerror("保存失败", "最大等待时间必须大于 0 秒。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("最大等待时间必须大于 0 秒。", "The maximum wait time must be greater than 0 seconds."), parent=self.window)
             return
 
         self.engine.add_wait_for_image_with_media(note, self.selection.image, self.selection.to_region_dict(), timeout_seconds=timeout_seconds)
@@ -1569,6 +1625,9 @@ class WaitForImageDialog:
             self.parent.deiconify()
             self.parent.lift()
         self.window.destroy()
+
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return _ui_text(self.ui_language, zh_text, en_text)
 
 
 class AICheckpointDialog:
@@ -1598,15 +1657,16 @@ class AICheckpointDialog:
         self.result_payload: dict[str, object] | None = None
         self.preview_views: list[ZoomableImageView] = []
         self._middle_pane_ratio_initialized = False
+        self.ui_language = _resolve_ui_language(self.settings_store)
 
         self.window = tk.Toplevel(parent)
-        self.window.title("AI Checkpoint")
+        self.window.title(self._t("AI Checkpoint", "AI Checkpoint"))
         self.window.geometry("1180x860")
         self.window.minsize(980, 760)
         self.window.grab_set()
 
         self.title_var = tk.StringVar(value=draft.title)
-        self.media_var = tk.StringVar(value="尚未选择截图或视频")
+        self.media_var = tk.StringVar(value=self._t("尚未选择截图或视频", "No screenshot or video selected"))
         self.query_status_var = tk.StringVar(value=draft.query_status)
         self.video_status_var = tk.StringVar(value=draft.video_status)
         self.prompt_template_var = tk.StringVar(value=draft.prompt_template_key or "ct_validation")
@@ -1639,19 +1699,19 @@ class AICheckpointDialog:
         form = ttk.Frame(wrapper)
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, text="期望结果:").grid(row=0, column=0, sticky=tk.W, pady=6)
+        ttk.Label(form, text=self._t("期望结果:", "Expected Result:")).grid(row=0, column=0, sticky=tk.W, pady=6)
         ttk.Entry(form, textvariable=self.title_var).grid(row=0, column=1, sticky=tk.EW, pady=6)
 
         controls = ttk.Frame(wrapper)
         controls.pack(fill=tk.X, pady=(8, 8))
-        ttk.Button(controls, text="添加截图", command=self.add_image).pack(side=tk.LEFT)
-        ttk.Button(controls, text="添加历史截图", command=self.add_historical_image).pack(side=tk.LEFT, padx=8)
-        ttk.Button(controls, text="清空截图", command=self.clear_images).pack(side=tk.LEFT)
-        ttk.Button(controls, text="开始视频录制", command=self.start_video).pack(side=tk.LEFT)
-        ttk.Button(controls, text="停止视频录制", command=self.stop_video).pack(side=tk.LEFT, padx=8)
-        ttk.Button(controls, text="清空视频", command=self.clear_video).pack(side=tk.LEFT)
+        ttk.Button(controls, text=self._t("添加截图", "Add Screenshot"), command=self.add_image).pack(side=tk.LEFT)
+        ttk.Button(controls, text=self._t("添加历史截图", "Add Existing Screenshot"), command=self.add_historical_image).pack(side=tk.LEFT, padx=8)
+        ttk.Button(controls, text=self._t("清空截图", "Clear Screenshots"), command=self.clear_images).pack(side=tk.LEFT)
+        ttk.Button(controls, text=self._t("开始视频录制", "Start Video Recording"), command=self.start_video).pack(side=tk.LEFT)
+        ttk.Button(controls, text=self._t("停止视频录制", "Stop Video Recording"), command=self.stop_video).pack(side=tk.LEFT, padx=8)
+        ttk.Button(controls, text=self._t("清空视频", "Clear Video"), command=self.clear_video).pack(side=tk.LEFT)
         ttk.Button(controls, text="Clear", command=self.clear_ai_history).pack(side=tk.RIGHT, padx=(0, 8))
-        ttk.Button(controls, text="Settings", command=self.open_settings).pack(side=tk.RIGHT)
+        ttk.Button(controls, text=self._t("设置", "Settings"), command=self.open_settings).pack(side=tk.RIGHT)
 
         ttk.Label(wrapper, textvariable=self.media_var).pack(anchor=tk.W)
         ttk.Label(wrapper, textvariable=self.video_status_var).pack(anchor=tk.W, pady=(2, 0))
@@ -1665,7 +1725,7 @@ class AICheckpointDialog:
         middle.add(left, weight=2)
         middle.add(right, weight=3)
 
-        preview_frame = ttk.LabelFrame(left, text="媒体预览")
+        preview_frame = ttk.LabelFrame(left, text=self._t("媒体预览", "Media Preview"))
         preview_frame.pack(fill=tk.BOTH, expand=True)
 
         self.screenshot_preview_container = ttk.Frame(preview_frame)
@@ -1697,19 +1757,19 @@ class AICheckpointDialog:
         self.screenshot_preview_canvas.bind("<Configure>", self._on_screenshot_preview_canvas_configure)
 
         for slot_index in range(MAX_AI_CHECKPOINT_IMAGES):
-            shot_frame = ttk.LabelFrame(self.screenshot_preview_inner, text=f"截图 {slot_index + 1}")
+            shot_frame = ttk.LabelFrame(self.screenshot_preview_inner, text=self._t(f"截图 {slot_index + 1}", f"Screenshot {slot_index + 1}"))
             shot_frame.grid(row=slot_index, column=0, sticky="nsew", pady=(0, 8) if slot_index < MAX_AI_CHECKPOINT_IMAGES - 1 else 0)
             shot_frame.configure(height=AI_CHECKPOINT_PREVIEW_HEIGHT)
             shot_frame.grid_propagate(False)
-            preview_view = ZoomableImageView(shot_frame, empty_text=f"尚未选择截图 {slot_index + 1}")
+            preview_view = ZoomableImageView(shot_frame, empty_text=self._t(f"尚未选择截图 {slot_index + 1}", f"Screenshot {slot_index + 1} not selected"))
             preview_view.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
             self._bind_preview_context_menu(preview_view, slot_index)
             self.preview_views.append(preview_view)
 
         self.video_preview_container = ttk.Frame(preview_frame)
-        self.video_preview_frame = ttk.LabelFrame(self.video_preview_container, text="最近录制视频预览")
+        self.video_preview_frame = ttk.LabelFrame(self.video_preview_container, text=self._t("最近录制视频预览", "Latest Recorded Video Preview"))
         self.video_preview_frame.pack(fill=tk.BOTH, expand=True)
-        self.video_preview_view = ZoomableImageView(self.video_preview_frame, empty_text="尚未录制视频")
+        self.video_preview_view = ZoomableImageView(self.video_preview_frame, empty_text=self._t("尚未录制视频", "No video recorded"))
         self.video_preview_view.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         right_content = ttk.Frame(right)
@@ -1741,7 +1801,7 @@ class AICheckpointDialog:
         ttk.Button(query_bar, text="Query", command=self.run_query).pack(side=tk.LEFT)
         ttk.Label(query_bar, textvariable=self.query_status_var).pack(side=tk.LEFT, padx=12)
 
-        result_frame = ttk.LabelFrame(right_content, text="查询结果")
+        result_frame = ttk.LabelFrame(right_content, text=self._t("查询结果", "Query Result"))
         result_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 6))
         self.response_text = tk.Text(result_frame, height=10, wrap=tk.WORD, font=("Consolas", 10))
         self.response_text.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
@@ -1758,8 +1818,8 @@ class AICheckpointDialog:
 
         buttons = ttk.Frame(wrapper)
         buttons.pack(fill=tk.X, pady=(12, 0))
-        ttk.Button(buttons, text="保存 Checkpoint", command=self.save).pack(side=tk.RIGHT)
-        ttk.Button(buttons, text="取消", command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
+        ttk.Button(buttons, text=self._t("保存 Checkpoint", "Save Checkpoint"), command=self.save).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text=self._t("取消", "Cancel"), command=self._close).pack(side=tk.RIGHT, padx=(0, 8))
 
     def _capture_initial_image_if_needed(self) -> None:
         if self.image_selections or self.video_path:
@@ -2040,24 +2100,24 @@ class AICheckpointDialog:
             self._refresh_prompt_template_combo()
             if self.prompt_template_load_error:
                 messagebox.showwarning(
-                    "模板加载失败",
-                    f"已回退到内置模板。\n\n{self.prompt_template_load_error}",
+                        self._t("模板加载失败", "Template load failed"),
+                        self._t(f"已回退到内置模板。\n\n{self.prompt_template_load_error}", f"Fell back to built-in templates.\n\n{self.prompt_template_load_error}"),
                     parent=self.window,
                 )
 
     def run_query(self) -> None:
         prompt = self._build_prompt_from_selection()
         if not prompt:
-            messagebox.showerror("查询失败", "请输入 query/prompt。", parent=self.window)
+            messagebox.showerror(self._t("查询失败", "Query failed"), self._t("请输入 query/prompt。", "Enter a query or prompt first."), parent=self.window)
             return
         if self.video_recorder and self.video_recorder.is_recording:
-            messagebox.showerror("查询失败", "请先停止视频录制，再执行 Query。", parent=self.window)
+            messagebox.showerror(self._t("查询失败", "Query failed"), self._t("请先停止视频录制，再执行 Query。", "Stop the video recording before running the query."), parent=self.window)
             return
         if not self.image_selections and not self.video_path:
-            messagebox.showerror("查询失败", "请至少提供截图或视频。", parent=self.window)
+            messagebox.showerror(self._t("查询失败", "Query failed"), self._t("请至少提供截图或视频。", "Provide at least one screenshot or a video."), parent=self.window)
             return
 
-        self.query_status_var.set("查询中...")
+        self.query_status_var.set(self._t("查询中...", "Querying..."))
         self.last_effective_prompt = prompt
 
         def worker() -> None:
@@ -2081,7 +2141,7 @@ class AICheckpointDialog:
         _set_text(self.response_text, "")
         self.query_result = None
         self.last_effective_prompt = ""
-        self.query_status_var.set("未查询")
+        self.query_status_var.set(self._t("未查询", "Not queried"))
 
     def save(self) -> None:
         try:
@@ -2097,7 +2157,7 @@ class AICheckpointDialog:
             self.draft.clear()
             self._close()
         except Exception as exc:
-            messagebox.showerror("保存失败", str(exc), parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), str(exc), parent=self.window)
 
     def _build_checkpoint_payload(self) -> dict[str, object] | None:
         title = self.title_var.get().strip()
@@ -2108,7 +2168,7 @@ class AICheckpointDialog:
         if not step_description:
             missing_fields.append("Step Description")
         if missing_fields:
-            messagebox.showerror("保存失败", f"请填写: {'、'.join(missing_fields)}。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t(f"请填写: {'、'.join(missing_fields)}。", f"Please fill in: {', '.join(missing_fields)}."), parent=self.window)
             return None
 
         prompt = self.last_effective_prompt or self._build_prompt_from_selection()
@@ -2116,11 +2176,11 @@ class AICheckpointDialog:
         if self.video_recorder and self.video_recorder.is_recording:
             self.stop_video()
         if not self.image_selections and not self.video_path:
-            messagebox.showerror("保存失败", "请至少添加截图或视频。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请至少添加截图或视频。", "Add at least one screenshot or a video."), parent=self.window)
             return None
         session_dir = self.engine.store.session_dir
         if session_dir is None:
-            messagebox.showerror("保存失败", "当前没有可用的 session 目录。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("当前没有可用的 session 目录。", "No active session directory is available."), parent=self.window)
             return None
         session_dir = session_dir.resolve()
 
@@ -2132,14 +2192,14 @@ class AICheckpointDialog:
             try:
                 relative_path = safe_relpath(session_image_path.resolve(), session_dir)
             except Exception as exc:
-                messagebox.showerror("保存失败", f"生成截图相对路径失败:\n{exc}", parent=self.window)
+                messagebox.showerror(self._t("保存失败", "Save failed"), self._t(f"生成截图相对路径失败:\n{exc}", f"Failed to build the screenshot relative path:\n{exc}"), parent=self.window)
                 return None
             media.append({"type": "image", "path": relative_path, "region": region})
         if self.video_path and self.video_path.exists():
             try:
                 relative_video_path = safe_relpath(self.video_path.resolve(), session_dir)
             except Exception as exc:
-                messagebox.showerror("保存失败", f"生成视频相对路径失败:\n{exc}", parent=self.window)
+                messagebox.showerror(self._t("保存失败", "Save failed"), self._t(f"生成视频相对路径失败:\n{exc}", f"Failed to build the video relative path:\n{exc}"), parent=self.window)
                 return None
             media.append({"type": "video", "path": relative_video_path, "region": self.video_region or {}})
 
@@ -2159,9 +2219,11 @@ class AICheckpointDialog:
     def _refresh_media_summary(self) -> None:
         parts = [f"截图: {len(self.image_selections)} 张"]
         if self.video_path:
-            parts.append(f"视频: {self.video_path.name}")
+            parts = [self._t(f"截图: {len(self.image_selections)} 张", f"Screenshots: {len(self.image_selections)}")]
+            parts.append(self._t(f"视频: {self.video_path.name}", f"Video: {self.video_path.name}"))
         else:
-            parts.append("视频: 无")
+            parts = [self._t(f"截图: {len(self.image_selections)} 张", f"Screenshots: {len(self.image_selections)}")]
+            parts.append(self._t("视频: 无", "Video: None"))
         self.media_var.set(" | ".join(parts))
 
     def _on_query_success(self, prompt: str, result: dict[str, object]) -> None:
@@ -2173,11 +2235,11 @@ class AICheckpointDialog:
             "display_text": display_text,
         }
         _set_text(self.response_text, display_text)
-        self.query_status_var.set("查询完成")
+        self.query_status_var.set(self._t("查询完成", "Query complete"))
 
     def _on_query_error(self, message: str) -> None:
-        self.query_status_var.set("查询失败")
-        messagebox.showerror("AI 查询失败", message, parent=self.window)
+        self.query_status_var.set(self._t("查询失败", "Query failed"))
+        messagebox.showerror(self._t("AI 查询失败", "AI query failed"), message, parent=self.window)
 
     def _close(self) -> None:
         if self.video_recorder and self.video_recorder.is_recording:
@@ -2198,9 +2260,9 @@ class AICheckpointDialog:
                 if preview_frame:
                     self.video_preview_view.set_image(preview_frame)
                 else:
-                    self.video_preview_view.clear(f"视频文件: {self.video_path.name}\n无法读取预览帧")
+                    self.video_preview_view.clear(self._t(f"视频文件: {self.video_path.name}\n无法读取预览帧", f"Video file: {self.video_path.name}\nUnable to read a preview frame"))
             else:
-                self.video_preview_view.clear("视频文件不存在")
+                self.video_preview_view.clear(self._t("视频文件不存在", "The video file does not exist"))
             return
 
         self._switch_preview_mode("images")
@@ -2208,7 +2270,7 @@ class AICheckpointDialog:
             if slot_index < len(self.image_selections):
                 preview_view.set_image(self._load_preview_image(self.image_selections[slot_index][0]))
             else:
-                preview_view.clear(f"尚未选择截图 {slot_index + 1}")
+                preview_view.clear(self._t(f"尚未选择截图 {slot_index + 1}", f"Screenshot {slot_index + 1} not selected"))
 
     def _switch_preview_mode(self, mode: str) -> None:
         self.screenshot_preview_container.pack_forget()
@@ -2223,16 +2285,16 @@ class AICheckpointDialog:
 
     def _bind_preview_context_menu(self, preview_view: ZoomableImageView, slot_index: int) -> None:
         menu = tk.Menu(self.window, tearoff=0)
-        menu.add_command(label="替换为新截图", command=lambda idx=slot_index: self.capture_image(idx))
-        menu.add_command(label="替换为历史截图", command=lambda idx=slot_index: self.add_historical_image_to_slot(idx))
+        menu.add_command(label=self._t("替换为新截图", "Replace with New Screenshot"), command=lambda idx=slot_index: self.capture_image(idx))
+        menu.add_command(label=self._t("替换为历史截图", "Replace with Existing Screenshot"), command=lambda idx=slot_index: self.add_historical_image_to_slot(idx))
         menu.add_separator()
-        menu.add_command(label="删除当前截图", command=lambda idx=slot_index: self.delete_image(idx))
+        menu.add_command(label=self._t("删除当前截图", "Delete Screenshot"), command=lambda idx=slot_index: self.delete_image(idx))
         preview_view.canvas.bind("<Button-3>", lambda event, idx=slot_index, current_menu=menu: self._show_preview_context_menu(event, idx, current_menu), add="+")
 
     def _show_preview_context_menu(self, event: tk.Event, slot_index: int, menu: tk.Menu) -> None:
-        menu.entryconfigure("替换为新截图", state=tk.NORMAL if slot_index <= len(self.image_selections) and slot_index < MAX_AI_CHECKPOINT_IMAGES else tk.DISABLED)
-        menu.entryconfigure("替换为历史截图", state=tk.NORMAL if slot_index <= len(self.image_selections) and slot_index < MAX_AI_CHECKPOINT_IMAGES else tk.DISABLED)
-        menu.entryconfigure("删除当前截图", state=tk.NORMAL if slot_index < len(self.image_selections) else tk.DISABLED)
+        menu.entryconfigure(self._t("替换为新截图", "Replace with New Screenshot"), state=tk.NORMAL if slot_index <= len(self.image_selections) and slot_index < MAX_AI_CHECKPOINT_IMAGES else tk.DISABLED)
+        menu.entryconfigure(self._t("替换为历史截图", "Replace with Existing Screenshot"), state=tk.NORMAL if slot_index <= len(self.image_selections) and slot_index < MAX_AI_CHECKPOINT_IMAGES else tk.DISABLED)
+        menu.entryconfigure(self._t("删除当前截图", "Delete Screenshot"), state=tk.NORMAL if slot_index < len(self.image_selections) else tk.DISABLED)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -2246,10 +2308,10 @@ class AICheckpointDialog:
 
     def _ensure_can_use_images(self, slot_index: int) -> bool:
         if self.video_path:
-            messagebox.showinfo("提示", "当前已经有视频，截图和视频不能同时存在。请先清空视频。", parent=self.window)
+            messagebox.showinfo(self._t("提示", "Notice"), self._t("当前已经有视频，截图和视频不能同时存在。请先清空视频。", "A video already exists. Screenshots and video cannot coexist. Clear the video first."), parent=self.window)
             return False
         if slot_index >= len(self.image_selections) and len(self.image_selections) >= MAX_AI_CHECKPOINT_IMAGES:
-            messagebox.showinfo("提示", f"当前最多支持 {MAX_AI_CHECKPOINT_IMAGES} 张截图。", parent=self.window)
+            messagebox.showinfo(self._t("提示", "Notice"), self._t(f"当前最多支持 {MAX_AI_CHECKPOINT_IMAGES} 张截图。", f"A maximum of {MAX_AI_CHECKPOINT_IMAGES} screenshots is supported."), parent=self.window)
             return False
         return True
 
@@ -2257,16 +2319,16 @@ class AICheckpointDialog:
         if self.historical_screenshots_dir is not None:
             screenshots_dir = self.historical_screenshots_dir
             if not screenshots_dir.exists():
-                messagebox.showerror("添加失败", f"未找到截图目录:\n{screenshots_dir}", parent=self.window)
+                messagebox.showerror(self._t("添加失败", "Add failed"), self._t(f"未找到截图目录:\n{screenshots_dir}", f"Screenshot directory not found:\n{screenshots_dir}"), parent=self.window)
                 return None
             return screenshots_dir
         session_dir = self.engine.store.session_dir
         if session_dir is None:
-            messagebox.showerror("添加失败", "当前没有可用的 session 目录。", parent=self.window)
+            messagebox.showerror(self._t("添加失败", "Add failed"), self._t("当前没有可用的 session 目录。", "No active session directory is available."), parent=self.window)
             return None
         screenshots_dir = (session_dir / "screenshots").resolve()
         if not screenshots_dir.exists():
-            messagebox.showerror("添加失败", f"未找到截图目录:\n{screenshots_dir}", parent=self.window)
+            messagebox.showerror(self._t("添加失败", "Add failed"), self._t(f"未找到截图目录:\n{screenshots_dir}", f"Screenshot directory not found:\n{screenshots_dir}"), parent=self.window)
             return None
         return screenshots_dir
 
@@ -2284,7 +2346,7 @@ class AICheckpointDialog:
     def _materialize_image_for_session(self, image_path: Path) -> Path | None:
         session_dir = self.engine.store.session_dir
         if session_dir is None:
-            messagebox.showerror("保存失败", "当前没有可用的 session 目录。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("当前没有可用的 session 目录。", "No active session directory is available."), parent=self.window)
             return None
         session_dir = session_dir.resolve()
         image_path = image_path.resolve()
@@ -2297,10 +2359,10 @@ class AICheckpointDialog:
             with Image.open(image_path) as image:
                 copied_relative_path = self.engine.save_manual_image(image.copy(), "checkpoint")
         except Exception as exc:
-            messagebox.showerror("保存失败", f"复制历史截图失败:\n{exc}", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t(f"复制历史截图失败:\n{exc}", f"Failed to copy the existing screenshot:\n{exc}"), parent=self.window)
             return None
         if not copied_relative_path:
-            messagebox.showerror("保存失败", "复制历史截图失败。", parent=self.window)
+            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("复制历史截图失败。", "Failed to copy the existing screenshot."), parent=self.window)
             return None
         return (session_dir / copied_relative_path).resolve()
 
@@ -2319,6 +2381,9 @@ class AICheckpointDialog:
         self.draft.video_status = self.video_status_var.get()
         self.draft.query_result = self.query_result
 
+    def _t(self, zh_text: str, en_text: str) -> str:
+        return _ui_text(self.ui_language, zh_text, en_text)
+
 
 def open_settings_dialog(parent: tk.Misc, settings_store: SettingsStore) -> None:
     dialog = SettingsDialog(parent, settings_store)
@@ -2336,6 +2401,7 @@ def open_wait_for_image_dialog(parent: tk.Misc, engine: RecorderEngine) -> None:
 
 
 def capture_manual_screenshot(parent: tk.Misc, engine: RecorderEngine, prompt: str = "选择截图区域") -> str | None:
+    ui_language = _resolve_ui_language()
     parent_was_iconic = parent.wm_state() == "iconic"
     if not parent_was_iconic:
         parent.iconify()
@@ -2354,9 +2420,9 @@ def capture_manual_screenshot(parent: tk.Misc, engine: RecorderEngine, prompt: s
 
     relative_path = engine.add_manual_screenshot_with_media(selection.image, selection.to_region_dict())
     if not relative_path:
-        messagebox.showerror("保存失败", "截图保存失败。", parent=parent)
+        messagebox.showerror(_ui_text(ui_language, "保存失败", "Save failed"), _ui_text(ui_language, "截图保存失败。", "Failed to save the screenshot."), parent=parent)
         return None
-    messagebox.showinfo("截图成功", f"截图已保存:\n{relative_path}", parent=parent)
+    messagebox.showinfo(_ui_text(ui_language, "截图成功", "Screenshot saved"), _ui_text(ui_language, f"截图已保存:\n{relative_path}", f"Screenshot saved:\n{relative_path}"), parent=parent)
     return relative_path
 
 

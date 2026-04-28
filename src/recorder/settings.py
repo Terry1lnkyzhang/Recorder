@@ -9,6 +9,7 @@ from src.database.config import DB_URL
 
 @dataclass(slots=True)
 class Settings:
+    ui_language: str = "zh-CN"
     endpoint: str = "http://130.147.129.154:8001/v1/chat/completions"
     api_key: str = ""
     model: str = "Qwen/Qwen3-VL-8B-Instruct-FP8"
