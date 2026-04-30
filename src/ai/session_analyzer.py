@@ -12,6 +12,7 @@ import yaml
 
 from src.recorder.models import format_recorded_action, normalize_event_type
 from src.recorder.settings import AISettings, SettingsStore
+from src.viewer.cleaning import annotate_events_with_cleaning_signals, build_cleaning_signals
 
 from .client import OpenAICompatibleAIClient
 from .errors import AIClientError
@@ -51,6 +52,16 @@ class SessionWorkflowAnalyzer:
     ) -> SessionAnalysisResult:
         session_id = str(session_data.get("session_id", session_dir.name))
         events = list(session_data.get("events", []))
+        # Compute trial-and-error signals once and attach them to events so the
+        # downstream observation/reasoning prompts can use them. Annotation
+        # returns deep copies, leaving the caller-supplied events untouched.
+        if events:
+            try:
+                signals = build_cleaning_signals(events)
+            except Exception:
+                signals = []
+            if signals:
+                events = annotate_events_with_cleaning_signals(events, signals)
         analysis_options = session_data.get("analysis_options", {}) if isinstance(session_data.get("analysis_options", {}), dict) else {}
         include_all_screenshot_events = bool(analysis_options.get("include_all_screenshot_events", False))
         environment = session_data.get("environment", {}) if isinstance(session_data.get("environment", {}), dict) else {}
@@ -860,8 +871,36 @@ def _normalize_step_observations(
             normalized_item["is_table"] = is_table
         if action:
             normalized_item["action"] = action
+        cleaning_signals = _collect_cleaning_signals_for_observation(event)
+        if cleaning_signals:
+            normalized_item["cleaning_signals"] = cleaning_signals
         normalized.append(normalized_item)
     return normalized
+
+
+def _collect_cleaning_signals_for_observation(event: dict[str, object]) -> list[dict[str, object]]:
+    if not isinstance(event, dict):
+        return []
+    additional = event.get("additional_details")
+    if not isinstance(additional, dict):
+        return []
+    raw_signals = additional.get("cleaning_signals")
+    if not isinstance(raw_signals, list):
+        return []
+    cleaned: list[dict[str, object]] = []
+    for item in raw_signals:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", "")).strip()
+        if not kind:
+            continue
+        cleaned.append(
+            {
+                "kind": kind,
+                "reason": str(item.get("reason", "")),
+            }
+        )
+    return cleaned
 
 
 def _normalize_step_insights(parsed: dict[str, object], current_step_observations: list[dict[str, object]]) -> list[dict[str, object]]:
