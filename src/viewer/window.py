@@ -5326,7 +5326,8 @@ class RecorderViewerWindow:
         step_ids = group.get("step_ids", [])
         kept = group.get("kept_step_id")
         parts: list[str] = []
-        parts.append(f"步骤 {', '.join(str(step) for step in step_ids) if isinstance(step_ids, list) else ''}".rstrip())
+        if isinstance(step_ids, list) and step_ids:
+            parts.append(f"步骤 {', '.join(str(step) for step in step_ids)}")
         parts.append(f"决策={decision}")
         if category:
             parts.append(f"类别={category}")
@@ -5334,7 +5335,7 @@ class RecorderViewerWindow:
             parts.append(f"置信={float(confidence):.2f}")
         if isinstance(kept, int) and kept >= 1:
             parts.append(f"保留={kept}")
-        return " ｜ ".join(part for part in parts if part)
+        return " ｜ ".join(parts)
 
     def _format_group_comparison(self, group: dict[str, object]) -> str:
         row_indexes = group.get("row_indexes")

@@ -19,6 +19,7 @@ from .errors import AIClientError
 from .memory import load_carry_memory, save_carry_memory
 from .models import AnalysisBatchRecord, SessionAnalysisResult
 from .prompt_builder import (
+    _extract_cleaning_signals as _collect_cleaning_signals_for_observation,
     build_step_observation_prompt,
     build_step_reasoning_prompt,
     build_workflow_aggregation_prompt,
@@ -876,31 +877,6 @@ def _normalize_step_observations(
             normalized_item["cleaning_signals"] = cleaning_signals
         normalized.append(normalized_item)
     return normalized
-
-
-def _collect_cleaning_signals_for_observation(event: dict[str, object]) -> list[dict[str, object]]:
-    if not isinstance(event, dict):
-        return []
-    additional = event.get("additional_details")
-    if not isinstance(additional, dict):
-        return []
-    raw_signals = additional.get("cleaning_signals")
-    if not isinstance(raw_signals, list):
-        return []
-    cleaned: list[dict[str, object]] = []
-    for item in raw_signals:
-        if not isinstance(item, dict):
-            continue
-        kind = str(item.get("kind", "")).strip()
-        if not kind:
-            continue
-        cleaned.append(
-            {
-                "kind": kind,
-                "reason": str(item.get("reason", "")),
-            }
-        )
-    return cleaned
 
 
 def _normalize_step_insights(parsed: dict[str, object], current_step_observations: list[dict[str, object]]) -> list[dict[str, object]]:
