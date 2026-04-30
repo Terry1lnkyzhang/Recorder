@@ -47,6 +47,68 @@ from src.recorder.session_metadata_ai import build_missing_summary, format_keywo
 from .cleaning import CleaningSuggestion, apply_cleaning_suggestions, build_cleaning_suggestions
 
 
+def _build_invalid_step_groups(
+    analysis: dict[str, object] | None,
+    event_count: int,
+) -> list[dict[str, object]]:
+    """Normalize ``analysis['invalid_steps']`` into a flat list of groups
+    suitable for the review dialog.
+
+    Each returned group has shape::
+
+        {
+            "step_ids":    [int, ...],   # 1-based, as the AI returned them
+            "row_indexes": [int, ...],   # 0-based, clamped to [0, event_count)
+            "decision":    "delete" | "review",
+            "category":    str,
+            "confidence":  float | None,
+            "kept_step_id": int | None,
+            "reason":      str,
+            "default_checked": bool,     # True iff decision == "delete"
+        }
+
+    Groups whose ``step_ids`` do not contain any in-range step are dropped.
+    Pulled out of the class so it can be unit-tested without Tk.
+    """
+
+    if not isinstance(analysis, dict):
+        return []
+    raw_items = analysis.get("invalid_steps", [])
+    if not isinstance(raw_items, list):
+        return []
+    groups: list[dict[str, object]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        raw_step_ids = item.get("step_ids", [])
+        if not isinstance(raw_step_ids, list):
+            continue
+        step_ids = [step_id for step_id in raw_step_ids if isinstance(step_id, int) and step_id >= 1]
+        row_indexes = [step_id - 1 for step_id in step_ids if step_id - 1 < event_count]
+        if not row_indexes:
+            continue
+        decision = str(item.get("decision", "review")).strip().lower() or "review"
+        if decision not in {"delete", "review"}:
+            decision = "review"
+        confidence_raw = item.get("confidence")
+        confidence = float(confidence_raw) if isinstance(confidence_raw, (int, float)) else None
+        kept_raw = item.get("kept_step_id")
+        kept_step_id = int(kept_raw) if isinstance(kept_raw, int) and kept_raw >= 1 else None
+        groups.append(
+            {
+                "step_ids": step_ids,
+                "row_indexes": row_indexes,
+                "decision": decision,
+                "category": str(item.get("category", "")),
+                "confidence": confidence,
+                "kept_step_id": kept_step_id,
+                "reason": str(item.get("reason", "")),
+                "default_checked": decision == "delete",
+            }
+        )
+    return groups
+
+
 class RecorderViewerWindow:
     def __init__(self, master: tk.Misc, initial_path: Path | None = None) -> None:
         self.settings_store = SettingsStore(get_settings_path())
@@ -5096,33 +5158,26 @@ class RecorderViewerWindow:
             messagebox.showinfo("提示", "请先执行 AI 分析。", parent=self.window)
             return
 
-        deletions: list[int] = []
-        lines: list[str] = []
-        for item in self.ai_analysis.get("invalid_steps", []):
-            if not isinstance(item, dict) or str(item.get("decision", "")) != "delete":
-                continue
-            step_ids = item.get("step_ids", [])
-            if not isinstance(step_ids, list):
-                continue
-            valid_steps = [step_id for step_id in step_ids if isinstance(step_id, int) and step_id >= 1]
-            if not valid_steps:
-                continue
-            deletions.extend(step_id - 1 for step_id in valid_steps)
-            lines.append(f"步骤 {', '.join(str(step) for step in valid_steps)}: {item.get('reason', '')}")
-
-        if not deletions:
-            messagebox.showinfo("提示", "当前没有 AI 判定为 delete 的步骤。", parent=self.window)
+        groups = _build_invalid_step_groups(self.ai_analysis, len(self.event_rows))
+        if not groups:
+            messagebox.showinfo("提示", "AI 分析未给出任何 invalid_steps 建议。", parent=self.window)
             return
 
-        confirmed = messagebox.askyesno(
-            "应用 AI 删除建议",
-            "将删除以下 AI 判定为 delete 的步骤:\n\n" + "\n".join(lines[:12]) + ("\n..." if len(lines) > 12 else ""),
-            parent=self.window,
-        )
-        if not confirmed:
+        selected_group_indexes = self._open_invalid_steps_review_dialog(groups)
+        if selected_group_indexes is None:
+            return
+        if not selected_group_indexes:
+            messagebox.showinfo("提示", "未勾选任何步骤，已取消删除。", parent=self.window)
             return
 
-        delete_set = set(deletions)
+        delete_set: set[int] = set()
+        for index in selected_group_indexes:
+            if 0 <= index < len(groups):
+                delete_set.update(groups[index]["row_indexes"])
+        if not delete_set:
+            messagebox.showinfo("提示", "勾选的条目不包含任何有效步骤号。", parent=self.window)
+            return
+
         self.event_rows = [event for index, event in enumerate(self.event_rows) if index not in delete_set]
         if self.session_data is not None:
             self.session_data["events"] = self.event_rows
@@ -5149,6 +5204,173 @@ class RecorderViewerWindow:
         self._persist_session()
         self._reload_tree()
         messagebox.showinfo("完成", f"已删除 {len(delete_set)} 个 AI 建议删除的步骤。", parent=self.window)
+
+    def _open_invalid_steps_review_dialog(
+        self, groups: list[dict[str, object]]
+    ) -> list[int] | None:
+        """Show a checklist dialog so the user can review and toggle each
+        ``invalid_steps`` group before deletion. Returns the list of selected
+        group indexes, or ``None`` if the user cancelled."""
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title("复审 AI 删除建议")
+        dialog.geometry("960x640")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        result: dict[str, list[int] | None] = {"value": None}
+        check_vars: list[tk.BooleanVar] = [
+            tk.BooleanVar(value=bool(group.get("default_checked", False))) for group in groups
+        ]
+
+        container = ttk.Frame(dialog, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(2, weight=1)
+
+        header = ttk.Label(
+            container,
+            text=(
+                f"共 {len(groups)} 条 AI invalid_steps 建议。"
+                "默认勾选 decision=delete 的条目；review 项需手动勾选。"
+            ),
+            wraplength=900,
+            justify=tk.LEFT,
+        )
+        header.grid(row=0, column=0, sticky="ew")
+
+        def set_all_to(value: bool) -> None:
+            for var in check_vars:
+                var.set(value)
+
+        def select_only_delete() -> None:
+            for var, group in zip(check_vars, groups):
+                var.set(bool(group.get("default_checked", False)))
+
+        toolbar = ttk.Frame(container)
+        toolbar.grid(row=1, column=0, sticky="ew", pady=(6, 6))
+        ttk.Button(toolbar, text="全选", command=lambda: set_all_to(True)).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="全不选", command=lambda: set_all_to(False)).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(toolbar, text="仅勾选 delete", command=select_only_delete).pack(side=tk.LEFT, padx=(6, 0))
+
+        body = ttk.Frame(container)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(body, highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=canvas.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        rows_frame = ttk.Frame(canvas)
+        rows_frame_id = canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        rows_frame.columnconfigure(1, weight=1)
+
+        def on_rows_configure(_event: object) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def on_canvas_configure(event: object) -> None:
+            try:
+                canvas.itemconfigure(rows_frame_id, width=event.width)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        rows_frame.bind("<Configure>", on_rows_configure)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        for group_index, group in enumerate(groups):
+            row_container = ttk.LabelFrame(rows_frame, text=self._format_group_header(group), padding=8)
+            row_container.grid(row=group_index, column=0, sticky="ew", padx=4, pady=4)
+            row_container.columnconfigure(1, weight=1)
+
+            ttk.Checkbutton(row_container, variable=check_vars[group_index]).grid(row=0, column=0, sticky="nw", padx=(0, 6))
+
+            reason = str(group.get("reason", "")).strip() or "（无理由）"
+            ttk.Label(row_container, text=reason, wraplength=820, justify=tk.LEFT).grid(row=0, column=1, sticky="ew")
+
+            comparison = self._format_group_comparison(group)
+            if comparison:
+                comparison_label = tk.Label(
+                    row_container,
+                    text=comparison,
+                    justify=tk.LEFT,
+                    anchor="w",
+                    font=("Consolas", 9),
+                    fg="#555555",
+                )
+                comparison_label.grid(row=1, column=1, sticky="ew", pady=(6, 0))
+
+        def confirm() -> None:
+            result["value"] = [index for index, var in enumerate(check_vars) if var.get()]
+            dialog.destroy()
+
+        def cancel() -> None:
+            result["value"] = None
+            dialog.destroy()
+
+        button_bar = ttk.Frame(container)
+        button_bar.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(button_bar, text="取消", command=cancel).pack(side=tk.RIGHT)
+        ttk.Button(button_bar, text="应用删除", command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.wait_window()
+        return result["value"]
+
+    def _format_group_header(self, group: dict[str, object]) -> str:
+        decision = str(group.get("decision", "review")).strip() or "review"
+        category = str(group.get("category", "")).strip()
+        confidence = group.get("confidence")
+        step_ids = group.get("step_ids", [])
+        kept = group.get("kept_step_id")
+        parts: list[str] = []
+        parts.append(f"步骤 {', '.join(str(step) for step in step_ids) if isinstance(step_ids, list) else ''}".rstrip())
+        parts.append(f"决策={decision}")
+        if category:
+            parts.append(f"类别={category}")
+        if isinstance(confidence, (int, float)):
+            parts.append(f"置信={float(confidence):.2f}")
+        if isinstance(kept, int) and kept >= 1:
+            parts.append(f"保留={kept}")
+        return " ｜ ".join(part for part in parts if part)
+
+    def _format_group_comparison(self, group: dict[str, object]) -> str:
+        row_indexes = group.get("row_indexes")
+        if not isinstance(row_indexes, list) or not row_indexes:
+            return ""
+        lines: list[str] = []
+        lines.append("将删除：")
+        for row_index in row_indexes:
+            if not isinstance(row_index, int) or row_index < 0 or row_index >= len(self.event_rows):
+                continue
+            lines.append(f"  - {self._summarize_row(row_index)}")
+        kept = group.get("kept_step_id")
+        if isinstance(kept, int) and kept >= 1:
+            kept_index = kept - 1
+            if 0 <= kept_index < len(self.event_rows):
+                lines.append("将保留：")
+                lines.append(f"  - {self._summarize_row(kept_index)}")
+        return "\n".join(lines)
+
+    def _summarize_row(self, row_index: int) -> str:
+        if row_index < 0 or row_index >= len(self.event_rows):
+            return f"#{row_index + 1} (越界)"
+        event = self.event_rows[row_index]
+        if not isinstance(event, dict):
+            return f"#{row_index + 1}"
+        event_type = self._extract_event_type(event) or "?"
+        action = self._extract_event_action(event) or ""
+        ai_text = self.ai_step_texts.get(row_index, "")
+        head = f"#{row_index + 1} [{event_type}]"
+        if action:
+            head += f" {action}"
+        if ai_text:
+            head += f" — {ai_text}"
+        if len(head) > 220:
+            head = head[:217] + "..."
+        return head
 
     def _build_row_tags(self, row_index: int, include_cleaning: bool = True) -> tuple[str, ...]:
         tags: list[str] = []
