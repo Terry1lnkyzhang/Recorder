@@ -533,8 +533,8 @@ def _find_backspace_runs(events: list[dict[str, object]]) -> list[dict[str, obje
         if event_type != "input":
             flush()
             continue
-        is_bs = _input_event_has_backspace(event)
-        if is_bs:
+        is_backspace = _input_event_has_backspace(event)
+        if is_backspace:
             has_backspace = True
         if _input_event_has_non_backspace_text(event):
             has_non_backspace = True
