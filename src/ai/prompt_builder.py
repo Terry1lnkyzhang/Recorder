@@ -58,6 +58,13 @@ def build_step_reasoning_prompt(
             "previous_memory 提供更早步骤的摘要，只用于补充历史阶段和状态变化，不要把它误当成当前步骤。",
             "如能判断局部步骤可组合，可输出 reusable_modules；如发现当前或相关步骤可疑，可输出 invalid_steps；如需要等待条件，可输出 wait_suggestions。没有则输出空数组。",
             "可输出 notes 和 batch_summary，帮助记录这一批的阶段、状态变化与后续摘要。",
+            "若 current_step_observations 中的某条带有 cleaning_signals 字段，说明本地启发式检测器已发现该步可能属于试错废操作，请优先据此判断是否将其放入 invalid_steps，并把对应 kind 写到 invalid_steps[].category。",
+            "判定规则 1 — spatial_cluster_clicks：同一窗口内出现连续邻近点击但只有最后一次产生了真正的状态变化时，前面的点击均为试探/点错，标 decision=delete 并把最终生效的步骤号写入 kept_step_id。",
+            "判定规则 2 — backspace_run：输入序列中先输错再退格重输的，中间过程标 decision=delete、category=backspace_run，保留最终输入。",
+            "判定规则 3 — menu_open_close：打开菜单/下拉/弹出后未选择即按 Esc 关闭的整个开-关对标 decision=delete、category=menu_open_close。",
+            "判定规则 4 — window_visit_leave：短时间内进入另一窗口又退回原窗口且中间无任何输入或保存的，整段 decision=delete、category=window_visit_leave。",
+            "判定规则 5 — 状态回退 A→B→A：仅在 B 没有产生业务后果（保存/提交/字段值变更）时才标 delete，否则 decision=review。",
+            "invalid_steps[].decision 只能是 delete 或 review；confidence 取 0~1；若不确定则用 review，并附上 reason 说明依据。",
             "只输出 JSON。",
         ],
         "json_schema_hint": {
@@ -67,7 +74,16 @@ def build_step_reasoning_prompt(
                     "description": "选中“mAs(mA)”右侧combobox中的“6”",
                 }
             ],
-            "invalid_steps": [],
+            "invalid_steps": [
+                {
+                    "step_ids": [12, 13, 14],
+                    "decision": "delete",
+                    "category": "spatial_cluster_clicks",
+                    "confidence": 0.85,
+                    "kept_step_id": 15,
+                    "reason": "前 3 次点击均落在按钮附近但未触发动作，只有第 15 步真正打开了窗口。",
+                }
+            ],
             "reusable_modules": [
                 {
                     "start_step": 18,
@@ -223,6 +239,34 @@ def resolve_analysis_step_id(event: dict[str, object], fallback_step_id: int) ->
     return fallback_step_id
 
 
+def _extract_cleaning_signals(event: dict[str, object]) -> list[dict[str, object]]:
+    """Pull cleaning signals (set by ``annotate_events_with_cleaning_signals``)
+    out of an event so they can be forwarded to the AI prompt."""
+
+    if not isinstance(event, dict):
+        return []
+    additional = event.get("additional_details")
+    if not isinstance(additional, dict):
+        return []
+    raw_signals = additional.get("cleaning_signals")
+    if not isinstance(raw_signals, list):
+        return []
+    cleaned: list[dict[str, object]] = []
+    for item in raw_signals:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", "")).strip()
+        if not kind:
+            continue
+        cleaned.append(
+            {
+                "kind": kind,
+                "reason": str(item.get("reason", "")),
+            }
+        )
+    return cleaned
+
+
 def collect_observation_inputs(
     session_dir: Path,
     events: list[dict[str, object]],
@@ -265,6 +309,9 @@ def collect_observation_inputs(
             row["keyboard"] = keyboard
         if mouse:
             row["mouse"] = mouse
+        cleaning_signals = _extract_cleaning_signals(event)
+        if cleaning_signals:
+            row["cleaning_signals"] = cleaning_signals
         prepared_path, was_cropped = prepare_image_path_for_ai(
             path,
             event,
@@ -347,6 +394,9 @@ def collect_group_summary_inputs(
             row["keyboard"] = keyboard
         if mouse:
             row["mouse"] = mouse
+        cleaning_signals = _extract_cleaning_signals(event)
+        if cleaning_signals:
+            row["cleaning_signals"] = cleaning_signals
         prepared_path, was_cropped = prepare_image_path_for_ai(
             path,
             event,
