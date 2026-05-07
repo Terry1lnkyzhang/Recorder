@@ -166,9 +166,11 @@ class RecorderEngine:
     def reload_capture_filters(self) -> None:
         settings = self.settings_store.load() if self.settings_store else AISettings()
         self._exclude_recorder_process_windows = settings.exclude_recorder_process_windows
-        self._excluded_process_patterns = [
+        configured_process_patterns = [
             item.lower() for item in SettingsStore.parse_pattern_list(settings.excluded_process_names)
         ]
+        built_in_process_patterns = ["scrcpy", "scrcpy.exe"]
+        self._excluded_process_patterns = list(dict.fromkeys([*configured_process_patterns, *built_in_process_patterns]))
         self._excluded_window_patterns = [
             item.lower() for item in SettingsStore.parse_pattern_list(settings.excluded_window_keywords)
         ]
@@ -313,6 +315,7 @@ class RecorderEngine:
         design_steps: str = "",
         step_description: str = "",
         step_comment: str = "",
+        enable_thinking: bool = True,
     ) -> None:
         if not self.is_recording:
             raise RuntimeError("Recorder is not running.")
@@ -332,6 +335,7 @@ class RecorderEngine:
             "design_steps": design_steps,
             "step_description": step_description or step_comment,
             "step_comment": step_comment,
+            "enableThinking": bool(enable_thinking),
             "media_count": len(media),
             "created_at": utc_now_iso(),
         }
@@ -349,6 +353,7 @@ class RecorderEngine:
                 "design_steps": design_steps,
                 "step_description": step_description or step_comment,
                 "step_comment": step_comment,
+                "enableThinking": bool(enable_thinking),
             },
             window=get_active_window_info(),
             additional_details={"source": "user", "analysis_ready": True},

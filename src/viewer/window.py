@@ -104,6 +104,8 @@ class RecorderViewerWindow:
         self.suggestion_generation_running = False
         self.export_yaml_running = False
         self.debug_run_running = False
+        self.debug_step_tags: dict[int, str] = {}
+        self.debug_step_messages: dict[int, str] = {}
         self.analysis_started_at = 0.0
         self.analysis_status_base = self._t("未执行 AI 分析", "AI analysis has not been run")
         self.analysis_status_token = 0
@@ -267,11 +269,7 @@ class RecorderViewerWindow:
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self._on_event_tree_context_menu, add="+")
         self.tree.bind("<Button-1>", self._on_event_tree_mouse_down, add="+")
-        self.tree.tag_configure("clean-delete", background="#5c1f1f", foreground="#ffe7e7")
-        self.tree.tag_configure("clean-merge", background="#4e3f12", foreground="#fff6d7")
-        self.tree.tag_configure("clean-review", background="#17354d", foreground="#d9f0ff")
-        self.tree.tag_configure("ai-delete", background="#3d184f", foreground="#f2dcff")
-        self.tree.tag_configure("ai-review", background="#113f2d", foreground="#ddffef")
+        self._configure_event_tree_tags(self.tree)
 
         tree_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         tree_scroll.grid(row=0, column=1, sticky="ns")
@@ -635,11 +633,7 @@ class RecorderViewerWindow:
         x_scroll = ttk.Scrollbar(wrapper, orient=tk.HORIZONTAL, command=tree.xview)
         x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
         tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        tree.tag_configure("clean-delete", background="#5c1f1f", foreground="#ffe7e7")
-        tree.tag_configure("clean-merge", background="#4e3f12", foreground="#fff6d7")
-        tree.tag_configure("clean-review", background="#17354d", foreground="#d9f0ff")
-        tree.tag_configure("ai-delete", background="#3d184f", foreground="#f2dcff")
-        tree.tag_configure("ai-review", background="#113f2d", foreground="#ddffef")
+        self._configure_event_tree_tags(tree)
 
         self.event_list_tree = tree
         popup.protocol("WM_DELETE_WINDOW", self._close_event_list_window)
@@ -809,6 +803,8 @@ class RecorderViewerWindow:
         self.ai_analysis = None
         self.ai_step_tags = {}
         self.ai_step_texts = {}
+        self.debug_step_tags = {}
+        self.debug_step_messages = {}
         self.suggestion_result = None
         self.step_method_suggestions = {}
         self.step_module_suggestions = {}
@@ -4059,6 +4055,7 @@ class RecorderViewerWindow:
                     checkpoint.get("step_comment", ai_result.get("step_description", ai_result.get("step_comment", ""))),
                 )
             ),
+            enable_thinking=bool(checkpoint.get("enableThinking", checkpoint.get("enable_thinking", True))),
             prompt_template_key=str(checkpoint.get("prompt_template_key", "ct_validation") or "ct_validation"),
             response_text=str(checkpoint.get("response", "") or ai_result.get("display_text", "") or ai_result.get("response", "")),
             query_status="已加载历史 Checkpoint",
@@ -4076,12 +4073,17 @@ class RecorderViewerWindow:
         design_steps = str(payload.get("design_steps", ""))
         step_description = str(payload.get("step_description", payload.get("step_comment", "")))
         step_comment = str(payload.get("step_comment", step_description))
+        raw_enable_thinking = payload.get("enable_thinking", existing_checkpoint.get("enableThinking", existing_checkpoint.get("enable_thinking", True)))
+        enable_thinking = raw_enable_thinking
+        if not isinstance(enable_thinking, bool):
+            enable_thinking = str(raw_enable_thinking).strip().lower() not in {"", "0", "false", "no", "off"}
         query_payload = payload.get("query_payload", {}) if isinstance(payload.get("query_payload"), dict) else {"response": str(payload.get("response_text", ""))}
         query_payload = {
             **query_payload,
             "design_steps": design_steps,
             "step_description": step_description,
             "step_comment": step_comment,
+            "enableThinking": enable_thinking,
         }
         checkpoint_payload = {
             "title": str(payload.get("title", "AI Checkpoint")),
@@ -4092,6 +4094,7 @@ class RecorderViewerWindow:
             "design_steps": design_steps,
             "step_description": step_description,
             "step_comment": step_comment,
+            "enableThinking": enable_thinking,
             "media_count": len(media),
             "created_at": str(existing_checkpoint.get("created_at", "") or original_event.get("timestamp", "") or datetime.now().isoformat(timespec="seconds")),
         }
@@ -5166,7 +5169,205 @@ class RecorderViewerWindow:
                 else:
                     tags.append("clean-review")
                 break
+        debug_tag = self.debug_step_tags.get(row_index)
+        if debug_tag:
+            tags.append(debug_tag)
         return tuple(tags)
+
+    def _configure_event_tree_tags(self, tree: ttk.Treeview) -> None:
+        tree.tag_configure("clean-delete", background="#5c1f1f", foreground="#ffe7e7")
+        tree.tag_configure("clean-merge", background="#4e3f12", foreground="#fff6d7")
+        tree.tag_configure("clean-review", background="#17354d", foreground="#d9f0ff")
+        tree.tag_configure("ai-delete", background="#3d184f", foreground="#f2dcff")
+        tree.tag_configure("ai-review", background="#113f2d", foreground="#ddffef")
+        tree.tag_configure("debug-running", background="#f6d365", foreground="#1f1f1f")
+        tree.tag_configure("debug-success", background="#1f6f43", foreground="#eafff2")
+        tree.tag_configure("debug-failed", background="#8f1d21", foreground="#ffe9ea")
+
+    def _center_tree_item(self, tree: ttk.Treeview, item_id: str) -> None:
+        if not tree.winfo_exists() or not tree.exists(item_id):
+            return
+
+        tree.focus(item_id)
+        tree.see(item_id)
+        tree.update_idletasks()
+
+        for _ in range(2):
+            bbox = tree.bbox(item_id)
+            if not bbox:
+                return
+
+            _, item_y, _, item_height = bbox
+            viewport_height = tree.winfo_height()
+            if item_height <= 0 or viewport_height <= item_height:
+                return
+
+            item_center = item_y + (item_height / 2)
+            viewport_center = viewport_height / 2
+            scroll_units = int(round((item_center - viewport_center) / item_height))
+            if not scroll_units:
+                return
+
+            tree.yview_scroll(scroll_units, "units")
+            tree.update_idletasks()
+
+    def _refresh_debug_row_visuals(self, row_indexes: list[int], *, center_current: bool = False) -> None:
+        targets = sorted(set(row_indexes))
+        if not targets:
+            return
+        for row_index in targets:
+            row_id = str(row_index)
+            if self.tree.exists(row_id):
+                self.tree.item(row_id, tags=self._build_row_tags(row_index))
+                if center_current:
+                    self._center_tree_item(self.tree, row_id)
+                else:
+                    self.tree.focus(row_id)
+                    self.tree.see(row_id)
+            if self.event_list_tree and self.event_list_tree.winfo_exists() and self.event_list_tree.exists(row_id):
+                self.event_list_tree.item(row_id, tags=self._build_row_tags(row_index))
+                if center_current:
+                    self._center_tree_item(self.event_list_tree, row_id)
+                else:
+                    self.event_list_tree.focus(row_id)
+                    self.event_list_tree.see(row_id)
+
+    def _reset_debug_step_state(self) -> None:
+        affected_rows = list(self.debug_step_tags)
+        self.debug_step_tags = {}
+        self.debug_step_messages = {}
+        self._refresh_debug_row_visuals(affected_rows)
+
+    def _build_debug_step_requests(self, row_indexes: list[int]) -> list[dict[str, object]]:
+        suggestion_result = self._build_selected_suggestion_result(row_indexes)
+        ordered_suggestions = sorted(
+            list(getattr(suggestion_result, "suggestions", []) or []),
+            key=lambda item: int(getattr(item, "step_id", 0) or 0),
+        )
+        debug_row_indexes = [
+            int(getattr(item, "step_id", 0) or 0) - 1
+            for item in ordered_suggestions
+            if int(getattr(item, "step_id", 0) or 0) > 0 and str(getattr(item, "method_name", "") or "").strip()
+        ]
+        yaml_payload = build_atframework_yaml_dict(suggestion_result)
+        steps = yaml_payload.get("Steps", []) if isinstance(yaml_payload, dict) else []
+        if not isinstance(steps, list):
+            steps = []
+        requests_payload: list[dict[str, object]] = []
+        for row_index, step in zip(debug_row_indexes, steps):
+            if not isinstance(step, dict):
+                continue
+            payload = self._convert_debug_payload_paths_to_absolute(self._convert_atframework_step_to_debug_payload(step))
+            payload["clientStepId"] = self._build_debug_client_step_id(row_index)
+            requests_payload.append(
+                {
+                    "row_index": row_index,
+                    "payload": payload,
+                    "step_description": str(step.get("Step Description", "") or ""),
+                    "action": str(step.get("Action", step.get("Check", "")) or ""),
+                }
+            )
+        return requests_payload
+
+    @staticmethod
+    def _build_debug_client_step_id(row_index: int) -> str:
+        return f"debug-step-{row_index + 1}"
+
+    @staticmethod
+    def _extract_debug_response_payload(response: requests.Response) -> object:
+        try:
+            return response.json()
+        except Exception:
+            text = (response.text or "").strip()
+            return text or None
+
+    @staticmethod
+    def _extract_debug_message_from_payload(payload: object, fallback_status_code: int | None = None) -> str:
+        if isinstance(payload, dict):
+            for key in ("message", "msg", "detail", "result", "status"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return json.dumps(payload, ensure_ascii=False)
+        if isinstance(payload, list):
+            return json.dumps(payload, ensure_ascii=False)
+        if isinstance(payload, str) and payload.strip():
+            return payload.strip()
+        if fallback_status_code is not None:
+            return f"HTTP {fallback_status_code}"
+        return ""
+
+    @classmethod
+    def _extract_debug_response_message(cls, response: requests.Response) -> str:
+        payload = cls._extract_debug_response_payload(response)
+        return cls._extract_debug_message_from_payload(payload, fallback_status_code=response.status_code)
+
+    @classmethod
+    def _try_parse_debug_terminal_result(cls, payload: object) -> tuple[bool, str] | None:
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("completed") is not True:
+            return None
+
+        success_value = payload.get("success")
+        if isinstance(success_value, bool):
+            success = success_value
+        else:
+            return None
+
+        message = cls._extract_debug_message_from_payload(payload)
+        return success, (message or ("成功" if success else "失败"))
+
+    @staticmethod
+    def _build_debug_protocol_error_message() -> str:
+        return (
+            "调试接口协议不匹配: 当前前端按方案 A 工作，"
+            "/runteststeps 必须同步返回当前步骤的终态结果，"
+            "例如 {completed: true, success: true/false, clientStepId: 'debug-step-15', message: '...'}。"
+        )
+
+    def _execute_debug_step_request(self, payload: dict[str, object]) -> tuple[bool, str]:
+        response = requests.post(
+            "http://127.0.0.1:38002/runteststeps",
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=20,
+        )
+        response_payload = self._extract_debug_response_payload(response)
+        if response.status_code >= 400:
+            raise RuntimeError(self._extract_debug_message_from_payload(response_payload, fallback_status_code=response.status_code))
+
+        terminal_result = self._try_parse_debug_terminal_result(response_payload)
+        if terminal_result is not None:
+            return terminal_result
+
+        raise RuntimeError(self._build_debug_protocol_error_message())
+
+    def _extract_debug_error_message(self, exc: Exception) -> str:
+        response = getattr(exc, "response", None)
+        if isinstance(response, requests.Response):
+            try:
+                detail = self._extract_debug_response_message(response)
+            except Exception:
+                detail = ""
+            if detail and not detail.startswith("HTTP "):
+                return detail
+            return f"HTTP {response.status_code}"
+        return str(exc) or exc.__class__.__name__
+
+    def _on_debug_step_started(self, row_index: int, position: int, total: int, action_label: str) -> None:
+        self.debug_step_tags[row_index] = "debug-running"
+        self._refresh_debug_row_visuals([row_index], center_current=True)
+        self.load_status_var.set(f"本地ATFramework调试中: {position}/{total} | 当前步骤 {row_index + 1} | 动作 {action_label or '(空)'}")
+        self.cleaning_var.set(f"调试执行到第 {row_index + 1} 行 | {position}/{total}")
+
+    def _on_debug_step_finished(self, row_index: int, *, success: bool, message: str, position: int, total: int) -> None:
+        self.debug_step_tags[row_index] = "debug-success" if success else "debug-failed"
+        self.debug_step_messages[row_index] = message
+        self._refresh_debug_row_visuals([row_index])
+        result_label = "成功" if success else "失败"
+        self.load_status_var.set(f"本地ATFramework调试{result_label}: 第 {row_index + 1} 行 | {position}/{total} | {message}")
+        self.cleaning_var.set(f"第 {row_index + 1} 行调试{result_label}: {message}")
 
     def _load_ai_analysis(self, session_dir: Path) -> dict[str, object] | None:
         analysis_path = session_dir / "ai_analysis.json"
@@ -6426,64 +6627,71 @@ class RecorderViewerWindow:
             return
 
         try:
-            suggestion_result = self._build_selected_suggestion_result(row_indexes)
-            yaml_payload = build_atframework_yaml_dict(suggestion_result)
-            steps = yaml_payload.get("Steps", []) if isinstance(yaml_payload, dict) else []
-            if not isinstance(steps, list):
-                steps = []
-            debug_payloads = [
-                self._convert_debug_payload_paths_to_absolute(self._convert_atframework_step_to_debug_payload(step))
-                for step in steps
-                if isinstance(step, dict)
-            ]
+            debug_requests = self._build_debug_step_requests(row_indexes)
         except Exception as exc:
             messagebox.showerror("调试失败", str(exc), parent=self.window)
             self.load_status_var.set(f"本地ATFramework调试调用失败: {exc}")
             return
 
-        if not debug_payloads:
+        if not debug_requests:
             messagebox.showinfo("提示", "当前选中步骤没有可调试的 ATFramework 方法建议。", parent=self.window)
             return
 
+        self._reset_debug_step_state()
         self.debug_run_running = True
         self.debug_run_button.configure(state=tk.DISABLED)
-        request_payload = self._build_debug_request_payload(debug_payloads)
-        self.load_status_var.set(f"正在调用本地ATFramework调试: 准备发送 {len(debug_payloads)} 条步骤")
-        self.cleaning_var.set(f"本地ATFramework调试中: 准备发送 {len(debug_payloads)} 条步骤")
+        self.load_status_var.set(f"正在调用本地ATFramework调试: 准备发送 {len(debug_requests)} 条步骤")
+        self.cleaning_var.set(f"本地ATFramework调试中: 准备发送 {len(debug_requests)} 条步骤")
 
         def worker() -> None:
-            failures: list[str] = []
+            step_results: list[dict[str, object]] = []
             success_count = 0
-            try:
-                response = requests.post(
-                    "http://127.0.0.1:38002/runteststeps",
-                    headers={"Content-Type": "application/json"},
-                    json=request_payload,
-                    timeout=20,
+            for position, item in enumerate(debug_requests, start=1):
+                row_index = int(item.get("row_index", -1))
+                payload = item.get("payload", {})
+                action_label = str(item.get("action", "") or "")
+                self.window.after(0, lambda row_index=row_index, position=position, total=len(debug_requests), action_label=action_label: self._on_debug_step_started(row_index, position, total, action_label))
+                try:
+                    success, message = self._execute_debug_step_request(payload)
+                    if success:
+                        success_count += 1
+                except Exception as exc:
+                    success = False
+                    message = self._extract_debug_error_message(exc)
+                step_results.append({"row_index": row_index, "success": success, "message": message})
+                self.window.after(
+                    0,
+                    lambda row_index=row_index, success=success, message=message, position=position, total=len(debug_requests): self._on_debug_step_finished(
+                        row_index,
+                        success=success,
+                        message=message,
+                        position=position,
+                        total=total,
+                    ),
                 )
-                response.raise_for_status()
-                success_count = len(debug_payloads)
-            except Exception as exc:
-                failures.append(f"调试调用失败: {exc} | payload={json.dumps(request_payload, ensure_ascii=False)}")
-                self.window.after(0, lambda message=str(exc): self.load_status_var.set(f"本地ATFramework调试调用失败: {message}"))
+                if not success:
+                    break
 
             self.window.after(
                 0,
-                lambda success_count=success_count, total=len(debug_payloads), failures=failures: self._on_debug_atframework_steps_finished(
+                lambda success_count=success_count, total=len(debug_requests), step_results=step_results: self._on_debug_atframework_steps_finished(
                     success_count,
                     total,
-                    failures,
+                    step_results,
                 ),
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_debug_atframework_steps_finished(self, success_count: int, total: int, failures: list[str]) -> None:
+    def _on_debug_atframework_steps_finished(self, success_count: int, total: int, step_results: list[dict[str, object]]) -> None:
         self.debug_run_running = False
         self.debug_run_button.configure(state=tk.NORMAL)
+        failures = [item for item in step_results if not bool(item.get("success"))]
         if failures:
+            first_failure = failures[0]
+            failure_message = str(first_failure.get("message", "") or "未知错误")
             self.load_status_var.set(f"本地ATFramework调试调用失败: 成功 {success_count}/{total}")
-            self.cleaning_var.set(f"本地ATFramework调试调用失败: 成功 {success_count}/{total} | {failures[0]}")
+            self.cleaning_var.set(f"本地ATFramework调试调用失败: 成功 {success_count}/{total} | 第 {int(first_failure.get('row_index', -1)) + 1} 行 | {failure_message}")
             return
         self.load_status_var.set(f"本地ATFramework调试完成: 成功 {success_count}/{total}")
         self.cleaning_var.set(f"本地ATFramework调试完成: {success_count}/{total}")

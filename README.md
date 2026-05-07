@@ -18,6 +18,7 @@
 - Viewer 支持更大预览区域，且可在鼠标指向位置用滚轮缩放图片
 - AI Checkpoint 截图 1 和截图 2 会分开展示并支持滚轮缩放；视频模式会显示视频预览
 - AI Checkpoint 关闭窗口后会保留草稿，只有点击保存 Checkpoint 后才清空
+- 主界面提供独立的 Android 操作录制面板入口，可刷新设备、打开 scrcpy 镜像、启动/停止 Android 操作录制、抓取 uiautomator2 页面树并调试 XPath
 
 ## 目录
 
@@ -47,6 +48,12 @@
 ```powershell
 pip install -r requirements.txt
 ```
+
+如果要使用 Android 面板，还需要额外准备：
+
+- Android SDK Platform Tools（需要 `adb`）
+- `scrcpy`（用于镜像和在 PC 上操作手机）
+- Android 设备已开启开发者选项和 USB 调试
 
 ## 运行
 
@@ -120,6 +127,50 @@ dist/
 - 如果要使用 AI 功能，目标机器需要能访问配置好的 AI endpoint
 
 AI 参数设置会保存到项目根目录的 `recorder_settings.json`。
+
+## Android 面板
+
+主界面新增了一个独立的 `Android 录屏` 按钮。这个面板与当前 Windows 录制链分离，不会复用 `RecorderEngine` 的桌面键鼠监听逻辑。
+
+当前支持：
+
+- 刷新 Android 设备列表（基于 `adb devices -l`）
+- 启动 `scrcpy` 镜像窗口，供人工在 PC 上操作手机
+- 启动和停止 Android 操作录制
+- 当用户通过 `scrcpy` 窗口操作手机时，记录点击、滚轮和键盘输入事件
+- 每条 Android 操作事件自动抓取设备截图，并尽量提取目标控件的 `text/resource-id/content-desc/class/bounds`
+- 使用 `uiautomator2` 抓取当前 hierarchy XML 和当前 package/activity 元数据
+- 在面板内直接执行 XPath 查询，查看命中的基础节点属性
+
+注意：
+
+- Android 操作录制当前要求用户通过 `scrcpy` 窗口操作手机，Recorder 才能在 PC 侧捕获操作并映射回设备坐标
+- 当前 MVP 主要覆盖点击、滚轮和键盘输入，后续还可以继续补充拖拽、返回键聚合和输入合并
+- XPath 建议作为辅助字段，录制主数据更适合保留 `resource-id`、`text`、`content-desc` 和 `bounds`
+
+如果要把 Android 能力随程序一起分发，不依赖目标机器预装 `adb` / `scrcpy`，推荐把工具直接放到项目资源目录：
+
+```text
+converter_assets/
+  android_tools/
+    platform-tools/
+      adb.exe
+      AdbWinApi.dll
+      AdbWinUsbApi.dll
+      ...
+    scrcpy/
+      scrcpy.exe
+      SDL2.dll
+      ...
+```
+
+当前 Android 面板会按这个顺序查找工具：
+
+- 用户在面板里手工填写的路径
+- 系统 PATH 中的 `adb` / `scrcpy`
+- 程序资源目录下的 `converter_assets/android_tools/...`
+
+由于打包脚本已经会把整个 `converter_assets` 目录带进 `dist/Recorder`，所以只要把这些工具放在上面的目录里，分发出去的 Recorder 就能直接在别的机器上使用，不要求对方先单独安装 Android SDK。
 
 默认 AI 设置：
 

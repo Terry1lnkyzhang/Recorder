@@ -455,6 +455,14 @@ def _derive_agent_interface_values(event: dict[str, Any]) -> tuple[dict[str, Any
         derived_values["query"] = query
         evidence_map["query"] = [f"事件明细.checkpoint.query={query}"]
 
+    raw_enable_thinking = checkpoint.get("enableThinking", checkpoint.get("enable_thinking"))
+    if raw_enable_thinking is False:
+        derived_values["enableThinking"] = False
+        evidence_map["enableThinking"] = ["事件明细.checkpoint.enableThinking=false，关闭 Thinking 时显式传 enableThinking=False"]
+    elif isinstance(raw_enable_thinking, str) and raw_enable_thinking.strip().lower() in {"0", "false", "no", "off"}:
+        derived_values["enableThinking"] = False
+        evidence_map["enableThinking"] = [f"事件明细.checkpoint.enableThinking={raw_enable_thinking}，关闭 Thinking 时显式传 enableThinking=False"]
+
     rect = _extract_agent_interface_rect(media_items)
     if rect is not None:
         derived_values["rect"] = rect

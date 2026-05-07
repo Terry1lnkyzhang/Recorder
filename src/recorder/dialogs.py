@@ -184,6 +184,7 @@ class AICheckpointDraft:
     query_text: str = ""
     design_steps: str = ""
     step_comment: str = ""
+    enable_thinking: bool = True
     prompt_template_key: str = "ct_validation"
     response_text: str = ""
     query_status: str = "未查询"
@@ -199,6 +200,7 @@ class AICheckpointDraft:
         self.query_text = ""
         self.design_steps = ""
         self.step_comment = ""
+        self.enable_thinking = True
         self.prompt_template_key = "ct_validation"
         self.response_text = ""
         self.query_status = "未查询"
@@ -1669,6 +1671,7 @@ class AICheckpointDialog:
         self.media_var = tk.StringVar(value=self._t("尚未选择截图或视频", "No screenshot or video selected"))
         self.query_status_var = tk.StringVar(value=draft.query_status)
         self.video_status_var = tk.StringVar(value=draft.video_status)
+        self.enable_thinking_var = tk.BooleanVar(value=draft.enable_thinking)
         self.prompt_template_var = tk.StringVar(value=draft.prompt_template_key or "ct_validation")
         self.last_effective_prompt = draft.prompt
         self.prompt_template_options: list[AICheckpointPromptTemplateOption] = []
@@ -1799,6 +1802,7 @@ class AICheckpointDialog:
         query_bar = ttk.Frame(preset_frame)
         query_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
         ttk.Button(query_bar, text="Query", command=self.run_query).pack(side=tk.LEFT)
+        ttk.Checkbutton(query_bar, text=self._t("启用 Thinking", "Enable Thinking"), variable=self.enable_thinking_var).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(query_bar, textvariable=self.query_status_var).pack(side=tk.LEFT, padx=12)
 
         result_frame = ttk.LabelFrame(right_content, text=self._t("查询结果", "Query Result"))
@@ -2122,11 +2126,14 @@ class AICheckpointDialog:
 
         def worker() -> None:
             try:
-                client = OpenAICompatibleAIClient(self.settings_store.load())
+                settings = self.settings_store.load()
+                settings.enable_thinking = self.enable_thinking_var.get()
+                client = OpenAICompatibleAIClient(settings)
                 result = client.query(
                     user_prompt=prompt,
                     image_paths=[item[0] for item in self.image_selections],
                     video_path=self.video_path,
+                    extra_body=self._build_checkpoint_query_extra_body(),
                 )
             except (AIClientError, Exception) as exc:
                 self.window.after(0, lambda: self._on_query_error(str(exc)))
@@ -2142,6 +2149,19 @@ class AICheckpointDialog:
         self.query_result = None
         self.last_effective_prompt = ""
         self.query_status_var.set(self._t("未查询", "Not queried"))
+
+    def _build_checkpoint_query_extra_body(self) -> dict[str, object]:
+        enable_thinking = self.enable_thinking_var.get()
+        return {
+            "max_tokens": 32768,
+            "temperature": 1.0 if enable_thinking else 0.7,
+            "top_p": 0.95 if enable_thinking else 0.8,
+            "top_k": 20,
+            "min_p": 0.0,
+            "presence_penalty": 1.5,
+            "repetition_penalty": 1.0,
+            "chat_template_kwargs": {"enable_thinking": enable_thinking},
+        }
 
     def save(self) -> None:
         try:
@@ -2214,6 +2234,7 @@ class AICheckpointDialog:
             "design_steps": self._get_design_steps_text(),
             "step_description": step_description,
             "step_comment": step_description,
+            "enable_thinking": self.enable_thinking_var.get(),
         }
 
     def _refresh_media_summary(self) -> None:
@@ -2372,6 +2393,7 @@ class AICheckpointDialog:
         self.draft.query_text = self._get_query_text()
         self.draft.design_steps = self._get_design_steps_text()
         self.draft.step_comment = self._get_step_comment_text()
+        self.draft.enable_thinking = self.enable_thinking_var.get()
         self.draft.prompt_template_key = self.prompt_template_var.get().strip() or "ct_validation"
         self.draft.response_text = self.response_text.get("1.0", tk.END).strip()
         self.draft.query_status = self.query_status_var.get()

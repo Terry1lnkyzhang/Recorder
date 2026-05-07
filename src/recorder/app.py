@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 from src.common.app_logging import configure_app_logging, get_logger, install_global_exception_logging
 from src.common.runtime_paths import get_recordings_dir, get_settings_path
 from src.common.session_discovery import scan_session_candidates
+from src.android_recorder.dialog import AndroidRecorderDialog
 from .dialogs import (
     AICheckpointDraft,
     SessionMetadataDraft,
@@ -459,6 +460,7 @@ class RecorderApp:
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
         self._manual_screenshot_in_progress = False
+        self.android_recorder_dialog: AndroidRecorderDialog | None = None
         self.current_settings = self.settings_store.load()
         self.status_var = tk.StringVar(value=self._t("就绪", "Ready"))
         self.session_var = tk.StringVar(value=self._t("未开始录制", "Not recording"))
@@ -536,6 +538,9 @@ class RecorderApp:
 
         self.viewer_button = ttk.Button(secondary_actions, text="", command=self.open_viewer)
         self.viewer_button.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.android_button = ttk.Button(secondary_actions, text="", command=self.open_android_recorder)
+        self.android_button.pack(side=tk.LEFT, padx=(10, 0))
 
         self.settings_button = ttk.Button(secondary_actions, text="", command=self.open_settings)
         self.settings_button.pack(side=tk.LEFT, padx=(10, 0))
@@ -615,6 +620,8 @@ class RecorderApp:
 
         def worker() -> None:
             try:
+                if self.android_recorder_dialog is not None and self.android_recorder_dialog.is_open() and self.android_recorder_dialog.operation_recorder.is_recording:
+                    self.android_recorder_dialog.stop_capture_for_main()
                 session_dir, suggestions_path = self.engine.stop()
             except RuntimeError as exc:
                 self.logger.exception("Stop recording failed")
@@ -1003,6 +1010,21 @@ class RecorderApp:
         self.wait_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.screenshot_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
         self.checkpoint_button.configure(state=tk.NORMAL if can_operate else tk.DISABLED)
+        self.android_button.configure(state=tk.NORMAL)
+
+    def open_android_recorder(self) -> None:
+        if self.android_recorder_dialog is not None and self.android_recorder_dialog.is_open():
+            self.android_recorder_dialog.focus()
+            return
+        self.android_recorder_dialog = AndroidRecorderDialog(
+            self.root,
+            output_dir=get_recordings_dir(),
+            ui_language=self.current_settings.ui_language,
+            settings_store=self.settings_store,
+            is_main_recording_active=lambda: self.engine.is_recording,
+            get_main_session_metadata_draft=lambda: self.session_metadata_draft,
+            get_main_session_store=lambda: self.engine.store if self.engine.is_recording and self.engine.store.session_dir is not None and self.engine.store.data is not None else None,
+        )
 
     def _apply_ui_language(self) -> None:
         self.root.title(self._t("Automation Recorder", "Automation Recorder"))
@@ -1021,6 +1043,7 @@ class RecorderApp:
         self.screenshot_button.configure(text=self._t("记录截图", "Capture Screenshot"))
         self.checkpoint_button.configure(text=self._t("添加 AI Checkpoint", "Add AI Checkpoint"))
         self.viewer_button.configure(text=self._t("查看录制内容", "Open Viewer"))
+        self.android_button.configure(text=self._t("Android 操作录制", "Android Operation Recorder"))
         self.settings_button.configure(text=self._t("设置", "Settings"))
         self.notes_frame.configure(text=self._t("说明", "Notes"))
         self.notes_label.configure(text=self._t(
@@ -1032,7 +1055,8 @@ class RecorderApp:
             "6. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
             "7. 支持暂停/继续录制，以及导入已有 session 后继续录制。\n"
             "8. 停止录制会在后台收尾，不再阻塞整个窗口。\n"
-            "9. Session 元数据在录制完成后也可以在 Session Viewer 中继续修改。",
+            "9. Session 元数据在录制完成后也可以在 Session Viewer 中继续修改。\n"
+            "10. Android 操作录制入口是独立面板，要求通过 scrcpy 操作手机，并结合 uiautomator2 抓取截图和控件信息，不会混入当前 Windows 录制链。",
             "1. When you start recording, the app first collects session metadata, then listens for keyboard, mouse-click, and wheel events.\n"
             "2. Comment lets you drag-select a screenshot region and enter a detailed note.\n"
             "3. Wait events let you select a wait region and save a screenshot for image-appearance wait steps.\n"
@@ -1041,7 +1065,8 @@ class RecorderApp:
             "6. Save writes the current session snapshot and suggestions immediately.\n"
             "7. Recording can be paused/resumed, and you can continue from an existing session.\n"
             "8. Stopping recording completes background cleanup without blocking the window.\n"
-            "9. Session metadata can still be edited later in Session Viewer."
+            "9. Session metadata can still be edited later in Session Viewer.\n"
+            "10. Android operation recording lives in a separate panel, requires operating the phone through scrcpy, and combines screenshots plus uiautomator2 element data instead of the current Windows recording pipeline."
         ))
         self._refresh_controls()
 
