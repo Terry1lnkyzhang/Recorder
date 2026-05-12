@@ -12,7 +12,7 @@ def build_step_observation_prompt() -> str:
     instruction = {
         "task": "观察当前桌面自动化步骤，仅基于截图提取事实层描述",
         "requirements": [
-            "截图上红色框选区域是当前操作目标。",
+            "截图上如果有有红色框区，则红色框区是重点关注目标",
             "请针对每一步输出 6 个字段：control_type、label、relative_position、need_scroll、is_table、action。不要输出其他字段。",
             "control_type 表示红框对应控件的类型，例如 button、editbox、combobox、checkbox、radiobutton、tab、menuitem、table、row、cell、list、listitem、dialog、panel；无法确定时可用 unknown。",
             "label 表示红框目标控件自身的文字标签，或与该控件最直接对应的字段标签。对于 combobox 和 editbox，label 不应取控件内部当前显示的值或输入内容，而应优先取最直接对应的字段标签。必须准确使用截图原文，不要猜测、改写、翻译、缩写或替换成其他近似词；没有明确 label 时返回空字符串。",

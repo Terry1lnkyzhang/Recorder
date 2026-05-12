@@ -199,7 +199,7 @@ class AISuggestionService:
             evidence_map=evidence_map,
             missing_map=missing_map,
         )
-        suggestion.parameters = parameter_suggestions
+        suggestion.parameters = _normalize_parameter_suggestions_for_method(method_name, parameter_suggestions)
         return [
             "参数推荐基于方法建议、事件明细和 AI看图内容生成。",
             "当前参数推荐未调用 AI。",
@@ -216,7 +216,8 @@ class AISuggestionService:
         if reason:
             suggestion.reason = reason
         if parameters:
-            suggestion.parameters = parameters
+            method_name = selected_method or str(suggestion.method_name or "")
+            suggestion.parameters = _normalize_parameter_suggestions_for_method(method_name, parameters)
         return notes
 
     def recommend_parameters_for_suggestion(
@@ -334,17 +335,10 @@ def _derive_find_control_by_name_values(
         derived_values["scrollable"] = scrollable
         evidence_map["scrollable"] = [f"AI看图: scroll={str(scrollable).lower()}"]
 
-    click_point = _extract_click_point(event)
-    if click_point is not None:
-        derived_values["clickPoint"] = click_point
-        evidence_map["clickPoint"] = [f"事件明细.mouse=({click_point[0]}, {click_point[1]})"]
-
     cell_value = _derive_cell_value(event, observation)
     if cell_value is not None and cell_value != "":
         derived_values["cellValue"] = cell_value
         evidence_map["cellValue"] = [_build_cell_value_evidence(event, cell_value, observation)]
-    else:
-        missing_map["cellValue"] = "当前事件明细无法确定 cellValue。"
 
     return derived_values, evidence_map, missing_map
 
@@ -399,6 +393,11 @@ def _derive_get_screenshot_values(event: dict[str, Any]) -> tuple[dict[str, Any]
         evidence_map["filePath"] = [f"事件明细.media[0].path 文件名={file_name}"]
     else:
         missing_map["filePath"] = "事件明细中没有可用的 media.path。"
+
+    rect = _extract_agent_interface_rect(media_items)
+    if rect is not None:
+        derived_values["rect"] = rect
+        evidence_map["rect"] = [f"事件明细.media[0].region={rect}"]
 
     return derived_values, evidence_map, missing_map
 
@@ -676,6 +675,71 @@ def _build_parameter_suggestions_from_schema(
             )
         )
     return _reorder_parameter_suggestions(str(suggestion.method_name or ""), suggestions)
+
+
+def _normalize_parameter_suggestions_for_method(
+    method_name: str,
+    suggestions: list[MethodParameterSuggestion],
+) -> list[MethodParameterSuggestion]:
+    normalized_method = str(method_name or "").strip().lower()
+    if normalized_method != "findcontrolbyname":
+        return suggestions
+
+    filtered: list[MethodParameterSuggestion] = []
+    for item in suggestions:
+        normalized_item = _normalize_find_control_parameter_item(item)
+        if normalized_item is None:
+            continue
+        filtered.append(normalized_item)
+    return filtered
+
+
+def _normalize_find_control_parameter_item(item: MethodParameterSuggestion) -> MethodParameterSuggestion | None:
+    if _should_skip_find_control_parameter(item):
+        return None
+
+    name = str(item.name or "").strip().lower()
+    if name != "paramdict" or not isinstance(item.suggested_value, dict):
+        return item
+
+    filtered_value: dict[str, Any] = {}
+    for key, value in item.suggested_value.items():
+        nested_item = MethodParameterSuggestion(name=str(key), suggested_value=value)
+        if _should_skip_find_control_parameter(nested_item):
+            continue
+        filtered_value[key] = value
+
+    if not filtered_value:
+        return None
+
+    return MethodParameterSuggestion(
+        name=item.name,
+        suggested_value=filtered_value,
+        confidence=item.confidence,
+        evidence=list(item.evidence),
+        missing_reason=item.missing_reason,
+    )
+
+
+def _should_skip_find_control_parameter(item: MethodParameterSuggestion) -> bool:
+    name = str(item.name or "").strip().lower()
+    if not name:
+        return False
+    if name in {"clickpoint", "point", "x", "y", "absolute", "coordinate", "coordinates"}:
+        return True
+    if name in {"scrollable", "scroll"}:
+        return _is_false_like_value(item.suggested_value)
+    if name in {"table", "is_table", "istable"}:
+        return _is_false_like_value(item.suggested_value)
+    return False
+
+
+def _is_false_like_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value is False
+    if isinstance(value, str):
+        return value.strip().lower() == "false"
+    return False
 
 
 def _reorder_parameter_names_for_method(method_name: str, ordered_names: list[str]) -> list[str]:

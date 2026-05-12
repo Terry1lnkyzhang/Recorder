@@ -80,6 +80,13 @@ def _apply_parameter_summary_override(parameter_map: dict[str, Any], suggestion:
 
 
 def _parse_parameter_summary_override(raw_override: str) -> dict[str, Any]:
+    try:
+        parsed_json = json.loads(raw_override)
+    except Exception:
+        parsed_json = None
+    if isinstance(parsed_json, dict):
+        return {str(key): value for key, value in parsed_json.items() if str(key).strip()}
+
     result: dict[str, Any] = {}
     for part in _split_parameter_override_segments(raw_override):
         segment = part.strip()

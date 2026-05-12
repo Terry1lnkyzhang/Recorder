@@ -451,6 +451,7 @@ class AndroidRecorderDialog:
             baseline_name=str(payload.get("baseline_name", "")),
             name=str(payload.get("name", "")),
             recorder_person=str(payload.get("recorder_person", "")),
+            converter_person=str(payload.get("converter_person", "")),
             design_steps=str(payload.get("design_steps", "")),
             preconditions=str(payload.get("preconditions", "")),
             configuration_requirements=str(payload.get("configuration_requirements", "")),

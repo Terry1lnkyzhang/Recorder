@@ -4,6 +4,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from src.common.session_summary import normalize_session_review_status
+
 
 _VK_CODE_NAME_MAP = {
     96: "0",
@@ -87,11 +89,14 @@ class SessionMetadata:
     baseline_name: str = ""
     name: str = ""
     recorder_person: str = ""
+    converter_person: str = ""
     design_steps: str = ""
     preconditions: str = ""
     configuration_requirements: str = ""
     extra_devices: str = ""
     scope: str = "All"
+    review_status: str = ""
+    review_comments: str = ""
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> SessionMetadata:
@@ -113,11 +118,14 @@ class SessionMetadata:
             baseline_name=str(data.get("baseline_name", "")),
             name=name,
             recorder_person=str(data.get("recorder_person", "")),
+            converter_person=str(data.get("converter_person", "")),
             design_steps=str(data.get("design_steps", "")),
             preconditions=str(data.get("preconditions", "")),
             configuration_requirements=str(data.get("configuration_requirements", "")),
             extra_devices=str(data.get("extra_devices", "")),
             scope=scope,
+            review_status=normalize_session_review_status(data.get("review_status", "")),
+            review_comments=str(data.get("review_comments", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -129,11 +137,14 @@ class SessionMetadata:
             "baseline_name": self.baseline_name,
             "name": "" if self.is_prs_recording else self.name,
             "recorder_person": self.recorder_person,
+            "converter_person": self.converter_person,
             "design_steps": self.design_steps,
             "preconditions": self.preconditions,
             "configuration_requirements": self.configuration_requirements,
             "extra_devices": self.extra_devices,
             "scope": self.scope,
+            "review_status": normalize_session_review_status(self.review_status),
+            "review_comments": self.review_comments,
         }
 
 

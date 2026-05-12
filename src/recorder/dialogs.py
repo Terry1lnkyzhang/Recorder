@@ -26,7 +26,7 @@ from .session_metadata_ai import (
 from src.common.image_widgets import ZoomableImageView
 from src.common.media_utils import load_video_preview_frame
 
-from .capture import RegionVideoRecorder, select_region
+from .capture import RegionSelection, RegionVideoRecorder, select_region
 from .recorder import RecorderEngine
 from .system_info import safe_relpath
 
@@ -71,7 +71,7 @@ AI_CHECKPOINT_EXTRACTION_PROMPT = """你是一名严谨的图像信息提取助�
 
 SESSION_SCOPE_OPTIONS = ["All", "Sub"]
 PRS_RECORDING_OPTIONS = [("是", True), ("否", False)]
-SESSION_PROJECT_OPTIONS = ["Taichi", "Kylin", "Earth_Kylin", "Earth_Taichi", "Earth"]
+SESSION_PROJECT_OPTIONS = ["Earth_kylin", "Taichi", "Kylin", "Earth_Kylin", "Earth_Taichi", "Earth"]
 MAX_AI_CHECKPOINT_IMAGES = 5
 AI_CHECKPOINT_PREVIEW_HEIGHT = 220
 AI_CHECKPOINT_SCROLLBAR_WIDTH = 18
@@ -216,10 +216,11 @@ class SessionMetadataDraft:
     is_prs_recording: bool = True
     testcase_id: str = ""
     version_number: str = ""
-    project: str = "Taichi"
+    project: str = "Earth_kylin"
     baseline_name: str = ""
     name: str = ""
     recorder_person: str = ""
+    converter_person: str = ""
     design_steps: str = ""
     preconditions: str = ""
     configuration_requirements: str = ""
@@ -236,6 +237,7 @@ class SessionMetadataDraft:
             "baseline_name": self.baseline_name.strip(),
             "name": "" if self.is_prs_recording else self.name.strip(),
             "recorder_person": self.recorder_person.strip(),
+            "converter_person": self.converter_person.strip(),
             "design_steps": self.design_steps.strip(),
             "preconditions": self.preconditions.strip(),
             "configuration_requirements": self.configuration_requirements.strip(),
@@ -255,10 +257,6 @@ class SessionMetadataDraft:
             return "请选择合法的 Project。"
         if not self.recorder_person.strip():
             return "请输入录制人员。"
-        if not self.design_steps.strip():
-            return "请输入 Design Steps。"
-        if self.scope not in SESSION_SCOPE_OPTIONS:
-            return "请选择 Scope。"
         return None
 
 
@@ -292,10 +290,11 @@ class SessionMetadataDialog:
         self.is_prs_recording_var = tk.StringVar(value=self.prs_recording_options[0][0] if self.draft.is_prs_recording else self.prs_recording_options[1][0])
         self.testcase_id_var = tk.StringVar(value=self.draft.testcase_id)
         self.version_number_var = tk.StringVar(value=self.draft.version_number)
-        self.project_var = tk.StringVar(value=self.draft.project or "Taichi")
+        self.project_var = tk.StringVar(value=self.draft.project if self.draft.project in SESSION_PROJECT_OPTIONS else "Earth_kylin")
         self.baseline_name_var = tk.StringVar(value=self.draft.baseline_name)
         self.name_var = tk.StringVar(value=self.draft.name)
         self.recorder_person_var = tk.StringVar(value=self.draft.recorder_person)
+        self.converter_person_var = tk.StringVar(value=self.draft.converter_person)
         self.scope_var = tk.StringVar(value=self.draft.scope if self.draft.scope in SESSION_SCOPE_OPTIONS else "All")
         self.testcase_lookup_status_var = tk.StringVar(value="")
         self.testcase_lookup_details_var = tk.StringVar(value="")
@@ -309,6 +308,10 @@ class SessionMetadataDialog:
         self.window.after(0, self._load_baseline_names)
 
     def _build_ui(self) -> None:
+        label_padx = (0, 18)
+        row_pady = (6, 6)
+        top_aligned_row_pady = (8, 6)
+
         outer = ttk.Frame(self.window, padding=0)
         outer.pack(fill=tk.BOTH, expand=True)
 
@@ -320,12 +323,10 @@ class SessionMetadataDialog:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        wrapper = ttk.Frame(canvas, padding=16)
+        wrapper = ttk.Frame(canvas, padding=20)
+        wrapper.columnconfigure(0, minsize=170)
         wrapper.columnconfigure(1, weight=1)
-        wrapper.rowconfigure(7, weight=1)
-        wrapper.rowconfigure(9, weight=1)
-        wrapper.rowconfigure(10, weight=1)
-        wrapper.rowconfigure(11, weight=1)
+        wrapper.rowconfigure(8, weight=1)
         self._metadata_canvas_window = canvas.create_window((0, 0), window=wrapper, anchor=tk.NW)
 
         wrapper.bind("<Configure>", self._on_metadata_wrapper_configure)
@@ -341,32 +342,32 @@ class SessionMetadataDialog:
             ),
             wraplength=640,
             justify=tk.LEFT,
-        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 12))
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 16))
 
-        ttk.Label(wrapper, text=self._t("是否PRS用例录制", "PRS test case recording")).grid(row=1, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text=self._t("是否PRS用例录制", "PRS test case recording")).grid(row=1, column=0, sticky=tk.W, padx=label_padx, pady=row_pady)
         self.prs_combo = ttk.Combobox(
             wrapper,
             textvariable=self.is_prs_recording_var,
             state="readonly",
             values=[label for label, _value in self.prs_recording_options],
-            width=16,
+            width=24,
         )
-        self.prs_combo.grid(row=1, column=1, sticky=tk.W, pady=6)
+        self.prs_combo.grid(row=1, column=1, sticky=tk.EW, pady=row_pady)
         self.prs_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_prs_mode())
 
-        ttk.Label(wrapper, text="Project").grid(row=2, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text="Project").grid(row=2, column=0, sticky=tk.W, padx=label_padx, pady=row_pady)
         self.project_combo = ttk.Combobox(
             wrapper,
             textvariable=self.project_var,
             state="readonly",
             values=SESSION_PROJECT_OPTIONS,
-            width=20,
+            width=24,
         )
-        self.project_combo.grid(row=2, column=1, sticky=tk.W, pady=6)
+        self.project_combo.grid(row=2, column=1, sticky=tk.EW, pady=row_pady)
 
-        ttk.Label(wrapper, text=self._t("BaselineName", "Baseline Name")).grid(row=3, column=0, sticky=tk.W, pady=6)
+        ttk.Label(wrapper, text=self._t("BaselineName", "Baseline Name")).grid(row=3, column=0, sticky=tk.NW, padx=label_padx, pady=top_aligned_row_pady)
         baseline_frame = ttk.Frame(wrapper)
-        baseline_frame.grid(row=3, column=1, sticky=tk.EW, pady=6)
+        baseline_frame.grid(row=3, column=1, sticky=tk.EW, pady=top_aligned_row_pady)
         baseline_frame.columnconfigure(0, weight=1)
         self.baseline_name_combo = ttk.Combobox(baseline_frame, textvariable=self.baseline_name_var, state="readonly")
         self.baseline_name_combo.grid(row=0, column=0, sticky=tk.EW)
@@ -374,10 +375,10 @@ class SessionMetadataDialog:
         ttk.Label(baseline_frame, textvariable=self.baseline_lookup_status_var).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
         ttk.Label(baseline_frame, textvariable=self.baseline_design_steps_status_var, wraplength=520, justify=tk.LEFT).grid(row=2, column=0, sticky=tk.W, pady=(2, 0))
 
-        self.primary_id_label = ttk.Label(wrapper, text=self._t("Testcase ID", "Test Case ID"))
-        self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
+        self.primary_id_label = ttk.Label(wrapper, text=self._t("* Testcase ID", "* Test Case ID"))
+        self.primary_id_label.grid(row=4, column=0, sticky=tk.NW, padx=label_padx, pady=top_aligned_row_pady)
         testcase_frame = ttk.Frame(wrapper)
-        testcase_frame.grid(row=4, column=1, sticky=tk.EW, pady=6)
+        testcase_frame.grid(row=4, column=1, sticky=tk.EW, pady=top_aligned_row_pady)
         testcase_frame.columnconfigure(0, weight=1)
 
         self.primary_id_entry = ttk.Entry(testcase_frame, textvariable=self.testcase_id_var)
@@ -393,61 +394,30 @@ class SessionMetadataDialog:
             pady=(2, 0),
         )
 
-        self.secondary_id_label = ttk.Label(wrapper, text=self._t("Version Number", "Version Number"))
-        self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, pady=6)
+        self.secondary_id_label = ttk.Label(wrapper, text=self._t("* Version Number", "* Version Number"))
+        self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, padx=label_padx, pady=row_pady)
         self.secondary_id_entry = ttk.Entry(wrapper, textvariable=self.version_number_var)
-        self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=6)
+        self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=row_pady)
 
         self.name_label = ttk.Label(wrapper, text=self._t("Name", "Name"))
         self.name_entry = ttk.Entry(wrapper, textvariable=self.name_var)
 
-        ttk.Label(wrapper, text=self._t("录制人员", "Recorder")).grid(row=6, column=0, sticky=tk.W, pady=6)
-        ttk.Entry(wrapper, textvariable=self.recorder_person_var).grid(row=6, column=1, sticky=tk.EW, pady=6)
+        ttk.Label(wrapper, text=self._t("* 录制人员", "* Recorder")).grid(row=6, column=0, sticky=tk.W, padx=label_padx, pady=row_pady)
+        ttk.Entry(wrapper, textvariable=self.recorder_person_var).grid(row=6, column=1, sticky=tk.EW, pady=row_pady)
 
-        ttk.Label(wrapper, text="Design Steps").grid(row=7, column=0, sticky=tk.NW, pady=6)
+        ttk.Label(wrapper, text=self._t("转换人员", "Converter")).grid(row=7, column=0, sticky=tk.W, padx=label_padx, pady=row_pady)
+        ttk.Entry(wrapper, textvariable=self.converter_person_var).grid(row=7, column=1, sticky=tk.EW, pady=row_pady)
+
+        ttk.Label(wrapper, text="Design Steps").grid(row=8, column=0, sticky=tk.NW, padx=label_padx, pady=top_aligned_row_pady)
         self.design_steps_text = tk.Text(wrapper, height=10, wrap=tk.WORD, font=("Consolas", 10))
-        self.design_steps_text.grid(row=7, column=1, sticky="nsew", pady=6)
+        self.design_steps_text.grid(row=8, column=1, sticky="nsew", pady=top_aligned_row_pady)
         self.design_steps_text.insert("1.0", self.draft.design_steps)
 
-        ttk.Label(wrapper, text=self._t("前置条件", "Preconditions")).grid(row=9, column=0, sticky=tk.NW, pady=6)
-        self.preconditions_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.preconditions_text.grid(row=9, column=1, sticky="nsew", pady=6)
-        self.preconditions_text.insert("1.0", self.draft.preconditions)
-
-        ttk.Label(wrapper, text=self._t("配置要求", "Configuration Requirements")).grid(row=10, column=0, sticky=tk.NW, pady=6)
-        self.configuration_requirements_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.configuration_requirements_text.grid(row=10, column=1, sticky="nsew", pady=6)
-        self.configuration_requirements_text.insert("1.0", self.draft.configuration_requirements)
-
-        ttk.Label(wrapper, text=self._t("额外设备", "Extra Devices")).grid(row=11, column=0, sticky=tk.NW, pady=6)
-        self.extra_devices_text = tk.Text(wrapper, height=4, wrap=tk.WORD, font=("Consolas", 10))
-        self.extra_devices_text.grid(row=11, column=1, sticky="nsew", pady=6)
-        self.extra_devices_text.insert("1.0", self.draft.extra_devices)
-
-        ttk.Label(
-            wrapper,
-            text=self._t(
-                "以上 3 项请尽量按‘词语/短语’填写，每行一个，例如：第一次启动、倾斜、systemphantom。",
-                "For the three fields above, use short words or phrases when possible, one per line, for example: first startup, tilt, systemphantom.",
-            ),
-            wraplength=560,
-            justify=tk.LEFT,
-        ).grid(row=12, column=1, sticky=tk.W, pady=(2, 0))
-
-        ttk.Label(wrapper, text="Scope").grid(row=13, column=0, sticky=tk.W, pady=6)
-        scope_combo = ttk.Combobox(wrapper, textvariable=self.scope_var, state="readonly", values=SESSION_SCOPE_OPTIONS, width=16)
-        scope_combo.grid(row=13, column=1, sticky=tk.W, pady=6)
-
-        self.ai_status_var = tk.StringVar(value="")
-        ttk.Label(wrapper, textvariable=self.ai_status_var).grid(row=14, column=1, sticky=tk.W, pady=(2, 0))
-
         buttons = ttk.Frame(wrapper)
-        buttons.grid(row=15, column=0, columnspan=2, sticky=tk.E, pady=(12, 0))
+        buttons.grid(row=9, column=0, columnspan=2, sticky=tk.E, pady=(16, 4))
         ttk.Button(buttons, text=self._t("取消", "Cancel"), command=self.cancel).pack(side=tk.RIGHT)
         self.save_button = ttk.Button(buttons, text=self._t("开始录制", "Start Recording"), command=self.save)
         self.save_button.pack(side=tk.RIGHT, padx=(0, 8))
-        self.ai_button = ttk.Button(buttons, text=self._t("AI分析", "AI Analysis"), command=self.run_ai_analysis)
-        self.ai_button.pack(side=tk.RIGHT, padx=(0, 8))
 
         self._refresh_prs_mode()
         self.primary_id_entry.focus_set()
@@ -496,12 +466,12 @@ class SessionMetadataDialog:
             self.name_var.set("")
             self.name_label.grid_remove()
             self.name_entry.grid_remove()
-            self.primary_id_label.configure(text=self._t("Testcase ID", "Test Case ID"))
-            self.secondary_id_label.configure(text=self._t("Version Number", "Version Number"))
-            self.primary_id_label.grid(row=4, column=0, sticky=tk.W, pady=6)
-            self.primary_id_entry.master.grid(row=4, column=1, sticky=tk.EW, pady=6)
-            self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, pady=6)
-            self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=6)
+            self.primary_id_label.configure(text=self._t("* Testcase ID", "* Test Case ID"))
+            self.secondary_id_label.configure(text=self._t("* Version Number", "* Version Number"))
+            self.primary_id_label.grid(row=4, column=0, sticky=tk.NW, padx=(0, 18), pady=(8, 6))
+            self.primary_id_entry.master.grid(row=4, column=1, sticky=tk.EW, pady=(8, 6))
+            self.secondary_id_label.grid(row=5, column=0, sticky=tk.W, padx=(0, 18), pady=(6, 6))
+            self.secondary_id_entry.grid(row=5, column=1, sticky=tk.EW, pady=(6, 6))
             self.primary_id_entry.focus_set()
             self._schedule_testcase_lookup(immediate=True)
             self._schedule_baseline_design_steps_lookup(immediate=True)
@@ -516,8 +486,8 @@ class SessionMetadataDialog:
         self.testcase_lookup_status_var.set("")
         self.testcase_lookup_details_var.set("")
         self.baseline_design_steps_status_var.set("")
-        self.name_label.grid(row=4, column=0, sticky=tk.W, pady=6)
-        self.name_entry.grid(row=4, column=1, sticky=tk.EW, pady=6)
+        self.name_label.grid(row=4, column=0, sticky=tk.W, padx=(0, 18), pady=(6, 6))
+        self.name_entry.grid(row=4, column=1, sticky=tk.EW, pady=(6, 6))
         self.name_entry.focus_set()
 
     def _load_baseline_names(self) -> None:
@@ -707,23 +677,19 @@ class SessionMetadataDialog:
             baseline_name=self.baseline_name_var.get().strip(),
             name=self.name_var.get().strip(),
             recorder_person=self.recorder_person_var.get().strip(),
+            converter_person=self.converter_person_var.get().strip(),
             design_steps=self.design_steps_text.get("1.0", tk.END).strip(),
-            preconditions=self.preconditions_text.get("1.0", tk.END).strip(),
-            configuration_requirements=self.configuration_requirements_text.get("1.0", tk.END).strip(),
-            extra_devices=self.extra_devices_text.get("1.0", tk.END).strip(),
-            scope=self.scope_var.get().strip() if self.scope_var.get().strip() in SESSION_SCOPE_OPTIONS else "",
+            preconditions="",
+            configuration_requirements="",
+            extra_devices="",
+            scope="All",
         )
         error_message = draft.validate()
         if error_message:
             messagebox.showerror(self._t("元数据未填写完整", "Incomplete metadata"), error_message, parent=self.window)
             return
-        payload = draft.to_dict()
-        if should_prompt_ai_analysis(payload):
-            if messagebox.askyesno(self._t("AI分析", "AI Analysis"), self._t("前置条件、配置要求、额外设备当前都为空，是否先让 AI 根据 Design Steps 生成建议？", "Preconditions, configuration requirements, and extra devices are all empty. Do you want AI to suggest them from the design steps first?"), parent=self.window):
-                self._run_ai_analysis(save_after=True)
-                return
-
-        self._validate_with_ai_before_save(draft)
+        self.result = draft
+        self.window.destroy()
 
     def run_ai_analysis(self) -> None:
         self._run_ai_analysis(save_after=False)
@@ -740,6 +706,7 @@ class SessionMetadataDialog:
             baseline_name=self.baseline_name_var.get().strip(),
             name=self.name_var.get().strip(),
             recorder_person=self.recorder_person_var.get().strip(),
+            converter_person=self.converter_person_var.get().strip(),
             design_steps=self.design_steps_text.get("1.0", tk.END).strip(),
             preconditions=self.preconditions_text.get("1.0", tk.END).strip(),
             configuration_requirements=self.configuration_requirements_text.get("1.0", tk.END).strip(),
@@ -788,6 +755,7 @@ class SessionMetadataDialog:
                 baseline_name=draft.baseline_name,
                 name=draft.name,
                 recorder_person=draft.recorder_person,
+                converter_person=draft.converter_person,
                 design_steps=draft.design_steps,
                 preconditions=self.preconditions_text.get("1.0", tk.END).strip(),
                 configuration_requirements=self.configuration_requirements_text.get("1.0", tk.END).strip(),
@@ -1641,6 +1609,7 @@ class AICheckpointDialog:
         draft: AICheckpointDraft,
         save_mode: str = "create",
         historical_screenshots_dir: Path | None = None,
+        auto_start_video_selection: RegionSelection | None = None,
     ) -> None:
         self.parent = parent
         self.engine = engine
@@ -1660,6 +1629,7 @@ class AICheckpointDialog:
         self.preview_views: list[ZoomableImageView] = []
         self._middle_pane_ratio_initialized = False
         self.ui_language = _resolve_ui_language(self.settings_store)
+        self._auto_start_video_selection = auto_start_video_selection
 
         self.window = tk.Toplevel(parent)
         self.window.title(self._t("AI Checkpoint", "AI Checkpoint"))
@@ -1692,7 +1662,10 @@ class AICheckpointDialog:
         self.window.protocol("WM_DELETE_WINDOW", self._close)
         self.window.lift()
         self.window.focus_force()
-        self.window.after(0, self._capture_initial_image_if_needed)
+        if self._auto_start_video_selection is not None:
+            self.window.after(0, self._start_video_from_shortcut)
+        else:
+            self.window.after(0, self._capture_initial_image_if_needed)
 
     def _build_ui(self) -> None:
         wrapper = ttk.Frame(self.window, padding=16)
@@ -1831,6 +1804,13 @@ class AICheckpointDialog:
         if not self.window.winfo_exists():
             return
         self.add_image(show_notice=False)
+
+    def _start_video_from_shortcut(self) -> None:
+        selection = self._auto_start_video_selection
+        self._auto_start_video_selection = None
+        if selection is None or not self.window.winfo_exists():
+            return
+        self.start_video(selection=selection)
 
     def _set_middle_paned_ratio(self, paned: ttk.Panedwindow, left_ratio: float) -> None:
         if self._middle_pane_ratio_initialized:
@@ -2030,7 +2010,7 @@ class AICheckpointDialog:
         self._refresh_media_summary()
         self._restore_previews()
 
-    def start_video(self) -> None:
+    def start_video(self, selection: RegionSelection | None = None) -> None:
         if self.image_selections:
             messagebox.showinfo("提示", "当前已经有截图，视频和截图不能同时存在。请先清空截图。", parent=self.window)
             return
@@ -2038,13 +2018,14 @@ class AICheckpointDialog:
             messagebox.showinfo("提示", "视频录制已经在进行中。", parent=self.window)
             return
 
-        selection = _select_region_with_window_management(
-            self.parent,
-            self.window,
-            "选择视频录制区域",
-            dialog_hide_mode="withdraw",
-            parent_restore_mode="keep_iconified",
-        )
+        if selection is None:
+            selection = _select_region_with_window_management(
+                self.parent,
+                self.window,
+                "选择视频录制区域",
+                dialog_hide_mode="withdraw",
+                parent_restore_mode="keep_iconified",
+            )
 
         if not selection:
             return
@@ -2464,8 +2445,16 @@ def open_ai_checkpoint_dialog(
     settings_store: SettingsStore,
     draft: AICheckpointDraft,
     historical_screenshots_dir: Path | None = None,
+    auto_start_video_selection: RegionSelection | None = None,
 ) -> dict[str, object] | None:
-    dialog = AICheckpointDialog(parent, engine, settings_store, draft, historical_screenshots_dir=historical_screenshots_dir)
+    dialog = AICheckpointDialog(
+        parent,
+        engine,
+        settings_store,
+        draft,
+        historical_screenshots_dir=historical_screenshots_dir,
+        auto_start_video_selection=auto_start_video_selection,
+    )
     parent.wait_window(dialog.window)
     return dialog.result_payload if dialog.saved else None
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import os
@@ -23,11 +24,22 @@ from src.ai.method_mapping import resolve_method_name_for_event
 from src.ai.prompt_builder import build_step_observation_prompt
 from src.ai.remote_service_client import RemoteAIServiceClient
 from src.ai.session_analyzer import SessionWorkflowAnalyzer
+from src.ai.suggestions import MethodParameterSuggestion
 from src.common.display_utils import prepare_image_path_for_ai
 from src.common.image_widgets import ZoomableImageView
 from src.common.media_utils import load_video_preview_frame
 from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
 from src.common.session_discovery import find_latest_session_dir, scan_session_candidates
+from src.common.session_lock import SessionLockHandle, SessionLockError, acquire_session_lock, force_release_session_lock
+from src.common.session_summary import (
+    SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE,
+    SESSION_REVIEW_STATUS_DEBUG_COMPLETE,
+    count_session_events,
+    normalize_session_review_status,
+    update_session_review_fields,
+    update_session_summary_event_count,
+    write_session_summary_from_session_payload,
+)
 from src.converter.compiler import build_atframework_yaml_dict, export_suggestions_to_atframework_yaml
 from src.recorder.i18n import pick_text
 from src.recorder.models import format_recorded_action, normalize_event_type, normalize_keyboard_key_name
@@ -104,6 +116,7 @@ class RecorderViewerWindow:
         self.suggestion_generation_running = False
         self.export_yaml_running = False
         self.debug_run_running = False
+        self.debug_cancel_event = threading.Event()
         self.debug_step_tags: dict[int, str] = {}
         self.debug_step_messages: dict[int, str] = {}
         self.analysis_started_at = 0.0
@@ -133,9 +146,11 @@ class RecorderViewerWindow:
         self.session_version_number_var = tk.StringVar()
         self.session_name_var = tk.StringVar()
         self.session_recorder_person_var = tk.StringVar()
+        self.session_converter_person_var = tk.StringVar()
         self.session_is_prs_recording_var = tk.StringVar(value=self._t("是", "Yes"))
         self.session_scope_var = tk.StringVar(value="All")
         self.session_metadata_ai_running = False
+        self._session_lock_handle: SessionLockHandle | None = None
 
         self._build_ui()
         self.window.protocol("WM_DELETE_WINDOW", self._handle_close)
@@ -152,10 +167,17 @@ class RecorderViewerWindow:
         if self.analysis_running:
             self.cancel_ai_analysis()
         self._close_event_list_window()
+        self._release_session_lock_handle()
         if self.close_callback:
             self.close_callback()
             return
         self.window.destroy()
+
+    def _release_session_lock_handle(self) -> None:
+        if self._session_lock_handle is None:
+            return
+        self._session_lock_handle.release()
+        self._session_lock_handle = None
 
     def _build_ui(self) -> None:
         toolbar = ttk.Frame(self.window, padding=(16, 12))
@@ -181,6 +203,8 @@ class RecorderViewerWindow:
         self.export_yaml_button.pack(side=tk.LEFT, padx=(8, 0))
         self.debug_run_button = ttk.Button(toolbar, text=self._t("调试", "Debug"), command=self.debug_atframework_steps)
         self.debug_run_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.stop_debug_button = ttk.Button(toolbar, text=self._t("停止调试", "Stop Debug"), command=self.cancel_debug_atframework_steps, state=tk.DISABLED)
+        self.stop_debug_button.pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text=self._t("全选步骤", "Select All Steps"), command=self.select_all_events).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text=self._t("应用AI删除建议", "Apply AI Deletion Suggestions"), command=self.apply_ai_deletions).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(toolbar, text=self._t("数据清洗", "Preview Cleaning"), command=self.preview_cleaning).pack(side=tk.LEFT, padx=(8, 0))
@@ -309,7 +333,7 @@ class RecorderViewerWindow:
 
     def _build_session_metadata_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(1, weight=1)
-        parent.rowconfigure(4, weight=1)
+        parent.rowconfigure(5, weight=1)
         parent.rowconfigure(6, weight=1)
         parent.rowconfigure(7, weight=1)
         parent.rowconfigure(8, weight=1)
@@ -335,9 +359,12 @@ class RecorderViewerWindow:
         ttk.Label(parent, text=self._t("录制人员", "Recorder")).grid(row=3, column=0, sticky=tk.W, padx=8, pady=6)
         ttk.Entry(parent, textvariable=self.session_recorder_person_var).grid(row=3, column=1, sticky=tk.EW, padx=8, pady=6)
 
-        ttk.Label(parent, text="Design Steps").grid(row=4, column=0, sticky=tk.NW, padx=8, pady=6)
+        ttk.Label(parent, text=self._t("转换人员", "Converter")).grid(row=4, column=0, sticky=tk.W, padx=8, pady=6)
+        ttk.Entry(parent, textvariable=self.session_converter_person_var).grid(row=4, column=1, sticky=tk.EW, padx=8, pady=6)
+
+        ttk.Label(parent, text="Design Steps").grid(row=5, column=0, sticky=tk.NW, padx=8, pady=6)
         self.session_design_steps_text = tk.Text(parent, height=10, wrap=tk.WORD, font=("Consolas", 10))
-        self.session_design_steps_text.grid(row=4, column=1, sticky="nsew", padx=8, pady=6)
+        self.session_design_steps_text.grid(row=5, column=1, sticky="nsew", padx=8, pady=6)
 
         ttk.Label(parent, text=self._t("前置条件", "Preconditions")).grid(row=6, column=0, sticky=tk.NW, padx=8, pady=6)
         self.session_preconditions_text = tk.Text(parent, height=4, wrap=tk.WORD, font=("Consolas", 10))
@@ -439,7 +466,15 @@ class RecorderViewerWindow:
     def _show_session_picker(self) -> None:
         dialog = tk.Toplevel(self.window)
         dialog.title(self._t("选择 Session", "Select Session"))
-        dialog.geometry("760x520")
+        screen_width = max(1024, dialog.winfo_screenwidth())
+        screen_height = max(720, dialog.winfo_screenheight())
+        default_width = min(1680, max(1320, screen_width - 120))
+        default_width = min(default_width, max(1100, screen_width - 40))
+        default_height = min(860, max(660, screen_height - 180))
+        default_height = min(default_height, max(620, screen_height - 80))
+        min_width = min(default_width, max(1120, screen_width - 160))
+        dialog.geometry(f"{default_width}x{default_height}")
+        dialog.minsize(min_width, 560)
         dialog.transient(self.window)
         dialog.grab_set()
 
@@ -447,34 +482,296 @@ class RecorderViewerWindow:
         path_var = tk.StringVar(value=str(self.recordings_root))
         ttk.Label(dialog, textvariable=path_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
-        columns = ("name", "modified", "events")
-        tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
+        filters = ttk.Frame(dialog, padding=(16, 0, 16, 8))
+        filters.pack(fill=tk.X)
+        filters.columnconfigure(1, weight=1)
+        filters.columnconfigure(3, weight=1)
+        filters.columnconfigure(5, weight=1)
+
+        testcase_filter_var = tk.StringVar()
+        all_projects_label = self._t("全部 Project", "All Projects")
+        project_filter_var = tk.StringVar(value=all_projects_label)
+        recorder_filter_var = tk.StringVar()
+
+        ttk.Label(filters, text=self._t("Testcase ID", "Testcase ID")).grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        ttk.Entry(filters, textvariable=testcase_filter_var).grid(row=0, column=1, sticky=tk.EW, pady=4)
+        ttk.Label(filters, text="Project").grid(row=0, column=2, sticky=tk.W, padx=(12, 8), pady=4)
+        project_filter_combo = ttk.Combobox(filters, textvariable=project_filter_var, state="readonly")
+        project_filter_combo.grid(row=0, column=3, sticky=tk.EW, pady=4)
+        project_filter_combo.configure(values=[all_projects_label])
+        ttk.Label(filters, text=self._t("录制人员", "Recorder")).grid(row=0, column=4, sticky=tk.W, padx=(12, 8), pady=4)
+        ttk.Entry(filters, textvariable=recorder_filter_var).grid(row=0, column=5, sticky=tk.EW, pady=4)
+
+        tree_frame = ttk.Frame(dialog)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        columns = ("name", "testcase_id", "project", "recorder_person", "converter_person", "review_status", "lock_status", "review_comments", "modified", "events")
+        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
         tree.heading("name", text=self._t("Session 目录", "Session Folder"))
+        tree.heading("testcase_id", text=self._t("Testcase ID", "Testcase ID"))
+        tree.heading("project", text="Project")
+        tree.heading("recorder_person", text=self._t("录制人员", "Recorder"))
+        tree.heading("converter_person", text=self._t("转换人员", "Converter"))
+        tree.heading("review_status", text=self._t("状态", "Status"))
+        tree.heading("lock_status", text=self._t("锁状态", "Lock Status"))
+        tree.heading("review_comments", text="Comments")
         tree.heading("modified", text=self._t("最后修改时间", "Last Modified"))
         tree.heading("events", text=self._t("事件数", "Events"))
-        tree.column("name", width=330, anchor=tk.W)
-        tree.column("modified", width=180, anchor=tk.W, stretch=False)
-        tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
-        tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
+        tree.column("name", width=230, anchor=tk.W)
+        tree.column("testcase_id", width=120, anchor=tk.W, stretch=False)
+        tree.column("project", width=120, anchor=tk.W, stretch=False)
+        tree.column("recorder_person", width=110, anchor=tk.W, stretch=False)
+        tree.column("converter_person", width=110, anchor=tk.W, stretch=False)
+        tree.column("review_status", width=110, anchor=tk.W, stretch=False)
+        tree.column("lock_status", width=130, anchor=tk.W, stretch=False)
+        tree.column("review_comments", width=190, anchor=tk.W)
+        tree.column("modified", width=160, anchor=tk.W, stretch=False)
+        tree.column("events", width=72, anchor=tk.CENTER, stretch=False)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        tree_x_scrollbar = ttk.Scrollbar(tree_frame, orient=tk.HORIZONTAL, command=tree.xview)
+        tree_x_scrollbar.grid(row=1, column=0, sticky="ew")
+        tree.configure(xscrollcommand=tree_x_scrollbar.set)
 
         status_var = tk.StringVar(value=self._t("正在扫描 Session...", "Scanning sessions..."))
         ttk.Label(dialog, textvariable=status_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
+
+        review_editor = ttk.Frame(dialog, padding=(16, 0, 16, 8))
+        review_editor.pack(fill=tk.X)
+        review_editor.columnconfigure(1, weight=1)
+        review_editor.columnconfigure(3, weight=1)
+        review_editor.columnconfigure(5, weight=1)
+
+        empty_status_label = self._t("空", "Empty")
+        review_status_display_by_value = {
+            "": "",
+            SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE: self._t("检查点完成", "Checkpoint Complete"),
+            SESSION_REVIEW_STATUS_DEBUG_COMPLETE: self._t("调试完成", "Debug Complete"),
+        }
+        review_status_editor_display_by_value = {
+            "": empty_status_label,
+            SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE: self._t("检查点完成", "Checkpoint Complete"),
+            SESSION_REVIEW_STATUS_DEBUG_COMPLETE: self._t("调试完成", "Debug Complete"),
+        }
+        review_status_value_by_display = {value: key for key, value in review_status_editor_display_by_value.items()}
+        review_status_var = tk.StringVar(value=empty_status_label)
+        review_comments_var = tk.StringVar()
+        converter_person_var = tk.StringVar()
+
+        ttk.Label(review_editor, text=self._t("状态", "Status")).grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        review_status_combo = ttk.Combobox(
+            review_editor,
+            textvariable=review_status_var,
+            state="disabled",
+            values=list(review_status_value_by_display.keys()),
+            width=18,
+        )
+        review_status_combo.grid(row=0, column=1, sticky=tk.W, pady=4)
+        ttk.Label(review_editor, text="Comments").grid(row=0, column=2, sticky=tk.W, padx=(12, 8), pady=4)
+        review_comments_entry = ttk.Entry(review_editor, textvariable=review_comments_var, state=tk.DISABLED)
+        review_comments_entry.grid(row=0, column=3, sticky=tk.EW, pady=4)
+        ttk.Label(review_editor, text=self._t("转换人员", "Converter")).grid(row=0, column=4, sticky=tk.W, padx=(12, 8), pady=4)
+        converter_person_entry = ttk.Entry(review_editor, textvariable=converter_person_var, state=tk.DISABLED)
+        converter_person_entry.grid(row=0, column=5, sticky=tk.EW, pady=4)
+        save_review_button = ttk.Button(review_editor, text=self._t("保存修改", "Save Changes"), state=tk.DISABLED)
+        save_review_button.grid(row=0, column=6, sticky=tk.E, padx=(12, 0), pady=4)
 
         button_bar = ttk.Frame(dialog, padding=(16, 0, 16, 16))
         button_bar.pack(fill=tk.X)
 
         sessions: list[dict[str, object]] = []
+        visible_sessions: list[dict[str, object]] = []
+        event_count_token = 0
+
+        def _normalize_filter_text(value: str) -> str:
+            return value.strip().casefold()
+
+        def _update_project_filter_options() -> None:
+            project_values = [
+                all_projects_label,
+                *sorted(
+                    {
+                        str(item.get("project", "") or "").strip()
+                        for item in sessions
+                        if str(item.get("project", "") or "").strip()
+                    },
+                    key=str.casefold,
+                ),
+            ]
+            project_filter_combo.configure(values=project_values)
+            if project_filter_var.get().strip() not in project_values:
+                project_filter_var.set(all_projects_label)
+
+        def _refresh_session_tree() -> None:
+            selected_path = ""
+            selection = tree.selection()
+            if selection:
+                try:
+                    selected_path = str(visible_sessions[int(selection[0])].get("path", ""))
+                except Exception:
+                    selected_path = ""
+
+            for item_id in tree.get_children():
+                tree.delete(item_id)
+
+            for index, item in enumerate(visible_sessions):
+                tree.insert(
+                    "",
+                    tk.END,
+                    iid=str(index),
+                    values=(
+                        item["name"],
+                        item.get("testcase_id", ""),
+                        item.get("project", ""),
+                        item.get("recorder_person", ""),
+                        item.get("converter_person", ""),
+                        review_status_display_by_value.get(normalize_session_review_status(item.get("review_status", "")), ""),
+                        item.get("lock_status", ""),
+                        item.get("review_comments", ""),
+                        item["modified"],
+                        item["events"],
+                    ),
+                )
+
+            if not sessions:
+                return
+
+            if visible_sessions:
+                focus_index = 0
+                if selected_path:
+                    for index, item in enumerate(visible_sessions):
+                        if str(item.get("path", "")) == selected_path:
+                            focus_index = index
+                            break
+                focus_item = str(focus_index)
+                tree.selection_set(focus_item)
+                tree.focus(focus_item)
+                tree.see(focus_item)
+
+            _load_review_editor_from_selection()
+
+            if len(visible_sessions) == len(sessions):
+                status_var.set(self._t(f"共找到 {len(sessions)} 个 Session", f"Found {len(sessions)} sessions"))
+            else:
+                status_var.set(
+                    self._t(
+                        f"共找到 {len(sessions)} 个 Session，当前匹配 {len(visible_sessions)} 个",
+                        f"Found {len(sessions)} sessions, showing {len(visible_sessions)}",
+                    )
+                )
+
+        def apply_filters(*_args: object) -> None:
+            testcase_query = _normalize_filter_text(testcase_filter_var.get())
+            selected_project = project_filter_var.get().strip()
+            recorder_query = _normalize_filter_text(recorder_filter_var.get())
+
+            visible_sessions.clear()
+            for item in sessions:
+                testcase_id = str(item.get("testcase_id", "") or "")
+                project = str(item.get("project", "") or "")
+                recorder_person = str(item.get("recorder_person", "") or "")
+                if testcase_query and testcase_query not in testcase_id.casefold():
+                    continue
+                if selected_project and selected_project != all_projects_label and project != selected_project:
+                    continue
+                if recorder_query and recorder_query not in recorder_person.casefold():
+                    continue
+                visible_sessions.append(item)
+
+            _refresh_session_tree()
+
+        def _set_review_editor_enabled(enabled: bool) -> None:
+            review_status_combo.configure(state="readonly" if enabled else "disabled")
+            review_comments_entry.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+            converter_person_entry.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+            save_review_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+            if not enabled:
+                review_status_var.set(empty_status_label)
+                review_comments_var.set("")
+                converter_person_var.set("")
+
+        def _load_review_editor_from_selection() -> None:
+            selection = tree.selection()
+            if not selection:
+                _set_review_editor_enabled(False)
+                return
+            item = visible_sessions[int(selection[0])]
+            review_status_var.set(
+                review_status_editor_display_by_value.get(normalize_session_review_status(item.get("review_status", "")), empty_status_label)
+            )
+            review_comments_var.set(str(item.get("review_comments", "") or ""))
+            converter_person_var.set(str(item.get("converter_person", "") or ""))
+            _set_review_editor_enabled(True)
+
+        def _update_cached_candidate(session_path: Path, **updates: object) -> None:
+            cache_key = os.path.abspath(os.fspath(session_path)).lower()
+            cached = self._session_candidate_cache.get(cache_key)
+            if cached is not None:
+                cached.update(updates)
+
+        def _apply_event_count_update(session_path: str, event_count: object) -> None:
+            for item in sessions:
+                if str(item.get("path", "")) == session_path:
+                    item["events"] = event_count
+                    break
+            for index, item in enumerate(visible_sessions):
+                if str(item.get("path", "")) != session_path:
+                    continue
+                item["events"] = event_count
+                item_id = str(index)
+                if tree.exists(item_id):
+                    tree.set(item_id, "events", event_count)
+                break
+            _update_cached_candidate(Path(session_path), events=event_count)
+
+        def _hydrate_event_counts(scan_token: int) -> None:
+            nonlocal event_count_token
+            event_count_token += 1
+            local_token = event_count_token
+            pending_paths = [Path(str(item.get("path", ""))) for item in sessions if item.get("events", "") in {"", None}]
+            if not pending_paths:
+                return
+
+            def worker() -> None:
+                for session_path in pending_paths:
+                    if local_token != event_count_token:
+                        return
+                    event_count = count_session_events(session_path)
+                    if isinstance(event_count, int):
+                        try:
+                            update_session_summary_event_count(session_path, event_count)
+                        except Exception:
+                            pass
+
+                    def apply(path: Path = session_path, count: object = event_count) -> None:
+                        if not dialog.winfo_exists() or scan_token != self._session_picker_scan_token or local_token != event_count_token:
+                            return
+                        _apply_event_count_update(str(path), count)
+
+                    self.window.after(0, apply)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        testcase_filter_var.trace_add("write", apply_filters)
+        project_filter_var.trace_add("write", apply_filters)
+        recorder_filter_var.trace_add("write", apply_filters)
+        tree.bind("<<TreeviewSelect>>", lambda _event: _load_review_editor_from_selection())
 
         def populate(force_refresh: bool = False) -> None:
             self._session_picker_scan_token += 1
             token = self._session_picker_scan_token
+            nonlocal event_count_token
+            event_count_token += 1
             status_var.set(self._t("正在扫描 Session...", "Scanning sessions..."))
-            for item_id in tree.get_children():
-                tree.delete(item_id)
+            sessions.clear()
+            visible_sessions.clear()
+            _refresh_session_tree()
 
             def worker() -> None:
                 try:
-                    items = self._find_session_candidates(self.recordings_root, force_refresh=force_refresh)
+                    items = self._find_session_candidates(self.recordings_root, force_refresh=force_refresh, include_event_counts=False)
                 except Exception as exc:
                     self.window.after(0, lambda: status_var.set(self._t(f"扫描 Session 失败: {exc}", f"Failed to scan sessions: {exc}")))
                     return
@@ -485,17 +782,9 @@ class RecorderViewerWindow:
                     sessions.clear()
                     sessions.extend(items)
                     path_var.set(str(self.recordings_root))
-                    status_var.set(self._t(f"共找到 {len(sessions)} 个 Session", f"Found {len(sessions)} sessions"))
-                    for index, item in enumerate(sessions):
-                        tree.insert(
-                            "",
-                            tk.END,
-                            iid=str(index),
-                            values=(item["name"], item["modified"], item["events"]),
-                        )
-                    if sessions:
-                        tree.selection_set("0")
-                        tree.focus("0")
+                    _update_project_filter_options()
+                    apply_filters()
+                    _hydrate_event_counts(token)
 
                 self.window.after(0, apply_results)
 
@@ -506,12 +795,89 @@ class RecorderViewerWindow:
             if not selection:
                 messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
                 return
-            session_dir = Path(str(sessions[int(selection[0])]["path"]))
+            session_dir = Path(str(visible_sessions[int(selection[0])]["path"]))
             dialog.destroy()
             self.load_session(session_dir)
 
+        def force_unlock_selected() -> None:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
+                return
+            item = visible_sessions[int(selection[0])]
+            session_dir = Path(str(item.get("path", "")))
+            if not bool(item.get("is_locked", False)):
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("当前所选 Session 没有锁。", "The selected session is not locked."), parent=dialog)
+                return
+            if not messagebox.askyesno(
+                self._t("强制解锁", "Force Unlock"),
+                self._t(f"确定要强制解锁这个 Session 吗？\n\n{session_dir}", f"Force unlock this session?\n\n{session_dir}"),
+                parent=dialog,
+            ):
+                return
+            if not force_release_session_lock(session_dir):
+                messagebox.showerror(self._t("强制解锁失败", "Force unlock failed"), self._t("无法删除锁文件。", "Unable to delete the lock file."), parent=dialog)
+                return
+            populate(force_refresh=True)
+
+        def save_review_fields() -> None:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
+                return
+            item = visible_sessions[int(selection[0])]
+            session_dir = Path(str(item.get("path", "")))
+            if bool(item.get("is_locked", False)):
+                messagebox.showinfo(
+                    self._t("Session 占用中", "Session Locked"),
+                    self._t("当前 Session 正被占用，不能修改状态或备注。", "The selected session is currently locked and cannot be edited."),
+                    parent=dialog,
+                )
+                return
+            review_status = review_status_value_by_display.get(review_status_var.get(), "")
+            review_comments = review_comments_var.get().strip()
+            converter_person = converter_person_var.get().strip()
+            try:
+                metadata_payload = update_session_review_fields(
+                    session_dir,
+                    review_status=review_status,
+                    review_comments=review_comments,
+                    converter_person=converter_person,
+                )
+            except Exception as exc:
+                messagebox.showerror(self._t("保存失败", "Save failed"), str(exc), parent=dialog)
+                return
+
+            normalized_status = normalize_session_review_status(metadata_payload.get("review_status", ""))
+            normalized_comments = str(metadata_payload.get("review_comments", "") or "")
+            normalized_converter_person = str(metadata_payload.get("converter_person", "") or "")
+            item["review_status"] = normalized_status
+            item["review_comments"] = normalized_comments
+            item["converter_person"] = normalized_converter_person
+            _update_cached_candidate(
+                session_dir,
+                review_status=normalized_status,
+                review_comments=normalized_comments,
+                converter_person=normalized_converter_person,
+            )
+            if self.session_dir and session_dir == self.session_dir and isinstance(self.session_data, dict):
+                metadata = self.session_data.get("metadata", {}) if isinstance(self.session_data.get("metadata"), dict) else {}
+                metadata = dict(metadata)
+                metadata["review_status"] = normalized_status
+                metadata["review_comments"] = normalized_comments
+                metadata["converter_person"] = normalized_converter_person
+                self.session_data["metadata"] = metadata
+                self.session_converter_person_var.set(normalized_converter_person)
+                self.summary_var.set(self._build_session_summary_text())
+            _refresh_session_tree()
+            status_var.set(self._t("状态、备注和转换人员已保存", "Status, comments, and converter saved"))
+
+        save_review_button.configure(command=save_review_fields)
+        review_comments_entry.bind("<Return>", lambda _event: save_review_fields())
+
         ttk.Button(button_bar, text=self._t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
         ttk.Button(button_bar, text=self._t("打开 recordings 目录", "Open recordings folder"), command=lambda: self._open_path(self.recordings_root)).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text=self._t("强制解锁所选 Session", "Force Unlock Selected Session"), command=force_unlock_selected).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text=self._t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
         ttk.Button(button_bar, text=self._t("加载所选 Session", "Load Selected Session"), command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -751,21 +1117,35 @@ class RecorderViewerWindow:
         self.event_list_status_var = None
         self.popup_process_filter_combo = None
 
-    def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False) -> list[dict[str, object]]:
+    def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False, include_event_counts: bool = True) -> list[dict[str, object]]:
         return scan_session_candidates(
             base_dir,
             cache=self._session_candidate_cache,
             force_refresh=force_refresh,
+            include_event_counts=include_event_counts,
         )
 
     def _find_latest_session(self, base_dir: Path) -> Path | None:
         return find_latest_session_dir(base_dir)
 
     def load_session(self, session_dir: Path) -> None:
+        resolved_session_dir = Path(os.path.abspath(os.fspath(session_dir)))
         session_path = session_dir / "session.json"
         if not session_path.exists():
             messagebox.showerror(self._t("加载失败", "Load failed"), self._t(f"未找到 session.json:\n{session_path}", f"session.json was not found:\n{session_path}"), parent=self.window)
             return
+
+        reuse_existing_lock = (
+            self._session_lock_handle is not None
+            and self._session_lock_handle.session_dir == resolved_session_dir
+        )
+        pending_lock_handle = self._session_lock_handle if reuse_existing_lock else None
+        if pending_lock_handle is None:
+            try:
+                pending_lock_handle = acquire_session_lock(resolved_session_dir, owner_kind="viewer", owner_label="Session Viewer")
+            except SessionLockError as exc:
+                messagebox.showwarning(self._t("Session 已打开", "Session already open"), str(exc), parent=self.window)
+                return
 
         self._session_load_token += 1
         token = self._session_load_token
@@ -778,10 +1158,12 @@ class RecorderViewerWindow:
                 if not isinstance(payload, dict):
                     raise ValueError(self._t("session.json 格式无效", "session.json has an invalid format"))
             except Exception as exc:
+                if pending_lock_handle is not None and not reuse_existing_lock:
+                    pending_lock_handle.release()
                 self.window.after(0, lambda: self._on_load_session_failed(token, session_path, str(exc)))
                 return
 
-            self.window.after(0, lambda: self._apply_loaded_session(token, session_dir, payload))
+            self.window.after(0, lambda: self._apply_loaded_session(token, resolved_session_dir, payload, pending_lock_handle, reuse_existing_lock))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -791,9 +1173,24 @@ class RecorderViewerWindow:
         self.load_status_var.set("")
         messagebox.showerror(self._t("加载失败", "Load failed"), self._t(f"无法读取 session.json:\n{session_path}\n\n{message}", f"Unable to read session.json:\n{session_path}\n\n{message}"), parent=self.window)
 
-    def _apply_loaded_session(self, token: int, session_dir: Path, payload: dict[str, object]) -> None:
+    def _apply_loaded_session(
+        self,
+        token: int,
+        session_dir: Path,
+        payload: dict[str, object],
+        pending_lock_handle: SessionLockHandle | None,
+        reuse_existing_lock: bool,
+    ) -> None:
         if token != self._session_load_token:
+            if pending_lock_handle is not None and not reuse_existing_lock:
+                pending_lock_handle.release()
             return
+
+        previous_lock_handle = self._session_lock_handle
+        if pending_lock_handle is not None and not reuse_existing_lock:
+            self._session_lock_handle = pending_lock_handle
+            if previous_lock_handle is not None and previous_lock_handle is not pending_lock_handle:
+                previous_lock_handle.release()
 
         self.session_dir = session_dir
         self.session_data = payload
@@ -836,6 +1233,7 @@ class RecorderViewerWindow:
         baseline_name = metadata.get("baseline_name", "")
         name = metadata.get("name", "")
         recorder_person = metadata.get("recorder_person", "")
+        converter_person = metadata.get("converter_person", "")
         metadata_bits: list[str] = []
         if is_prs_recording and testcase_id:
             metadata_bits.append(f"TestcaseID={testcase_id}")
@@ -849,6 +1247,8 @@ class RecorderViewerWindow:
             metadata_bits.append(f"Name={name}")
         if recorder_person:
             metadata_bits.append(self._t(f"录制人员={recorder_person}", f"Recorder={recorder_person}"))
+        if converter_person:
+            metadata_bits.append(self._t(f"转换人员={converter_person}", f"Converter={converter_person}"))
         metadata_text = f" | {' | '.join(metadata_bits)}" if metadata_bits else ""
         return self._t(
             f"session_id={self.session_data.get('session_id', '')} | 事件数={len(self.event_rows)} | 评论数={len(self.session_data.get('comments', []))} | checkpoint数={len(self.session_data.get('checkpoints', []))}{metadata_text}",
@@ -865,11 +1265,14 @@ class RecorderViewerWindow:
                 "baseline_name": "",
                 "name": "",
                 "recorder_person": "",
+                "converter_person": "",
                 "design_steps": "",
                     "preconditions": "",
                     "configuration_requirements": "",
                     "extra_devices": "",
                 "scope": "All",
+                    "review_status": "",
+                    "review_comments": "",
             }
         metadata = self.session_data.get("metadata", {})
         if not isinstance(metadata, dict):
@@ -890,11 +1293,14 @@ class RecorderViewerWindow:
             "baseline_name": str(metadata.get("baseline_name", "")),
             "name": "" if is_prs_recording else str(metadata.get("name", "")),
             "recorder_person": str(metadata.get("recorder_person", "")),
+            "converter_person": str(metadata.get("converter_person", "")),
             "design_steps": str(metadata.get("design_steps", "")),
             "preconditions": str(metadata.get("preconditions", "")),
             "configuration_requirements": str(metadata.get("configuration_requirements", "")),
             "extra_devices": str(metadata.get("extra_devices", "")),
             "scope": scope,
+            "review_status": normalize_session_review_status(metadata.get("review_status", "")),
+            "review_comments": str(metadata.get("review_comments", "")),
         }
         self.session_data["metadata"] = normalized
         return normalized
@@ -906,6 +1312,7 @@ class RecorderViewerWindow:
         self.session_version_number_var.set(metadata["version_number"])
         self.session_name_var.set(str(metadata["name"]))
         self.session_recorder_person_var.set(metadata["recorder_person"])
+        self.session_converter_person_var.set(str(metadata.get("converter_person", "")))
         self.session_scope_var.set(metadata["scope"])
         self.session_design_steps_text.delete("1.0", tk.END)
         self.session_design_steps_text.insert("1.0", metadata["design_steps"])
@@ -970,24 +1377,14 @@ class RecorderViewerWindow:
         if error_message:
             messagebox.showerror(self._t("元数据未填写完整", "Incomplete metadata"), error_message, parent=self.window)
             return
-        if should_prompt_ai_analysis(metadata_payload):
-            if messagebox.askyesno(self._t("AI分析", "AI Analysis"), self._t("前置条件、配置要求、额外设备当前都为空，是否先让 AI 根据 Design Steps 生成建议？", "Preconditions, configuration requirements, and extra devices are empty. Let AI generate suggestions from the design steps first?"), parent=self.window):
-                self.session_metadata_ai_running = True
-                self.session_metadata_status_var.set(self._t("AI分析中...", "AI analysis in progress..."))
-                self.session_metadata_ai_button.configure(state=tk.DISABLED)
-
-                def worker() -> None:
-                    try:
-                        result = analyze_session_metadata(self.settings_store, metadata_payload)
-                    except Exception as exc:
-                        self.window.after(0, lambda: self._on_session_metadata_ai_failed(str(exc)))
-                        return
-                    self.window.after(0, lambda: self._on_session_metadata_ai_success(result, save_after=True, metadata_payload=metadata_payload))
-
-                threading.Thread(target=worker, daemon=True).start()
-                return
-
-        self._validate_session_metadata_with_ai(metadata_payload)
+        try:
+            renamed_paths = self._apply_session_metadata_and_persist(metadata_payload)
+        except Exception as exc:
+            self.session_metadata_status_var.set(self._t("保存失败", "Save failed"))
+            messagebox.showerror(self._t("保存失败", "Save failed"), str(exc), parent=self.window)
+            return
+        self.session_metadata_status_var.set(self._t("已保存", "Saved"))
+        self._show_session_rename_notice(renamed_paths)
 
     def _collect_session_metadata_payload(self) -> dict[str, object]:
         existing_metadata = self._get_session_metadata()
@@ -999,11 +1396,14 @@ class RecorderViewerWindow:
             "baseline_name": str(existing_metadata.get("baseline_name", "")).strip(),
             "name": self.session_name_var.get().strip(),
             "recorder_person": self.session_recorder_person_var.get().strip(),
+            "converter_person": self.session_converter_person_var.get().strip(),
             "design_steps": self.session_design_steps_text.get("1.0", tk.END).strip(),
             "preconditions": format_keyword_terms(self.session_preconditions_text.get("1.0", tk.END).strip().splitlines()),
             "configuration_requirements": format_keyword_terms(self.session_configuration_requirements_text.get("1.0", tk.END).strip().splitlines()),
             "extra_devices": format_keyword_terms(self.session_extra_devices_text.get("1.0", tk.END).strip().splitlines()),
             "scope": self.session_scope_var.get().strip() if self.session_scope_var.get().strip() in {"All", "Sub"} else "All",
+            "review_status": normalize_session_review_status(existing_metadata.get("review_status", "")),
+            "review_comments": str(existing_metadata.get("review_comments", "") or "").strip(),
         }
 
     def _validate_session_metadata_with_ai(self, metadata_payload: dict[str, object]) -> None:
@@ -1607,6 +2007,7 @@ class RecorderViewerWindow:
 
             self._update_event_comment(index, new_comment)
             self._persist_session()
+            self._invalidate_derived_outputs_for_rows([index], reason="备注")
             self._reload_tree()
             self._reload_event_list_popup()
             self._select_row_index(index)
@@ -3431,7 +3832,14 @@ class RecorderViewerWindow:
         edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} 参数建议", current_value)
         if edited_value is None:
             return
-        suggestion.candidate_payload["viewer_parameter_summary_override"] = edited_value.strip()
+        try:
+            parameter_payload = self._parse_parameter_suggestion_text(edited_value)
+        except ValueError as exc:
+            messagebox.showerror("参数建议格式错误", str(exc), parent=self.window)
+            return
+        suggestion.parameters = self._build_parameter_suggestions_from_payload(parameter_payload)
+        if isinstance(getattr(suggestion, "candidate_payload", None), dict):
+            suggestion.candidate_payload.pop("viewer_parameter_summary_override", None)
         self._persist_suggestion_result()
         self._after_edit_row_content(row_index)
 
@@ -3459,6 +3867,21 @@ class RecorderViewerWindow:
         self._reload_tree()
         self._select_row_index(row_index)
 
+    def _invalidate_derived_outputs_for_rows(self, row_indexes: list[int], *, reason: str) -> None:
+        normalized_rows = sorted({row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)})
+        if not normalized_rows:
+            return
+        self._invalidate_ai_outputs_for_rows(
+            normalized_rows,
+            f"步骤内容已修改（{reason}），仅当前步骤的 AI 看图结果已失效，请按需重新执行 AI 分析。",
+        )
+        self._invalidate_suggestion_outputs_for_rows(
+            normalized_rows,
+            f"步骤内容已修改（{reason}），仅当前步骤的方法/参数建议已失效，请按需重新生成。",
+        )
+        self._refresh_coverage_summary()
+        self._refresh_selected_suggestion_panel()
+
     def _edit_event_action(self, row_index: int) -> None:
         event = self.event_rows[row_index]
         current_value = self._extract_event_action(event)
@@ -3467,6 +3890,7 @@ class RecorderViewerWindow:
             return
         self._update_event_action(row_index, edited_value.strip())
         self._persist_session()
+        self._invalidate_derived_outputs_for_rows([row_index], reason="动作")
         self._after_edit_row_content(row_index)
 
     def _edit_event_type(self, row_index: int) -> None:
@@ -3481,6 +3905,7 @@ class RecorderViewerWindow:
             return
         self._update_event_type(row_index, edited_value.strip())
         self._persist_session()
+        self._invalidate_derived_outputs_for_rows([row_index], reason="类型")
         self._refresh_filter_options()
         self._after_edit_row_content(row_index)
 
@@ -3713,7 +4138,7 @@ class RecorderViewerWindow:
         self._sync_checkpoint_collection_entry(event, updated_event)
         self.summary_var.set(self._build_session_summary_text())
         self._persist_session()
-        self._invalidate_derived_outputs()
+        self._invalidate_derived_outputs_for_rows([row_index], reason="AI Checkpoint")
         self.media_cache.clear()
         self._reload_tree()
         self._select_row_index(row_index)
@@ -4484,35 +4909,6 @@ class RecorderViewerWindow:
             and str(left.get("note", "")) == str(right.get("note", ""))
         )
 
-    def _invalidate_derived_outputs(self) -> None:
-        self.ai_analysis = None
-        self.ai_step_tags = {}
-        self.ai_step_texts = {}
-        self.ai_process_summary_texts = {}
-        self.suggestion_result = None
-        self.step_method_suggestions = {}
-        self.step_module_suggestions = {}
-        self.step_parameter_summaries = {}
-        self._clear_parameter_chat_history()
-        if self.session_dir:
-            for file_name in ("ai_analysis.json", "conversion_suggestions.json"):
-                target = self.session_dir / file_name
-                if target.exists():
-                    try:
-                        target.unlink()
-                    except Exception:
-                        pass
-            self.ai_var.set(self._build_initial_ai_status_text(self.session_dir))
-            self.suggestion_var.set(self._build_initial_suggestion_status_text(self.session_dir))
-        else:
-            self.ai_var.set(self._t("未执行 AI 分析", "AI analysis has not been run"))
-            self.suggestion_var.set(self._t("未生成调用建议", "No method suggestions generated"))
-        self.parameter_progress_var.set(self._t("参数推荐批处理未执行", "Parameter recommendation batch has not been run"))
-        self.parameter_status_var.set(self._t("请选择左侧步骤并先生成调用建议。", "Select steps on the left and generate method suggestions first."))
-        self._set_text_widget(self.parameter_result_text, "")
-        self._refresh_coverage_summary()
-        self._update_historical_ai_button_state()
-
     def _handle_select_all_shortcut(self, _event: tk.Event) -> str | None:
         focus_widget = self.window.focus_get()
         if isinstance(focus_widget, tk.Text):
@@ -5093,6 +5489,7 @@ class RecorderViewerWindow:
         yaml_path.write_text(yaml.safe_dump(self.session_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
         event_lines = [json.dumps(event, ensure_ascii=False) for event in self.event_rows if isinstance(event, dict)]
         events_log_path.write_text("\n".join(event_lines) + ("\n" if event_lines else ""), encoding="utf-8")
+        write_session_summary_from_session_payload(self.session_dir, self.session_data, event_count=len(self.event_rows))
 
     def apply_ai_deletions(self) -> None:
         if not self.ai_analysis:
@@ -5180,9 +5577,11 @@ class RecorderViewerWindow:
         tree.tag_configure("clean-review", background="#17354d", foreground="#d9f0ff")
         tree.tag_configure("ai-delete", background="#3d184f", foreground="#f2dcff")
         tree.tag_configure("ai-review", background="#113f2d", foreground="#ddffef")
-        tree.tag_configure("debug-running", background="#f6d365", foreground="#1f1f1f")
+        tree.tag_configure("debug-pending", background="#2b579a", foreground="#ffffff")
+        tree.tag_configure("debug-running", background="#2f855a", foreground="#f3fff8")
         tree.tag_configure("debug-success", background="#1f6f43", foreground="#eafff2")
         tree.tag_configure("debug-failed", background="#8f1d21", foreground="#ffe9ea")
+        tree.tag_configure("debug-stopped", background="#6b7280", foreground="#ffffff")
 
     def _center_tree_item(self, tree: ttk.Treeview, item_id: str) -> None:
         if not tree.winfo_exists() or not tree.exists(item_id):
@@ -5221,22 +5620,56 @@ class RecorderViewerWindow:
                 self.tree.item(row_id, tags=self._build_row_tags(row_index))
                 if center_current:
                     self._center_tree_item(self.tree, row_id)
-                else:
-                    self.tree.focus(row_id)
-                    self.tree.see(row_id)
             if self.event_list_tree and self.event_list_tree.winfo_exists() and self.event_list_tree.exists(row_id):
                 self.event_list_tree.item(row_id, tags=self._build_row_tags(row_index))
                 if center_current:
                     self._center_tree_item(self.event_list_tree, row_id)
-                else:
-                    self.event_list_tree.focus(row_id)
-                    self.event_list_tree.see(row_id)
+
+    def _set_tree_selection_silently(self, row_indexes: list[int], focus_index: int | None = None) -> None:
+        unique_row_indexes = sorted({row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)})
+        row_ids = [str(row_index) for row_index in unique_row_indexes]
+        focus_row_id = str(focus_index) if focus_index is not None else None
+
+        self._synchronizing_tree_selection = True
+        try:
+            self.tree.selection_set(row_ids)
+            if focus_row_id and self.tree.exists(focus_row_id):
+                self.tree.focus(focus_row_id)
+                self.tree.see(focus_row_id)
+            if self.event_list_tree and self.event_list_tree.winfo_exists():
+                self.event_list_tree.selection_set([item_id for item_id in row_ids if self.event_list_tree.exists(item_id)])
+                if focus_row_id and self.event_list_tree.exists(focus_row_id):
+                    self.event_list_tree.focus(focus_row_id)
+                    self.event_list_tree.see(focus_row_id)
+        finally:
+            self._synchronizing_tree_selection = False
 
     def _reset_debug_step_state(self) -> None:
         affected_rows = list(self.debug_step_tags)
         self.debug_step_tags = {}
         self.debug_step_messages = {}
         self._refresh_debug_row_visuals(affected_rows)
+
+    def cancel_debug_atframework_steps(self) -> None:
+        if not self.debug_run_running or self.debug_cancel_event.is_set():
+            return
+        self.debug_cancel_event.set()
+        self.stop_debug_button.configure(state=tk.DISABLED)
+        self.load_status_var.set("正在请求停止本地ATFramework调试: 等待当前步骤返回")
+        self.cleaning_var.set("本地ATFramework调试停止请求已发送，等待当前步骤完成")
+
+    def _is_debug_cancel_requested(self) -> bool:
+        return self.debug_cancel_event.is_set()
+
+    def _mark_debug_rows_stopped(self, row_indexes: list[int]) -> None:
+        stopped_rows: list[int] = []
+        for row_index in sorted(set(row_indexes)):
+            if self.debug_step_tags.get(row_index) in {"debug-success", "debug-failed"}:
+                continue
+            self.debug_step_tags[row_index] = "debug-stopped"
+            self.debug_step_messages[row_index] = "已停止"
+            stopped_rows.append(row_index)
+        self._refresh_debug_row_visuals(stopped_rows)
 
     def _build_debug_step_requests(self, row_indexes: list[int]) -> list[dict[str, object]]:
         suggestion_result = self._build_selected_suggestion_result(row_indexes)
@@ -6175,14 +6608,18 @@ class RecorderViewerWindow:
 
     def _load_existing_suggestion_result(self):
         if self.suggestion_result is not None:
-            return copy.deepcopy(self.suggestion_result)
+            result = copy.deepcopy(self.suggestion_result)
+            self._materialize_parameter_summary_overrides(result)
+            return result
         if not self.session_dir:
             return None
         suggestion_path = self.session_dir / "conversion_suggestions.json"
         if not suggestion_path.exists():
             return None
         try:
-            return self.suggestion_service.load_result_file(suggestion_path)
+            result = self.suggestion_service.load_result_file(suggestion_path)
+            self._materialize_parameter_summary_overrides(result)
+            return result
         except Exception:
             return None
 
@@ -6238,12 +6675,8 @@ class RecorderViewerWindow:
                 continue
 
             item.parameters = copy.deepcopy(existing_item.parameters)
-            existing_payload = existing_item.candidate_payload if isinstance(existing_item.candidate_payload, dict) else {}
             new_payload = item.candidate_payload if isinstance(item.candidate_payload, dict) else {}
-            merged_payload = dict(new_payload)
-            if "viewer_parameter_summary_override" in existing_payload:
-                merged_payload["viewer_parameter_summary_override"] = existing_payload["viewer_parameter_summary_override"]
-            item.candidate_payload = merged_payload
+            item.candidate_payload = dict(new_payload)
 
             merged_suggestions.append(item)
 
@@ -6295,8 +6728,7 @@ class RecorderViewerWindow:
         for item in result.suggestions:
             if item.step_id <= 0:
                 continue
-            override = item.candidate_payload.get("viewer_parameter_summary_override", "") if isinstance(item.candidate_payload, dict) else ""
-            mapping[item.step_id - 1] = str(override).strip() or self._summarize_parameter_suggestions(item.parameters)
+            mapping[item.step_id - 1] = self._summarize_parameter_suggestions(item.parameters)
         return mapping
 
     def _build_suggestion_summary_text(self, result) -> str:
@@ -6334,8 +6766,144 @@ class RecorderViewerWindow:
             return ""
         return json.dumps(payload, ensure_ascii=False, default=str)
 
+    @staticmethod
+    def _build_parameter_suggestions_from_payload(parameter_payload: dict[str, object]) -> list[MethodParameterSuggestion]:
+        return [
+            MethodParameterSuggestion(
+                name=str(name).strip(),
+                suggested_value=value,
+                confidence=1.0,
+                evidence=[],
+                missing_reason="",
+            )
+            for name, value in parameter_payload.items()
+            if str(name).strip()
+        ]
+
+    @classmethod
+    def _materialize_parameter_summary_overrides(cls, result) -> bool:
+        changed = False
+        for suggestion in list(getattr(result, "suggestions", []) or []):
+            candidate_payload = getattr(suggestion, "candidate_payload", None)
+            if not isinstance(candidate_payload, dict):
+                continue
+            raw_override = str(candidate_payload.get("viewer_parameter_summary_override", "") or "").strip()
+            if not raw_override:
+                continue
+            try:
+                parameter_payload = cls._parse_parameter_suggestion_text(raw_override)
+            except ValueError:
+                continue
+            suggestion.parameters = cls._build_parameter_suggestions_from_payload(parameter_payload)
+            candidate_payload.pop("viewer_parameter_summary_override", None)
+            changed = True
+        return changed
+
+    @classmethod
+    def _parse_parameter_suggestion_text(cls, raw_text: str) -> dict[str, object]:
+        text = raw_text.strip()
+        if not text:
+            return {}
+
+        try:
+            parsed_json = json.loads(text)
+        except Exception:
+            parsed_json = None
+        if isinstance(parsed_json, dict):
+            return {str(key): value for key, value in parsed_json.items() if str(key).strip()}
+        if parsed_json is not None:
+            raise ValueError("参数建议必须是 JSON 对象。")
+
+        result: dict[str, object] = {}
+        for part in cls._split_parameter_summary_segments(text):
+            segment = part.strip()
+            if not segment or "=" not in segment:
+                continue
+            key, raw_value = segment.split("=", 1)
+            name = key.strip()
+            value_text = raw_value.strip()
+            if not name:
+                continue
+            if not value_text:
+                result[name] = ""
+                continue
+            try:
+                result[name] = json.loads(value_text)
+                continue
+            except Exception:
+                pass
+            try:
+                result[name] = ast.literal_eval(value_text)
+                continue
+            except Exception:
+                lowered = value_text.lower()
+                if lowered == "true":
+                    result[name] = True
+                elif lowered == "false":
+                    result[name] = False
+                elif lowered in {"null", "none"}:
+                    result[name] = None
+                else:
+                    result[name] = value_text
+
+        if result:
+            return result
+        raise ValueError("参数建议必须是 JSON 对象，或兼容旧格式的 key=value 列表。")
+
+    @staticmethod
+    def _split_parameter_summary_segments(raw_text: str) -> list[str]:
+        parts: list[str] = []
+        current: list[str] = []
+        depth = 0
+        in_string = False
+        quote_char = ""
+        escape = False
+
+        for char in raw_text:
+            if in_string:
+                current.append(char)
+                if escape:
+                    escape = False
+                    continue
+                if char == "\\":
+                    escape = True
+                    continue
+                if char == quote_char:
+                    in_string = False
+                    quote_char = ""
+                continue
+
+            if char in {'"', "'"}:
+                in_string = True
+                quote_char = char
+                current.append(char)
+                continue
+
+            if char in "[{(":
+                depth += 1
+                current.append(char)
+                continue
+
+            if char in "]})":
+                depth = max(0, depth - 1)
+                current.append(char)
+                continue
+
+            if char in {",", ";"} and depth == 0:
+                segment = "".join(current).strip()
+                if segment:
+                    parts.append(segment)
+                current = []
+                continue
+
+            current.append(char)
+
+        tail = "".join(current).strip()
+        if tail:
+            parts.append(tail)
+        return parts
+
     def _format_parameter_detail_text(self, suggestion) -> str:
-        override = suggestion.candidate_payload.get("viewer_parameter_summary_override", "") if isinstance(suggestion.candidate_payload, dict) else ""
         lines = [
             f"Step: {suggestion.step_id}",
             f"方法: {suggestion.method_name or '(无)'}",
@@ -6483,23 +7051,30 @@ class RecorderViewerWindow:
 
     def _load_suggestion_result_for_export(self):
         if self.suggestion_result is not None:
-            return copy.deepcopy(self.suggestion_result)
+            result = copy.deepcopy(self.suggestion_result)
+            self._materialize_parameter_summary_overrides(result)
+            return result
         if not self.session_dir:
             raise ValueError("请先加载 Session。")
         suggestion_path = self.session_dir / "conversion_suggestions.json"
         if not suggestion_path.exists():
             raise ValueError("请先生成或加载调用建议。")
         result = self.suggestion_service.load_result_file(suggestion_path)
+        self._materialize_parameter_summary_overrides(result)
         self.window.after(0, lambda result=result: self._apply_loaded_suggestion_result(result))
         return copy.deepcopy(result)
 
     def _apply_loaded_suggestion_result(self, result) -> None:
-        self.suggestion_result = result
-        self.step_method_suggestions = self._build_method_suggestion_map(result)
-        self.step_module_suggestions = self._build_module_suggestion_map(result)
-        self.step_parameter_summaries = self._build_parameter_suggestion_map(result)
-        self.suggestion_var.set(self._build_suggestion_summary_text(result))
+        normalized_result = result
+        normalized_changed = self._materialize_parameter_summary_overrides(normalized_result)
+        self.suggestion_result = normalized_result
+        self.step_method_suggestions = self._build_method_suggestion_map(normalized_result)
+        self.step_module_suggestions = self._build_module_suggestion_map(normalized_result)
+        self.step_parameter_summaries = self._build_parameter_suggestion_map(normalized_result)
+        self.suggestion_var.set(self._build_suggestion_summary_text(normalized_result))
         self._refresh_selected_suggestion_panel()
+        if normalized_changed and self.session_dir is not None:
+            self.suggestion_service.write_result_file(self.session_dir / "conversion_suggestions.json", normalized_result)
 
     def _prompt_export_root_directory(self) -> Path | None:
         default_root = Path.home() / "Desktop"
@@ -6638,15 +7213,32 @@ class RecorderViewerWindow:
             return
 
         self._reset_debug_step_state()
+        debug_row_indexes = [int(item.get("row_index", -1)) for item in debug_requests if int(item.get("row_index", -1)) >= 0]
+        self.debug_step_tags = {row_index: "debug-pending" for row_index in debug_row_indexes}
+        self._refresh_debug_row_visuals(debug_row_indexes)
+        self._set_tree_selection_silently([])
+        self.debug_cancel_event.clear()
         self.debug_run_running = True
         self.debug_run_button.configure(state=tk.DISABLED)
+        self.stop_debug_button.configure(state=tk.NORMAL)
         self.load_status_var.set(f"正在调用本地ATFramework调试: 准备发送 {len(debug_requests)} 条步骤")
         self.cleaning_var.set(f"本地ATFramework调试中: 准备发送 {len(debug_requests)} 条步骤")
 
         def worker() -> None:
             step_results: list[dict[str, object]] = []
             success_count = 0
-            for position, item in enumerate(debug_requests, start=1):
+            stopped = False
+            stopped_row_indexes: list[int] = []
+            for index, item in enumerate(debug_requests):
+                position = index + 1
+                if self._is_debug_cancel_requested():
+                    stopped = True
+                    stopped_row_indexes = [
+                        int(remaining.get("row_index", -1))
+                        for remaining in debug_requests[index:]
+                        if int(remaining.get("row_index", -1)) >= 0
+                    ]
+                    break
                 row_index = int(item.get("row_index", -1))
                 payload = item.get("payload", {})
                 action_label = str(item.get("action", "") or "")
@@ -6671,21 +7263,47 @@ class RecorderViewerWindow:
                 )
                 if not success:
                     break
+                if self._is_debug_cancel_requested():
+                    stopped = True
+                    stopped_row_indexes = [
+                        int(remaining.get("row_index", -1))
+                        for remaining in debug_requests[index + 1 :]
+                        if int(remaining.get("row_index", -1)) >= 0
+                    ]
+                    break
 
             self.window.after(
                 0,
-                lambda success_count=success_count, total=len(debug_requests), step_results=step_results: self._on_debug_atframework_steps_finished(
+                lambda success_count=success_count, total=len(debug_requests), step_results=step_results, stopped=stopped, stopped_row_indexes=stopped_row_indexes: self._on_debug_atframework_steps_finished(
                     success_count,
                     total,
                     step_results,
+                    stopped=stopped,
+                    stopped_row_indexes=stopped_row_indexes,
                 ),
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_debug_atframework_steps_finished(self, success_count: int, total: int, step_results: list[dict[str, object]]) -> None:
+    def _on_debug_atframework_steps_finished(
+        self,
+        success_count: int,
+        total: int,
+        step_results: list[dict[str, object]],
+        *,
+        stopped: bool = False,
+        stopped_row_indexes: list[int] | None = None,
+    ) -> None:
         self.debug_run_running = False
+        self.debug_cancel_event.clear()
         self.debug_run_button.configure(state=tk.NORMAL)
+        self.stop_debug_button.configure(state=tk.DISABLED)
+        if stopped:
+            self._mark_debug_rows_stopped(stopped_row_indexes or [])
+            completed_count = len(step_results)
+            self.load_status_var.set(f"本地ATFramework调试已停止: 已完成 {completed_count}/{total}")
+            self.cleaning_var.set(f"本地ATFramework调试已停止: 已完成 {completed_count}/{total}")
+            return
         failures = [item for item in step_results if not bool(item.get("success"))]
         if failures:
             first_failure = failures[0]

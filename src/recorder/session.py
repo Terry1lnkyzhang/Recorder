@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from datetime import datetime
@@ -10,6 +11,8 @@ import yaml
 from PIL import Image, ImageDraw, ImageGrab
 
 from src.common.display_utils import get_display_layout_snapshot
+from src.common.session_lock import SessionLockHandle, acquire_session_lock
+from src.common.session_summary import write_session_summary_from_session_payload
 
 from .models import RecordedEvent, RecordingSessionData, SessionMetadata
 from .system_info import build_environment_snapshot, safe_relpath, utc_now_iso
@@ -29,56 +32,63 @@ class SessionStore:
         self._screenshot_counter = 0
         self._lock = threading.Lock()
         self._in_memory_event_limit = 1500
+        self._session_lock_handle: SessionLockHandle | None = None
 
     def resume(self, session_dir: Path) -> RecordingSessionData:
-        session_dir = session_dir.resolve()
+        session_dir = Path(os.path.abspath(os.fspath(session_dir)))
+        new_lock_handle = acquire_session_lock(session_dir, owner_kind="recorder", owner_label="Recorder")
         session_path = session_dir / "session.json"
         events_log_path = session_dir / "events.jsonl"
         screenshots_dir = session_dir / "screenshots"
         media_dir = session_dir / "media"
 
-        if not session_path.exists() and not events_log_path.exists():
-            raise RuntimeError(f"未找到可恢复的录制内容: {session_dir}")
+        try:
+            if not session_path.exists() and not events_log_path.exists():
+                raise RuntimeError(f"未找到可恢复的录制内容: {session_dir}")
 
-        self.session_dir = session_dir
-        self.screenshots_dir = screenshots_dir
-        self.media_dir = media_dir
-        self.events_log_path = events_log_path
-        self.screenshots_dir.mkdir(parents=True, exist_ok=True)
-        self.media_dir.mkdir(parents=True, exist_ok=True)
+            self.session_dir = session_dir
+            self.screenshots_dir = screenshots_dir
+            self.media_dir = media_dir
+            self.events_log_path = events_log_path
+            self.screenshots_dir.mkdir(parents=True, exist_ok=True)
+            self.media_dir.mkdir(parents=True, exist_ok=True)
 
-        if session_path.exists():
-            payload = json.loads(session_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"session.json 格式无效: {session_path}")
-            self.data = RecordingSessionData.from_dict(payload)
-        else:
-            self.data = RecordingSessionData(
-                session_id=session_dir.name,
-                created_at=utc_now_iso(),
-                output_dir=str(session_dir),
-                screenshots_dir=str(screenshots_dir),
-                media_dir=str(media_dir),
-                environment=build_environment_snapshot(),
-            )
+            if session_path.exists():
+                payload = json.loads(session_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    raise RuntimeError(f"session.json 格式无效: {session_path}")
+                self.data = RecordingSessionData.from_dict(payload)
+            else:
+                self.data = RecordingSessionData(
+                    session_id=session_dir.name,
+                    created_at=utc_now_iso(),
+                    output_dir=str(session_dir),
+                    screenshots_dir=str(screenshots_dir),
+                    media_dir=str(media_dir),
+                    environment=build_environment_snapshot(),
+                )
 
-        self.data.session_id = self.data.session_id or session_dir.name
-        self.data.output_dir = str(session_dir)
-        self.data.screenshots_dir = str(screenshots_dir)
-        self.data.media_dir = str(media_dir)
-        self.data.stopped_at = None
+            self.data.session_id = self.data.session_id or session_dir.name
+            self.data.output_dir = str(session_dir)
+            self.data.screenshots_dir = str(screenshots_dir)
+            self.data.media_dir = str(media_dir)
+            self.data.stopped_at = None
 
-        if events_log_path.exists():
-            self._materialize_all_events(force_reload=True)
-        else:
-            events_log_path.write_text("", encoding="utf-8")
-            for event in self.data.events:
-                self._append_event_to_log(event)
+            if events_log_path.exists():
+                self._materialize_all_events(force_reload=True)
+            else:
+                events_log_path.write_text("", encoding="utf-8")
+                for event in self.data.events:
+                    self._append_event_to_log(event)
 
-        self._event_count = len(self.data.events)
-        self._event_counter = self._infer_event_counter(self.data.events)
-        self._screenshot_counter = self._infer_screenshot_counter()
-        return self.data
+            self._event_count = len(self.data.events)
+            self._event_counter = self._infer_event_counter(self.data.events)
+            self._screenshot_counter = self._infer_screenshot_counter()
+            self._replace_session_lock_handle(new_lock_handle)
+            return self.data
+        except Exception:
+            new_lock_handle.release()
+            raise
 
     def start(self, metadata: dict[str, object] | None = None) -> RecordingSessionData:
         metadata_model = SessionMetadata.from_dict(metadata if isinstance(metadata, dict) else {})
@@ -111,6 +121,7 @@ class SessionStore:
             metadata=metadata_model,
             environment=build_environment_snapshot(),
         )
+        self._replace_session_lock_handle(acquire_session_lock(self.session_dir, owner_kind="recorder", owner_label="Recorder"))
         return self.data
 
     def stop(self) -> Path:
@@ -119,7 +130,20 @@ class SessionStore:
 
         self.data.stopped_at = utc_now_iso()
         self._write_session_files()
+        self._release_session_lock_handle()
         return self.session_dir
+
+    def _replace_session_lock_handle(self, lock_handle: SessionLockHandle) -> None:
+        previous_handle = self._session_lock_handle
+        self._session_lock_handle = lock_handle
+        if previous_handle is not None and previous_handle is not lock_handle:
+            previous_handle.release()
+
+    def _release_session_lock_handle(self) -> None:
+        if self._session_lock_handle is None:
+            return
+        self._session_lock_handle.release()
+        self._session_lock_handle = None
 
     def save_snapshot(self) -> Path:
         if not self.data or not self.session_dir:
@@ -332,6 +356,7 @@ class SessionStore:
             yaml.safe_dump(session_payload, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+        write_session_summary_from_session_payload(self.session_dir, session_payload, event_count=self._event_count)
 
     def _get_media_folder(self, folder_name: str) -> Path:
         if not self.session_dir:

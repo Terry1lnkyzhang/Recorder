@@ -27,12 +27,14 @@ class RecorderEngine:
         status_callback: Callable[[str], None] | None = None,
         settings_store: SettingsStore | None = None,
         ai_checkpoint_request_callback: Callable[[], None] | None = None,
+        ai_checkpoint_video_request_callback: Callable[[], None] | None = None,
         manual_screenshot_request_callback: Callable[[], None] | None = None,
     ) -> None:
         self.store = SessionStore(output_dir)
         self.status_callback = status_callback or (lambda _: None)
         self.settings_store = settings_store
         self.ai_checkpoint_request_callback = ai_checkpoint_request_callback
+        self.ai_checkpoint_video_request_callback = ai_checkpoint_video_request_callback
         self.manual_screenshot_request_callback = manual_screenshot_request_callback
         self.keyboard_listener: keyboard.Listener | None = None
         self.mouse_listener: mouse.Listener | None = None
@@ -568,6 +570,14 @@ class RecorderEngine:
                 except Exception:
                     self.logger.exception("Failed to invoke AI checkpoint shortcut callback")
             return
+        if self._is_ai_checkpoint_video_shortcut(key_name, active_modifiers):
+            self.logger.info("AI checkpoint video shortcut triggered")
+            if self.ai_checkpoint_video_request_callback:
+                try:
+                    self.ai_checkpoint_video_request_callback()
+                except Exception:
+                    self.logger.exception("Failed to invoke AI checkpoint video shortcut callback")
+            return
         if self._is_manual_screenshot_shortcut(key_name, active_modifiers):
             self.logger.info("Manual screenshot shortcut triggered")
             if self.manual_screenshot_request_callback:
@@ -964,6 +974,11 @@ class RecorderEngine:
     def _is_ai_checkpoint_shortcut(key_name: str, active_modifiers: list[str]) -> bool:
         normalized_key = key_name.split(".", 1)[1].lower() if key_name.startswith("Key.") else key_name.lower()
         return normalized_key == "f5" and "ctrl" in active_modifiers
+
+    @staticmethod
+    def _is_ai_checkpoint_video_shortcut(key_name: str, active_modifiers: list[str]) -> bool:
+        normalized_key = key_name.split(".", 1)[1].lower() if key_name.startswith("Key.") else key_name.lower()
+        return normalized_key == "f6" and "ctrl" in active_modifiers
 
     @staticmethod
     def _is_manual_screenshot_shortcut(key_name: str, active_modifiers: list[str]) -> bool:

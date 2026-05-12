@@ -7,8 +7,9 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from src.common.app_logging import configure_app_logging, get_logger, install_global_exception_logging
-from src.common.runtime_paths import get_recordings_dir, get_settings_path
+from src.common.runtime_paths import RecordingsDirResolution, get_settings_path, resolve_recordings_dir
 from src.common.session_discovery import scan_session_candidates
+from src.common.session_lock import force_release_session_lock
 from src.android_recorder.dialog import AndroidRecorderDialog
 from .dialogs import (
     AICheckpointDraft,
@@ -441,13 +442,15 @@ class RecorderApp:
         self.root.minsize(760, 420)
         self.logger = get_logger("app")
 
-        output_dir = get_recordings_dir()
+        recordings_dir = resolve_recordings_dir()
+        output_dir = recordings_dir.path
         self.settings_store = SettingsStore(get_settings_path())
         self.engine = RecorderEngine(
             output_dir=output_dir,
             status_callback=self._set_status,
             settings_store=self.settings_store,
             ai_checkpoint_request_callback=self._request_ai_checkpoint_from_shortcut,
+            ai_checkpoint_video_request_callback=self._request_ai_checkpoint_video_from_shortcut,
             manual_screenshot_request_callback=self._request_manual_screenshot_from_shortcut,
         )
 
@@ -470,6 +473,7 @@ class RecorderApp:
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._handle_root_close)
+        self._confirm_recordings_output_dir(recordings_dir)
         self.logger.info("Recorder UI initialized | output_dir=%s", output_dir)
 
     def _build_ui(self) -> None:
@@ -578,7 +582,51 @@ class RecorderApp:
         self._show_design_steps_overlay(metadata_draft.design_steps)
         self._set_active_session_text(self._t("录制中", "Recording"))
         self._refresh_controls()
-        self._set_status(message)
+
+    def _confirm_recordings_output_dir(self, recordings_dir: RecordingsDirResolution) -> None:
+        if recordings_dir.using_network_share:
+            return
+
+        warning_message = self._t(
+            "当前未连接到默认录屏目录：\n"
+            "\\130.147.129.203\\AutomaticShared\\Recordings\n\n"
+            f"将使用本地录屏路径：\n{recordings_dir.path}\n\n"
+            "录屏成果需要手动拷贝到：\n"
+            "\\130.147.129.203\\AutomaticShared\\Recordings\n\n"
+            "是否确认继续？\n\n"
+            "选择“否”将关闭程序，请连接共享目录后重新开启。",
+            "The default recordings share is currently unavailable:\n"
+            "\\130.147.129.203\\AutomaticShared\\Recordings\n\n"
+            f"The app will use this local recordings path instead:\n{recordings_dir.path}\n\n"
+            "You must manually copy the recording results to:\n"
+            "\\130.147.129.203\\AutomaticShared\\Recordings\n\n"
+            "Do you want to continue?\n\n"
+            "Choosing No will close the app. Reconnect to the share and reopen it.",
+        )
+        self.logger.warning(
+            "Network recordings share unavailable; falling back to local directory | local_path=%s | reason=%s",
+            recordings_dir.path,
+            recordings_dir.fallback_reason or "unknown",
+        )
+        self.root.bell()
+        self.root.lift()
+        self.root.focus_force()
+        if not messagebox.askyesno(
+            self._t("共享录屏目录未连接", "Shared recordings path unavailable"),
+            warning_message,
+            parent=self.root,
+            icon="warning",
+            default="no",
+        ):
+            self._set_status(self._t("未确认本地录屏路径，程序即将关闭", "Local recordings path not confirmed; closing the app"))
+            self.root.after(0, self.root.destroy)
+            return
+        self._set_status(
+            self._t(
+                "当前未连接共享录屏目录，已切换到本地 recording 目录，请在录制后手动拷贝成果。",
+                "The shared recordings path is unavailable. The app is using the local recording directory; copy the results manually after recording.",
+            )
+        )
 
     def import_and_continue_recording(self) -> None:
         if self.engine.is_recording or self.stop_in_progress or self.save_in_progress or self.import_in_progress:
@@ -762,6 +810,48 @@ class RecorderApp:
             self._checkpoint_dialog_open = False
             self.logger.info("AI checkpoint shortcut capture closed")
 
+    def _add_video_checkpoint_from_shortcut(self) -> None:
+        if not self.engine.is_recording:
+            self.logger.info("AI checkpoint video shortcut ignored because recorder is not running")
+            return
+        if self._checkpoint_dialog_open:
+            self.logger.info("AI checkpoint video shortcut ignored because dialog is already open")
+            return
+        if self.ai_checkpoint_draft.image_selections or self.ai_checkpoint_draft.video_path is not None:
+            self.logger.info(
+                "AI checkpoint video shortcut falls back to dialog open | image_count=%s | has_video=%s",
+                len(self.ai_checkpoint_draft.image_selections),
+                self.ai_checkpoint_draft.video_path is not None,
+            )
+            self.add_checkpoint()
+            return
+
+        self.logger.info("AI checkpoint video shortcut capture opened")
+        self._checkpoint_dialog_open = True
+        self.engine.suspend()
+        try:
+            selection = select_region(self.root, "选择 AI Checkpoint 视频区域")
+            if not selection:
+                self._set_status(self._t("已取消 AI Checkpoint 快捷视频录制", "AI checkpoint quick video capture canceled"))
+                return
+
+            self.ai_checkpoint_draft.image_selections = []
+            self.ai_checkpoint_draft.video_path = None
+            self.ai_checkpoint_draft.video_region = None
+            self.ai_checkpoint_draft.video_status = "未录制视频"
+
+            open_ai_checkpoint_dialog(
+                self.root,
+                self.engine,
+                self.settings_store,
+                self.ai_checkpoint_draft,
+                auto_start_video_selection=selection,
+            )
+        finally:
+            self.engine.resume()
+            self._checkpoint_dialog_open = False
+            self.logger.info("AI checkpoint video shortcut capture closed")
+
     def capture_manual_screenshot(self) -> None:
         if not self.engine.is_recording:
             self.logger.info("Manual screenshot ignored because recorder is not running")
@@ -786,6 +876,9 @@ class RecorderApp:
 
     def _request_ai_checkpoint_from_shortcut(self) -> None:
         self.root.after(0, self._add_checkpoint_from_shortcut)
+
+    def _request_ai_checkpoint_video_from_shortcut(self) -> None:
+        self.root.after(0, self._add_video_checkpoint_from_shortcut)
 
     def _request_manual_screenshot_from_shortcut(self) -> None:
         self.root.after(0, self.capture_manual_screenshot)
@@ -866,6 +959,7 @@ class RecorderApp:
                 baseline_name=metadata.baseline_name,
                 name=metadata.name,
                 recorder_person=metadata.recorder_person,
+                converter_person=metadata.converter_person,
                 design_steps=metadata.design_steps,
                 scope=metadata.scope,
             )
@@ -914,12 +1008,14 @@ class RecorderApp:
         ttk.Label(dialog, text=self._t("请选择一个已有 session 继续录制。", "Select an existing session to continue recording."), padding=(16, 12, 16, 4)).pack(anchor=tk.W)
         ttk.Label(dialog, text=str(recordings_root), padding=(16, 0, 16, 8)).pack(anchor=tk.W)
 
-        columns = ("name", "modified", "events")
+        columns = ("name", "lock_status", "modified", "events")
         tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
         tree.heading("name", text=self._t("Session 目录", "Session folder"))
+        tree.heading("lock_status", text=self._t("状态", "Status"))
         tree.heading("modified", text=self._t("最后修改时间", "Last modified"))
         tree.heading("events", text=self._t("事件数", "Events"))
         tree.column("name", width=360, anchor=tk.W)
+        tree.column("lock_status", width=160, anchor=tk.W, stretch=False)
         tree.column("modified", width=200, anchor=tk.W, stretch=False)
         tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
         tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
@@ -957,7 +1053,7 @@ class RecorderApp:
                             "",
                             tk.END,
                             iid=str(index),
-                            values=(item["name"], item["modified"], item["events"]),
+                            values=(item["name"], item.get("lock_status", ""), item["modified"], item["events"]),
                         )
                     if sessions:
                         tree.selection_set("0")
@@ -976,7 +1072,29 @@ class RecorderApp:
             selected_path = Path(str(sessions[int(selection[0])]["path"]))
             dialog.destroy()
 
+        def force_unlock_selected() -> None:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
+                return
+            item = sessions[int(selection[0])]
+            session_dir = Path(str(item.get("path", "")))
+            if not bool(item.get("is_locked", False)):
+                messagebox.showinfo(self._t("提示", "Notice"), self._t("当前所选 Session 没有锁。", "The selected session is not locked."), parent=dialog)
+                return
+            if not messagebox.askyesno(
+                self._t("强制解锁", "Force Unlock"),
+                self._t(f"确定要强制解锁这个 Session 吗？\n\n{session_dir}", f"Force unlock this session?\n\n{session_dir}"),
+                parent=dialog,
+            ):
+                return
+            if not force_release_session_lock(session_dir):
+                messagebox.showerror(self._t("强制解锁失败", "Force unlock failed"), self._t("无法删除锁文件。", "Unable to delete the lock file."), parent=dialog)
+                return
+            populate(force_refresh=True)
+
         ttk.Button(button_bar, text=self._t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
+        ttk.Button(button_bar, text=self._t("强制解锁所选 Session", "Force Unlock Selected Session"), command=force_unlock_selected).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text=self._t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
         ttk.Button(button_bar, text=self._t("继续录制所选 Session", "Continue selected session"), command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -1018,7 +1136,7 @@ class RecorderApp:
             return
         self.android_recorder_dialog = AndroidRecorderDialog(
             self.root,
-            output_dir=get_recordings_dir(),
+            output_dir=Path(self.output_var.get()),
             ui_language=self.current_settings.ui_language,
             settings_store=self.settings_store,
             is_main_recording_active=lambda: self.engine.is_recording,
@@ -1051,7 +1169,7 @@ class RecorderApp:
             "2. Comment 通过鼠标拖拽选择截图区域，再填写大文本说明。\n"
             "3. 等待事件支持框选等待区域并自动保存截图，当前第一版用于记录等待图片出现的步骤。\n"
             "4. 记录截图支持手动选区并保存到当前 Session 的 screenshots，可通过 Ctrl+F4 快捷键快速触发。\n"
-            "5. AI Checkpoint 支持两张截图、区域视频录制、Query 调模型并保存返回内容，也支持 Ctrl+F5 快捷键快速打开。\n"
+            "5. AI Checkpoint 支持截图、区域视频录制、Query 调模型并保存返回内容；Ctrl+F5 可快速截图打开，Ctrl+F6 可选区后立即开始视频录制。\n"
             "6. 可手动点击保存，立即将当前 session 快照和 suggestions 落盘。\n"
             "7. 支持暂停/继续录制，以及导入已有 session 后继续录制。\n"
             "8. 停止录制会在后台收尾，不再阻塞整个窗口。\n"
@@ -1061,7 +1179,7 @@ class RecorderApp:
             "2. Comment lets you drag-select a screenshot region and enter a detailed note.\n"
             "3. Wait events let you select a wait region and save a screenshot for image-appearance wait steps.\n"
             "4. Capture Screenshot saves a manual region into the current session screenshots folder and can be triggered with Ctrl+F4.\n"
-            "5. AI Checkpoint supports screenshots, region video capture, model queries, and saving the response; Ctrl+F5 also opens it quickly.\n"
+            "5. AI Checkpoint supports screenshots, region video capture, model queries, and saving the response; Ctrl+F5 quickly captures a screenshot and opens it, while Ctrl+F6 selects a region and starts video recording immediately.\n"
             "6. Save writes the current session snapshot and suggestions immediately.\n"
             "7. Recording can be paused/resumed, and you can continue from an existing session.\n"
             "8. Stopping recording completes background cleanup without blocking the window.\n"
@@ -1088,4 +1206,13 @@ def launch_app() -> None:
         style.theme_use("vista")
     app = RecorderApp(root)
     logger.info("Application started | log_path=%s", log_path)
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        logger.info("Application interrupted from terminal/debugger")
+    finally:
+        try:
+            if root.winfo_exists():
+                root.destroy()
+        except tk.TclError:
+            pass
