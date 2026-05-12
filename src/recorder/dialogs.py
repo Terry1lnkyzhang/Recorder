@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import threading
 import tkinter as tk
@@ -1626,6 +1627,7 @@ class AICheckpointDialog:
         self.video_path: Path | None = draft.video_path
         self.video_region: dict[str, int] | None = draft.video_region
         self.video_recorder: RegionVideoRecorder | None = None
+        self._video_stop_in_progress = False
         self.query_result: dict[str, object] | None = draft.query_result
         self.saved = False
         self.result_payload: dict[str, object] | None = None
@@ -1756,6 +1758,20 @@ class AICheckpointDialog:
         self.video_preview_frame.pack(fill=tk.BOTH, expand=True)
         self.video_preview_view = ZoomableImageView(self.video_preview_frame, empty_text=self._t("尚未录制视频", "No video recorded"))
         self.video_preview_view.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.video_preview_view.canvas.bind("<Double-Button-1>", self._on_video_preview_double_click, add="+")
+        video_actions = ttk.Frame(self.video_preview_frame)
+        video_actions.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.play_video_button = ttk.Button(
+            video_actions,
+            text=self._t("播放视频", "Play Video"),
+            command=self.play_video_preview,
+            state=tk.DISABLED,
+        )
+        self.play_video_button.pack(side=tk.LEFT)
+        ttk.Label(
+            video_actions,
+            text=self._t("双击预览也可播放", "Double-click the preview to play"),
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         right_content = ttk.Frame(right)
         right_content.pack(fill=tk.BOTH, expand=True)
@@ -2020,6 +2036,13 @@ class AICheckpointDialog:
         self._restore_previews()
 
     def start_video(self, selection: RegionSelection | None = None) -> None:
+        if self._video_stop_in_progress:
+            messagebox.showinfo(
+                self._t("提示", "Info"),
+                self._t("上一个视频仍在保存中，请稍候再开始新的录制。", "The previous video is still being saved. Please wait before starting a new recording."),
+                parent=self.window,
+            )
+            return
         if self.image_selections:
             messagebox.showinfo("提示", "当前已经有截图，视频和截图不能同时存在。请先清空截图。", parent=self.window)
             return
@@ -2053,18 +2076,127 @@ class AICheckpointDialog:
         self.video_status_var.set(f"视频录制中: {output_path.name}")
         self._refresh_media_summary()
         self.video_preview_view.set_image(selection.image)
+        self._sync_video_preview_actions()
         self._switch_preview_mode("video")
 
     def stop_video(self) -> None:
+        if self._video_stop_in_progress:
+            return
         if not self.video_recorder or not self.video_recorder.is_recording:
             return
         output_path = self.video_recorder.stop()
         self.video_status_var.set(
             f"视频已保存: {output_path.name} | 帧数={self.video_recorder.frame_count} | 时长={self.video_recorder.duration_seconds:.1f}s"
         )
+        self._restore_previews()
+
+    def stop_video_async(self, on_complete: Callable[[], None] | None = None) -> bool:
+        if self._video_stop_in_progress:
+            return False
+        recorder = self.video_recorder
+        video_path = self.video_path
+        if recorder is None or not recorder.is_recording or video_path is None:
+            return False
+
+        self._video_stop_in_progress = True
+        self.video_status_var.set(self._t(f"正在保存视频: {video_path.name}", f"Saving video: {video_path.name}"))
+        self.video_preview_view.set_status(self._t("正在保存视频...", "Saving video..."))
+        self._sync_video_preview_actions()
+
+        def worker() -> None:
+            preview_frame: Image.Image | None = None
+            preview_error = ""
+            output_path = recorder.stop()
+            if output_path.exists():
+                preview_frame = load_video_preview_frame(output_path)
+                if preview_frame is None:
+                    preview_error = self._t(
+                        f"视频文件: {output_path.name}\n无法读取预览帧",
+                        f"Video file: {output_path.name}\nUnable to read a preview frame",
+                    )
+            else:
+                preview_error = self._t("视频文件不存在", "The video file does not exist")
+
+            def finish() -> None:
+                self._video_stop_in_progress = False
+                if not self.window.winfo_exists():
+                    return
+                self.video_status_var.set(
+                    f"视频已保存: {output_path.name} | 帧数={recorder.frame_count} | 时长={recorder.duration_seconds:.1f}s"
+                )
+                self._switch_preview_mode("video")
+                if preview_frame is not None:
+                    self.video_preview_view.set_image(preview_frame)
+                else:
+                    self.video_preview_view.clear(preview_error)
+                self._sync_video_preview_actions()
+                if on_complete is not None:
+                    on_complete()
+
+            try:
+                self.window.after(0, finish)
+            except tk.TclError:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
+        return True
 
     def is_video_recording_active(self) -> bool:
         return bool(self.video_recorder and self.video_recorder.is_recording)
+
+    def is_video_stop_in_progress(self) -> bool:
+        return self._video_stop_in_progress
+
+    def _can_play_video_preview(self) -> bool:
+        return bool(self.video_path and self.video_path.exists() and not self.is_video_recording_active() and not self._video_stop_in_progress)
+
+    def _sync_video_preview_actions(self) -> None:
+        can_play = self._can_play_video_preview()
+        self.play_video_button.configure(state=tk.NORMAL if can_play else tk.DISABLED)
+        self.video_preview_view.canvas.configure(cursor="hand2" if can_play else "")
+
+    def _on_video_preview_double_click(self, _event: tk.Event | None = None) -> None:
+        if self._can_play_video_preview():
+            self.play_video_preview()
+
+    def play_video_preview(self) -> None:
+        if self._video_stop_in_progress:
+            messagebox.showinfo(
+                self._t("提示", "Info"),
+                self._t("视频仍在保存中，请稍候再播放。", "The video is still being saved. Please wait before playing it."),
+                parent=self.window,
+            )
+            return
+        if self.is_video_recording_active():
+            messagebox.showinfo(
+                self._t("提示", "Info"),
+                self._t("请先停止视频录制，再播放预览视频。", "Stop the video recording before playing the preview."),
+                parent=self.window,
+            )
+            return
+        if not self.video_path:
+            messagebox.showinfo(
+                self._t("提示", "Info"),
+                self._t("当前没有可播放的视频。", "There is no video to play."),
+                parent=self.window,
+            )
+            return
+        if not self.video_path.exists():
+            messagebox.showerror(
+                self._t("播放失败", "Play failed"),
+                self._t("视频文件不存在。", "The video file does not exist."),
+                parent=self.window,
+            )
+            self._sync_video_preview_actions()
+            return
+        try:
+            os.startfile(str(self.video_path))
+        except OSError as exc:
+            messagebox.showerror(
+                self._t("播放失败", "Play failed"),
+                self._t(f"无法打开视频文件:\n{self.video_path}\n\n{exc}", f"Unable to open the video file:\n{self.video_path}\n\n{exc}"),
+                parent=self.window,
+            )
 
     def minimize_for_shortcut_recording(self) -> None:
         if not self.window.winfo_exists():
@@ -2099,12 +2231,20 @@ class AICheckpointDialog:
         self._restore_previews()
 
     def clear_video(self) -> None:
+        if self._video_stop_in_progress:
+            messagebox.showinfo(
+                self._t("提示", "Info"),
+                self._t("视频仍在保存中，请等待保存完成后再清空。", "The video is still being saved. Wait for it to finish before clearing it."),
+                parent=self.window,
+            )
+            return
         if self.video_recorder and self.video_recorder.is_recording:
             self.stop_video()
         self.video_path = None
         self.video_region = None
         self.video_status_var.set("未录制视频")
         self.video_preview_view.clear("尚未录制视频")
+        self._sync_video_preview_actions()
         self._refresh_media_summary()
         self._restore_previews()
 
@@ -2126,6 +2266,13 @@ class AICheckpointDialog:
         prompt = self._build_prompt_from_selection()
         if not prompt:
             messagebox.showerror(self._t("查询失败", "Query failed"), self._t("请输入 query/prompt。", "Enter a query or prompt first."), parent=self.window)
+            return
+        if self._video_stop_in_progress:
+            messagebox.showerror(
+                self._t("查询失败", "Query failed"),
+                self._t("视频仍在保存中，请等待保存完成后再执行 Query。", "The video is still being saved. Wait for it to finish before running Query."),
+                parent=self.window,
+            )
             return
         if self.video_recorder and self.video_recorder.is_recording:
             messagebox.showerror(self._t("查询失败", "Query failed"), self._t("请先停止视频录制，再执行 Query。", "Stop the video recording before running the query."), parent=self.window)
@@ -2195,6 +2342,13 @@ class AICheckpointDialog:
     def _build_checkpoint_payload(self) -> dict[str, object] | None:
         title = self.title_var.get().strip()
         step_description = self._get_step_comment_text()
+        if self._video_stop_in_progress:
+            messagebox.showerror(
+                self._t("保存失败", "Save failed"),
+                self._t("视频仍在保存中，请等待保存完成后再保存 Checkpoint。", "The video is still being saved. Wait for it to finish before saving the checkpoint."),
+                parent=self.window,
+            )
+            return None
         missing_fields: list[str] = []
         if not title:
             missing_fields.append("期望结果")
@@ -2276,6 +2430,13 @@ class AICheckpointDialog:
         messagebox.showerror(self._t("AI 查询失败", "AI query failed"), message, parent=self.window)
 
     def _close(self) -> None:
+        if self._video_stop_in_progress:
+            messagebox.showinfo(
+                self._t("提示", "Info"),
+                self._t("视频仍在保存中，请等待保存完成后再关闭窗口。", "The video is still being saved. Wait for it to finish before closing the window."),
+                parent=self.window,
+            )
+            return
         if self.video_recorder and self.video_recorder.is_recording:
             self.video_recorder.stop()
         if not self.saved:
@@ -2294,6 +2455,10 @@ class AICheckpointDialog:
     def _restore_previews(self) -> None:
         if self.video_path:
             self._switch_preview_mode("video")
+            if self._video_stop_in_progress:
+                self.video_preview_view.set_status(self._t("正在保存视频...", "Saving video..."))
+                self._sync_video_preview_actions()
+                return
             if self.video_path.exists():
                 preview_frame = load_video_preview_frame(self.video_path)
                 if preview_frame:
@@ -2302,9 +2467,11 @@ class AICheckpointDialog:
                     self.video_preview_view.clear(self._t(f"视频文件: {self.video_path.name}\n无法读取预览帧", f"Video file: {self.video_path.name}\nUnable to read a preview frame"))
             else:
                 self.video_preview_view.clear(self._t("视频文件不存在", "The video file does not exist"))
+            self._sync_video_preview_actions()
             return
 
         self._switch_preview_mode("images")
+        self._sync_video_preview_actions()
         for slot_index, preview_view in enumerate(self.preview_views):
             if slot_index < len(self.image_selections):
                 preview_view.set_image(self._load_preview_image(self.image_selections[slot_index][0]))

@@ -298,6 +298,11 @@ def _derive_find_control_by_name_values(
     ui_help_text = str(ui_element.get("help_text", "")).strip()
     ui_help_text_fallback = str(ui_element.get("help_text_fallback", "")).strip()
     ui_name = str(ui_element.get("name", "")).strip()
+    ui_name_fallbacks = [
+        str(item).strip()
+        for item in ui_element.get("name_fallbacks", [])
+        if str(item).strip()
+    ] if isinstance(ui_element.get("name_fallbacks", []), list) else []
     label = str(observation.get("label", "")).strip()
     if ui_help_text:
         derived_values["HelpText"] = ui_help_text
@@ -308,11 +313,14 @@ def _derive_find_control_by_name_values(
     elif ui_name:
         derived_values["Name"] = ui_name
         evidence_map["Name"] = [f"事件明细.ui_element.name={ui_name}"]
+    elif len(ui_name_fallbacks) == 1:
+        derived_values["Name"] = ui_name_fallbacks[0]
+        evidence_map["Name"] = [f"事件明细.ui_element.name_fallbacks[0]={ui_name_fallbacks[0]}"]
     elif label:
         derived_values["Name"] = label
         evidence_map["Name"] = [f"AI看图: label={label}"]
     else:
-        missing_map["Name"] = "事件明细中没有可用的 help_text/help_text_fallback/name，AI看图中也没有可用的 label。"
+        missing_map["Name"] = "事件明细中没有可用的 help_text/help_text_fallback/name/单个 name_fallbacks，AI看图中也没有可用的 label。"
 
     direction = str(observation.get("direction", "")).strip().lower()
     if direction and direction != "self":

@@ -828,12 +828,17 @@ class RecorderApp:
             return
         active_dialog = self._get_active_shortcut_video_dialog()
         if active_dialog is not None:
+            if active_dialog.is_video_stop_in_progress():
+                self.logger.info("AI checkpoint video shortcut ignored because video stop is still in progress")
+                active_dialog.restore_after_shortcut_recording()
+                self._set_status(self._t("AI Checkpoint 视频仍在保存中，请稍候。", "AI checkpoint video is still being saved. Please wait."))
+                return
             if active_dialog.is_video_recording_active():
                 self.logger.info("AI checkpoint video shortcut stopping active shortcut recording")
                 self.engine.suspend()
-                active_dialog.stop_video()
                 active_dialog.restore_after_shortcut_recording()
-                self._set_status(self._t("AI Checkpoint 视频录制已停止，请继续填写并保存。", "AI checkpoint video recording stopped. Complete the checkpoint and save it."))
+                active_dialog.stop_video_async()
+                self._set_status(self._t("AI Checkpoint 视频录制已停止，正在保存，请继续填写。", "AI checkpoint video recording stopped and is being saved. Continue filling in the checkpoint."))
                 return
             self.logger.info("AI checkpoint video shortcut restoring existing dialog")
             self.engine.suspend()
