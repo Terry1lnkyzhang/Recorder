@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from src.common.app_logging import configure_app_logging, get_logger, install_global_exception_logging
 from src.common.runtime_paths import RecordingsDirResolution, get_settings_path, resolve_recordings_dir
-from src.common.session_discovery import scan_session_candidates
-from src.common.session_lock import force_release_session_lock
 from src.android_recorder.dialog import AndroidRecorderDialog
 from .dialogs import (
+    AICheckpointDialog,
     AICheckpointDraft,
     SessionMetadataDraft,
     capture_manual_screenshot,
@@ -25,7 +25,7 @@ from .capture import select_region
 from .i18n import pick_text
 from .recorder import RecorderEngine
 from .settings import Settings, SettingsStore
-from src.viewer.window import open_viewer_window
+from src.viewer.window import open_viewer_window, pick_session_from_recordings
 
 
 class DesignStepsOverlay:
@@ -462,13 +462,13 @@ class RecorderApp:
         self.ai_checkpoint_draft = AICheckpointDraft()
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
+        self._shortcut_video_dialog: AICheckpointDialog | None = None
         self._manual_screenshot_in_progress = False
         self.android_recorder_dialog: AndroidRecorderDialog | None = None
         self.current_settings = self.settings_store.load()
         self.status_var = tk.StringVar(value=self._t("就绪", "Ready"))
         self.session_var = tk.StringVar(value=self._t("未开始录制", "Not recording"))
         self.design_steps_overlay = DesignStepsOverlay(self.root, self.current_settings)
-        self._session_picker_scan_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
 
         self._build_ui()
@@ -633,7 +633,19 @@ class RecorderApp:
             self.logger.info("Import-and-continue ignored because recorder is busy")
             return
 
-        session_dir = self._prompt_session_to_continue()
+        session_dir = pick_session_from_recordings(
+            self.root,
+            recordings_root=Path(self.output_var.get()),
+            ui_language=self.current_settings.ui_language,
+            session_candidate_cache=self._session_candidate_cache,
+            title=self._t("选择要继续录制的 Session", "Choose a session to continue"),
+            intro_text=self._t("从 recordings 中选择一个 session。", "Select a session from recordings."),
+            confirm_button_text=self._t("继续录制所选 Session", "Continue selected session"),
+            empty_result_message=self._t(
+                f"未在以下目录找到可继续录制的 session:\n{Path(self.output_var.get())}",
+                f"No resumable session was found under:\n{Path(self.output_var.get())}",
+            ),
+        )
         if session_dir is None:
             self.logger.info("Import-and-continue cancelled before session selection")
             return
@@ -814,6 +826,19 @@ class RecorderApp:
         if not self.engine.is_recording:
             self.logger.info("AI checkpoint video shortcut ignored because recorder is not running")
             return
+        active_dialog = self._get_active_shortcut_video_dialog()
+        if active_dialog is not None:
+            if active_dialog.is_video_recording_active():
+                self.logger.info("AI checkpoint video shortcut stopping active shortcut recording")
+                self.engine.suspend()
+                active_dialog.stop_video()
+                active_dialog.restore_after_shortcut_recording()
+                self._set_status(self._t("AI Checkpoint 视频录制已停止，请继续填写并保存。", "AI checkpoint video recording stopped. Complete the checkpoint and save it."))
+                return
+            self.logger.info("AI checkpoint video shortcut restoring existing dialog")
+            self.engine.suspend()
+            active_dialog.restore_after_shortcut_recording()
+            return
         if self._checkpoint_dialog_open:
             self.logger.info("AI checkpoint video shortcut ignored because dialog is already open")
             return
@@ -828,29 +853,54 @@ class RecorderApp:
 
         self.logger.info("AI checkpoint video shortcut capture opened")
         self._checkpoint_dialog_open = True
+        dialog_created = False
         self.engine.suspend()
         try:
             selection = select_region(self.root, "选择 AI Checkpoint 视频区域")
             if not selection:
+                self._checkpoint_dialog_open = False
                 self._set_status(self._t("已取消 AI Checkpoint 快捷视频录制", "AI checkpoint quick video capture canceled"))
                 return
 
-            self.ai_checkpoint_draft.image_selections = []
-            self.ai_checkpoint_draft.video_path = None
-            self.ai_checkpoint_draft.video_region = None
-            self.ai_checkpoint_draft.video_status = "未录制视频"
-
-            open_ai_checkpoint_dialog(
+            self.ai_checkpoint_draft.clear()
+            dialog = AICheckpointDialog(
                 self.root,
                 self.engine,
                 self.settings_store,
                 self.ai_checkpoint_draft,
                 auto_start_video_selection=selection,
+                on_close=self._handle_shortcut_video_dialog_closed,
+                start_hidden=True,
             )
+            self._shortcut_video_dialog = dialog
+            dialog_created = True
+            self._set_status(self._t("AI Checkpoint 视频录制已开始，再按 Ctrl+F6 可停止录制并打开窗口。", "AI checkpoint video recording started. Press Ctrl+F6 again to stop and open the dialog."))
         finally:
             self.engine.resume()
-            self._checkpoint_dialog_open = False
-            self.logger.info("AI checkpoint video shortcut capture closed")
+            if not dialog_created:
+                self._checkpoint_dialog_open = False
+            self.logger.info("AI checkpoint video shortcut capture initialized")
+
+    def _get_active_shortcut_video_dialog(self) -> AICheckpointDialog | None:
+        dialog = self._shortcut_video_dialog
+        if dialog is None:
+            return None
+        try:
+            if dialog.window.winfo_exists():
+                return dialog
+        except tk.TclError:
+            pass
+        self._shortcut_video_dialog = None
+        self._checkpoint_dialog_open = False
+        return None
+
+    def _handle_shortcut_video_dialog_closed(self, dialog: AICheckpointDialog) -> None:
+        if self._shortcut_video_dialog is not dialog:
+            return
+        self._shortcut_video_dialog = None
+        self._checkpoint_dialog_open = False
+        self.engine.resume()
+        self.logger.info("AI checkpoint shortcut video dialog closed")
 
     def capture_manual_screenshot(self) -> None:
         if not self.engine.is_recording:
@@ -993,126 +1043,6 @@ class RecorderApp:
             self.session_var.set(prefix)
             return
         self.session_var.set(f"{prefix}: {session_dir.name}")
-
-    def _prompt_session_to_continue(self) -> Path | None:
-        recordings_root = Path(self.output_var.get())
-        dialog = tk.Toplevel(self.root)
-        dialog.title(self._t("选择要继续录制的 Session", "Choose a session to continue"))
-        dialog.geometry("760x520")
-        dialog.minsize(680, 420)
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        selected_path: Path | None = None
-
-        ttk.Label(dialog, text=self._t("请选择一个已有 session 继续录制。", "Select an existing session to continue recording."), padding=(16, 12, 16, 4)).pack(anchor=tk.W)
-        ttk.Label(dialog, text=str(recordings_root), padding=(16, 0, 16, 8)).pack(anchor=tk.W)
-
-        columns = ("name", "lock_status", "modified", "events")
-        tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
-        tree.heading("name", text=self._t("Session 目录", "Session folder"))
-        tree.heading("lock_status", text=self._t("状态", "Status"))
-        tree.heading("modified", text=self._t("最后修改时间", "Last modified"))
-        tree.heading("events", text=self._t("事件数", "Events"))
-        tree.column("name", width=360, anchor=tk.W)
-        tree.column("lock_status", width=160, anchor=tk.W, stretch=False)
-        tree.column("modified", width=200, anchor=tk.W, stretch=False)
-        tree.column("events", width=80, anchor=tk.CENTER, stretch=False)
-        tree.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 12))
-
-        status_var = tk.StringVar(value=self._t("正在扫描 Session...", "Scanning sessions..."))
-        ttk.Label(dialog, textvariable=status_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
-
-        button_bar = ttk.Frame(dialog, padding=(16, 0, 16, 16))
-        button_bar.pack(fill=tk.X)
-
-        sessions: list[dict[str, object]] = []
-
-        def populate(force_refresh: bool = False) -> None:
-            self._session_picker_scan_token += 1
-            token = self._session_picker_scan_token
-            status_var.set(self._t("正在扫描 Session...", "Scanning sessions..."))
-            for item_id in tree.get_children():
-                tree.delete(item_id)
-
-            def worker() -> None:
-                try:
-                    items = self._find_session_candidates(recordings_root, force_refresh=force_refresh)
-                except Exception as exc:
-                    self.root.after(0, lambda: status_var.set(self._t(f"扫描 Session 失败: {exc}", f"Failed to scan sessions: {exc}")))
-                    return
-
-                def apply_results() -> None:
-                    if not dialog.winfo_exists() or token != self._session_picker_scan_token:
-                        return
-                    sessions.clear()
-                    sessions.extend(items)
-                    status_var.set(self._t(f"共找到 {len(sessions)} 个 Session", f"Found {len(sessions)} sessions"))
-                    for index, item in enumerate(sessions):
-                        tree.insert(
-                            "",
-                            tk.END,
-                            iid=str(index),
-                            values=(item["name"], item.get("lock_status", ""), item["modified"], item["events"]),
-                        )
-                    if sessions:
-                        tree.selection_set("0")
-                        tree.focus("0")
-
-                self.root.after(0, apply_results)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        def confirm() -> None:
-            nonlocal selected_path
-            selection = tree.selection()
-            if not selection:
-                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
-                return
-            selected_path = Path(str(sessions[int(selection[0])]["path"]))
-            dialog.destroy()
-
-        def force_unlock_selected() -> None:
-            selection = tree.selection()
-            if not selection:
-                messagebox.showinfo(self._t("提示", "Notice"), self._t("请选择一个 session。", "Select a session."), parent=dialog)
-                return
-            item = sessions[int(selection[0])]
-            session_dir = Path(str(item.get("path", "")))
-            if not bool(item.get("is_locked", False)):
-                messagebox.showinfo(self._t("提示", "Notice"), self._t("当前所选 Session 没有锁。", "The selected session is not locked."), parent=dialog)
-                return
-            if not messagebox.askyesno(
-                self._t("强制解锁", "Force Unlock"),
-                self._t(f"确定要强制解锁这个 Session 吗？\n\n{session_dir}", f"Force unlock this session?\n\n{session_dir}"),
-                parent=dialog,
-            ):
-                return
-            if not force_release_session_lock(session_dir):
-                messagebox.showerror(self._t("强制解锁失败", "Force unlock failed"), self._t("无法删除锁文件。", "Unable to delete the lock file."), parent=dialog)
-                return
-            populate(force_refresh=True)
-
-        ttk.Button(button_bar, text=self._t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
-        ttk.Button(button_bar, text=self._t("强制解锁所选 Session", "Force Unlock Selected Session"), command=force_unlock_selected).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text=self._t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
-        ttk.Button(button_bar, text=self._t("继续录制所选 Session", "Continue selected session"), command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
-
-        tree.bind("<Double-1>", lambda _event: confirm())
-        populate()
-        dialog.lift()
-        dialog.focus_force()
-        self.root.wait_window(dialog)
-        if selected_path is None and not sessions:
-            messagebox.showinfo(self._t("提示", "Notice"), self._t(f"未在以下目录找到可继续录制的 session:\n{recordings_root}", f"No resumable session was found under:\n{recordings_root}"), parent=self.root)
-        return selected_path
-
-    def _find_session_candidates(self, base_dir: Path, force_refresh: bool = False) -> list[dict[str, object]]:
-        return scan_session_candidates(
-            base_dir,
-            cache=self._session_candidate_cache,
-            force_refresh=force_refresh,
-        )
 
     def _refresh_controls(self) -> None:
         is_recording = self.engine.is_recording

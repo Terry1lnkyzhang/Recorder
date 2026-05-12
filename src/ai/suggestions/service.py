@@ -295,25 +295,24 @@ def _derive_find_control_by_name_values(
     evidence_map: dict[str, list[str]] = {}
     missing_map: dict[str, str] = {}
 
-    help_text = str(observation.get("helptext", "")).strip()
+    ui_help_text = str(ui_element.get("help_text", "")).strip()
+    ui_help_text_fallback = str(ui_element.get("help_text_fallback", "")).strip()
+    ui_name = str(ui_element.get("name", "")).strip()
     label = str(observation.get("label", "")).strip()
-    if help_text:
-        derived_values["HelpText"] = help_text
-        evidence_map["HelpText"] = [f"AI看图: helptext={help_text}"]
+    if ui_help_text:
+        derived_values["HelpText"] = ui_help_text
+        evidence_map["HelpText"] = [f"事件明细.ui_element.help_text={ui_help_text}"]
+    elif ui_help_text_fallback:
+        derived_values["HelpText"] = ui_help_text_fallback
+        evidence_map["HelpText"] = [f"事件明细.ui_element.help_text_fallback={ui_help_text_fallback}"]
+    elif ui_name:
+        derived_values["Name"] = ui_name
+        evidence_map["Name"] = [f"事件明细.ui_element.name={ui_name}"]
     elif label:
         derived_values["Name"] = label
         evidence_map["Name"] = [f"AI看图: label={label}"]
     else:
-        ui_help_text = str(ui_element.get("help_text", "") or ui_element.get("help_text_fallback", "")).strip()
-        ui_name = str(ui_element.get("name", "")).strip()
-        if ui_help_text:
-            derived_values["HelpText"] = ui_help_text
-            evidence_map["HelpText"] = [f"事件明细.ui_element.help_text={ui_help_text}"]
-        elif ui_name:
-            derived_values["Name"] = ui_name
-            evidence_map["Name"] = [f"事件明细.ui_element.name={ui_name}"]
-        else:
-            missing_map["Name"] = "AI看图和事件明细中都没有可用的 Name/HelpText。"
+        missing_map["Name"] = "事件明细中没有可用的 help_text/help_text_fallback/name，AI看图中也没有可用的 label。"
 
     direction = str(observation.get("direction", "")).strip().lower()
     if direction and direction != "self":

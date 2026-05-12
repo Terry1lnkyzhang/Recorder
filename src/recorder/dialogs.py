@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -1610,6 +1611,8 @@ class AICheckpointDialog:
         save_mode: str = "create",
         historical_screenshots_dir: Path | None = None,
         auto_start_video_selection: RegionSelection | None = None,
+        on_close: Callable[[AICheckpointDialog], None] | None = None,
+        start_hidden: bool = False,
     ) -> None:
         self.parent = parent
         self.engine = engine
@@ -1630,12 +1633,17 @@ class AICheckpointDialog:
         self._middle_pane_ratio_initialized = False
         self.ui_language = _resolve_ui_language(self.settings_store)
         self._auto_start_video_selection = auto_start_video_selection
+        self._on_close = on_close
+        self._start_hidden = start_hidden
 
         self.window = tk.Toplevel(parent)
+        if self._start_hidden:
+            self.window.withdraw()
         self.window.title(self._t("AI Checkpoint", "AI Checkpoint"))
         self.window.geometry("1180x860")
         self.window.minsize(980, 760)
-        self.window.grab_set()
+        if not self._start_hidden:
+            self.window.grab_set()
 
         self.title_var = tk.StringVar(value=draft.title)
         self.media_var = tk.StringVar(value=self._t("尚未选择截图或视频", "No screenshot or video selected"))
@@ -1660,8 +1668,9 @@ class AICheckpointDialog:
         self._refresh_media_summary()
         self._restore_previews()
         self.window.protocol("WM_DELETE_WINDOW", self._close)
-        self.window.lift()
-        self.window.focus_force()
+        if not self._start_hidden:
+            self.window.lift()
+            self.window.focus_force()
         if self._auto_start_video_selection is not None:
             self.window.after(0, self._start_video_from_shortcut)
         else:
@@ -2054,6 +2063,29 @@ class AICheckpointDialog:
             f"视频已保存: {output_path.name} | 帧数={self.video_recorder.frame_count} | 时长={self.video_recorder.duration_seconds:.1f}s"
         )
 
+    def is_video_recording_active(self) -> bool:
+        return bool(self.video_recorder and self.video_recorder.is_recording)
+
+    def minimize_for_shortcut_recording(self) -> None:
+        if not self.window.winfo_exists():
+            return
+        try:
+            self.window.grab_release()
+        except Exception:
+            pass
+        self.window.iconify()
+
+    def restore_after_shortcut_recording(self) -> None:
+        if not self.window.winfo_exists():
+            return
+        self.window.deiconify()
+        self.window.lift()
+        self.window.focus_force()
+        try:
+            self.window.grab_set()
+        except Exception:
+            pass
+
     def clear_images(self) -> None:
         self.image_selections = []
         self._refresh_media_summary()
@@ -2247,12 +2279,17 @@ class AICheckpointDialog:
         if self.video_recorder and self.video_recorder.is_recording:
             self.video_recorder.stop()
         if not self.saved:
-            self._save_draft()
+            self.draft.clear()
         if self.parent.winfo_exists() and self._parent_state_on_open not in {"withdrawn", "iconic"}:
             self.parent.deiconify()
             self.parent.lift()
             self.parent.focus_force()
         self.window.destroy()
+        if self._on_close is not None:
+            try:
+                self._on_close(self)
+            except Exception:
+                pass
 
     def _restore_previews(self) -> None:
         if self.video_path:
@@ -2367,22 +2404,6 @@ class AICheckpointDialog:
             messagebox.showerror(self._t("保存失败", "Save failed"), self._t("复制历史截图失败。", "Failed to copy the existing screenshot."), parent=self.window)
             return None
         return (session_dir / copied_relative_path).resolve()
-
-    def _save_draft(self) -> None:
-        self.draft.title = self.title_var.get().strip()
-        self.draft.prompt = self.last_effective_prompt or self._build_prompt_from_selection()
-        self.draft.query_text = self._get_query_text()
-        self.draft.design_steps = self._get_design_steps_text()
-        self.draft.step_comment = self._get_step_comment_text()
-        self.draft.enable_thinking = self.enable_thinking_var.get()
-        self.draft.prompt_template_key = self.prompt_template_var.get().strip() or "ct_validation"
-        self.draft.response_text = self.response_text.get("1.0", tk.END).strip()
-        self.draft.query_status = self.query_status_var.get()
-        self.draft.image_selections = list(self.image_selections)
-        self.draft.video_path = self.video_path
-        self.draft.video_region = self.video_region
-        self.draft.video_status = self.video_status_var.get()
-        self.draft.query_result = self.query_result
 
     def _t(self, zh_text: str, en_text: str) -> str:
         return _ui_text(self.ui_language, zh_text, en_text)
