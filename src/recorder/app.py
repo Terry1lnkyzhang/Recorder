@@ -13,6 +13,7 @@ import yaml
 
 from src.common.app_logging import configure_app_logging, get_logger, install_global_exception_logging
 from src.common.runtime_paths import RecordingsDirResolution, get_local_recording_staging_dir, get_settings_path, resolve_recordings_dir
+from src.common.session_lock import SESSION_LOCK_FILE_NAME, SessionLockHandle, acquire_session_lock
 from src.common.session_summary import write_session_summary_from_session_payload
 from src.android_recorder.dialog import AndroidRecorderDialog
 from .dialogs import (
@@ -481,6 +482,7 @@ class RecorderApp:
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
         self._sync_lock = threading.Lock()
         self._active_sync_jobs: dict[str, dict[str, object]] = {}
+        self._continued_session_targets: dict[str, dict[str, object]] = {}
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._handle_root_close)
@@ -670,13 +672,22 @@ class RecorderApp:
         self._set_status(self._t("正在导入已有录制内容，请稍候...", "Importing an existing recording. Please wait..."))
 
         def worker() -> None:
+            resume_session_dir = session_dir
+            target_session_dir: Path | None = None
+            target_lock_handle: SessionLockHandle | None = None
             try:
-                message = self.engine.continue_recording(session_dir)
+                resume_session_dir, target_session_dir, target_lock_handle = self._prepare_session_for_continue(session_dir)
+                message = self.engine.continue_recording(resume_session_dir)
+                if target_session_dir is not None and target_lock_handle is not None:
+                    self._register_continued_session_target(resume_session_dir, target_session_dir, target_lock_handle)
+                    target_lock_handle = None
             except Exception as exc:
+                if target_lock_handle is not None:
+                    target_lock_handle.release()
                 self.logger.exception("Import-and-continue failed | session_dir=%s", session_dir)
                 self.root.after(0, lambda: self._on_import_failed(str(exc)))
                 return
-            self.root.after(0, lambda: self._on_import_success(session_dir, message))
+            self.root.after(0, lambda: self._on_import_success(resume_session_dir, message, target_session_dir=target_session_dir))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1041,6 +1052,7 @@ class RecorderApp:
 
     def _on_sync_success(self, session_dir: Path, suggestions_path: Path, local_session_dir: Path) -> None:
         self._finish_sync_job(local_session_dir)
+        self._release_continued_session_target(local_session_dir)
         if self.last_session_dir == local_session_dir:
             self.last_session_dir = session_dir
         self._set_status(self._t(f"同步完成: {session_dir} | 建议文件: {suggestions_path.name}", f"Sync completed: {session_dir} | Suggestions: {suggestions_path.name}"))
@@ -1048,6 +1060,7 @@ class RecorderApp:
 
     def _on_sync_failed(self, local_session_dir: Path, message: str) -> None:
         self._finish_sync_job(local_session_dir)
+        self._release_continued_session_target(local_session_dir)
         self.last_session_dir = local_session_dir
         self._set_status(self._t(f"同步共享目录失败，本地结果仍保留: {local_session_dir}", f"Sync to shared folder failed. Local output is still available: {local_session_dir}"))
         messagebox.showwarning(
@@ -1079,7 +1092,7 @@ class RecorderApp:
         self.logger.error("Save snapshot failed | message=%s", message)
         messagebox.showerror(self._t("保存失败", "Save failed"), message, parent=self.root)
 
-    def _on_import_success(self, session_dir: Path, message: str) -> None:
+    def _on_import_success(self, session_dir: Path, message: str, *, target_session_dir: Path | None = None) -> None:
         self.import_in_progress = False
         self.last_session_dir = session_dir
         metadata = self.engine.store.data.metadata if self.engine.store.data else None
@@ -1099,8 +1112,14 @@ class RecorderApp:
             self._show_design_steps_overlay(metadata.design_steps)
         self._set_active_session_text(self._t("续录中", "Continuing"))
         self._refresh_controls()
-        self._set_status(message)
-        self.logger.info("Import-and-continue completed | session_dir=%s", session_dir)
+        if target_session_dir is not None and target_session_dir != session_dir:
+            self._set_status(self._t(
+                f"已复制到本地暂存目录并开始续录，停止后将同步回: {target_session_dir}",
+                f"Copied to local staging and continuing. It will sync back on stop: {target_session_dir}",
+            ))
+        else:
+            self._set_status(message)
+        self.logger.info("Import-and-continue completed | session_dir=%s | target_session_dir=%s", session_dir, target_session_dir)
 
     def _on_import_failed(self, message: str) -> None:
         self.import_in_progress = False
@@ -1179,6 +1198,90 @@ class RecorderApp:
         except Exception:
             return False
 
+    def _prepare_session_for_continue(self, session_dir: Path) -> tuple[Path, Path | None, SessionLockHandle | None]:
+        target_session_dir = Path(session_dir)
+        if not self._should_stage_session_for_continue(target_session_dir):
+            return target_session_dir, None, None
+
+        target_lock_handle = acquire_session_lock(target_session_dir, owner_kind="recorder", owner_label="Recorder Import/Continue")
+        try:
+            relative_session_path = target_session_dir.resolve().relative_to(self.recordings_target_root.resolve())
+            local_session_dir = self.recording_work_root / relative_session_path
+            self._copy_session_to_local_staging(target_session_dir, local_session_dir)
+            self._rewrite_session_paths(local_session_dir)
+            self.logger.info(
+                "Imported session staged locally | target_session_dir=%s | local_session_dir=%s",
+                target_session_dir,
+                local_session_dir,
+            )
+            return local_session_dir, target_session_dir, target_lock_handle
+        except Exception:
+            target_lock_handle.release()
+            raise
+
+    def _should_stage_session_for_continue(self, session_dir: Path) -> bool:
+        if not self.sync_recordings_to_target:
+            return False
+        try:
+            session_dir.resolve().relative_to(self.recordings_target_root.resolve())
+        except Exception:
+            return False
+        try:
+            session_dir.resolve().relative_to(self.recording_work_root.resolve())
+            return False
+        except Exception:
+            return True
+
+    def _copy_session_to_local_staging(self, source_session_dir: Path, local_session_dir: Path) -> None:
+        local_session_dir.parent.mkdir(parents=True, exist_ok=True)
+        temp_session_dir = local_session_dir.with_name(f"{local_session_dir.name}.importing")
+        if temp_session_dir.exists():
+            shutil.rmtree(temp_session_dir)
+        if local_session_dir.exists():
+            shutil.rmtree(local_session_dir)
+
+        files = self._collect_sync_files(source_session_dir)
+        total_files = len(files)
+        total_bytes = sum(size for _path, size in files)
+        temp_session_dir.mkdir(parents=True, exist_ok=True)
+        for directory in source_session_dir.rglob("*"):
+            if directory.is_dir():
+                (temp_session_dir / directory.relative_to(source_session_dir)).mkdir(parents=True, exist_ok=True)
+
+        copied_files = 0
+        copied_bytes = 0
+        for source_path, file_size in files:
+            relative_path = source_path.relative_to(source_session_dir)
+            target_path = temp_session_dir / relative_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_path, target_path)
+            copied_files += 1
+            copied_bytes += int(file_size or 0)
+            if copied_files == total_files or copied_files % 5 == 0:
+                percent = 100.0 if total_files <= 0 else min(100.0, max(0.0, copied_files / total_files * 100.0))
+                self._set_status(self._t(
+                    f"正在复制到本地暂存目录: {source_session_dir.name} {percent:.1f}% ({copied_files}/{total_files} 个文件，{self._format_bytes(copied_bytes)}/{self._format_bytes(total_bytes)})",
+                    f"Copying to local staging: {source_session_dir.name} {percent:.1f}% ({copied_files}/{total_files} files, {self._format_bytes(copied_bytes)}/{self._format_bytes(total_bytes)})",
+                ))
+
+        temp_session_dir.rename(local_session_dir)
+
+    def _register_continued_session_target(self, local_session_dir: Path, target_session_dir: Path, lock_handle: SessionLockHandle) -> None:
+        with self._sync_lock:
+            self._continued_session_targets[str(local_session_dir)] = {
+                "target_session_dir": str(target_session_dir),
+                "lock_handle": lock_handle,
+            }
+
+    def _release_continued_session_target(self, local_session_dir: Path) -> None:
+        with self._sync_lock:
+            entry = self._continued_session_targets.pop(str(local_session_dir), None)
+        if not isinstance(entry, dict):
+            return
+        lock_handle = entry.get("lock_handle")
+        if isinstance(lock_handle, SessionLockHandle):
+            lock_handle.release()
+
     def _sync_session_to_target(self, local_session_dir: Path) -> Path:
         relative_session_path = local_session_dir.resolve().relative_to(self.recording_work_root.resolve())
         target_session_dir = self.recordings_target_root / relative_session_path
@@ -1202,7 +1305,7 @@ class RecorderApp:
         self._copy_session_tree_with_progress(local_session_dir, copy_target_dir, files, total_bytes)
         if temp_session_dir is not None:
             temp_session_dir.rename(target_session_dir)
-        self._rewrite_synced_session_paths(target_session_dir)
+        self._rewrite_session_paths(target_session_dir)
         self.logger.info("Recording synced to target | local_session_dir=%s | target_session_dir=%s", local_session_dir, target_session_dir)
         return target_session_dir
 
@@ -1276,6 +1379,8 @@ class RecorderApp:
         for path in source_dir.rglob("*"):
             if not path.is_file():
                 continue
+            if path.name == SESSION_LOCK_FILE_NAME:
+                continue
             try:
                 size = path.stat().st_size
             except OSError:
@@ -1300,19 +1405,19 @@ class RecorderApp:
             copied_bytes += int(file_size or 0)
             self._update_sync_progress(source_dir, copied_files, len(files), copied_bytes, total_bytes)
 
-    def _rewrite_synced_session_paths(self, target_session_dir: Path) -> None:
-        session_path = target_session_dir / "session.json"
+    def _rewrite_session_paths(self, session_dir: Path) -> None:
+        session_path = session_dir / "session.json"
         if not session_path.exists():
             return
         payload = json.loads(session_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return
-        payload["output_dir"] = str(target_session_dir)
-        payload["screenshots_dir"] = str(target_session_dir / "screenshots")
-        payload["media_dir"] = str(target_session_dir / "media")
+        payload["output_dir"] = str(session_dir)
+        payload["screenshots_dir"] = str(session_dir / "screenshots")
+        payload["media_dir"] = str(session_dir / "media")
         session_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        (target_session_dir / "session.yaml").write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
-        write_session_summary_from_session_payload(target_session_dir, payload)
+        (session_dir / "session.yaml").write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        write_session_summary_from_session_payload(session_dir, payload)
 
     def _apply_ui_language(self) -> None:
         self.root.title(self._t("Automation Recorder", "Automation Recorder"))
