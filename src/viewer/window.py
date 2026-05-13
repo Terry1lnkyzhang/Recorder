@@ -26,10 +26,11 @@ from src.ai.prompt_builder import build_step_observation_prompt
 from src.ai.remote_service_client import RemoteAIServiceClient
 from src.ai.session_analyzer import SessionWorkflowAnalyzer
 from src.ai.suggestions import MethodParameterSuggestion
+from src.common.app_logging import get_logger
 from src.common.display_utils import prepare_image_path_for_ai
 from src.common.image_widgets import ZoomableImageView
 from src.common.media_utils import load_video_preview_frame
-from src.common.runtime_paths import get_recordings_dir, get_resource_root, get_settings_path
+from src.common.runtime_paths import get_logs_dir, get_recordings_dir, get_resource_root, get_settings_path
 from src.common.session_discovery import find_latest_session_dir, load_session_candidate_metadata, scan_session_candidates
 from src.common.session_lock import SessionLockHandle, SessionLockError, acquire_session_lock, force_release_session_lock
 from src.common.session_summary import (
@@ -58,6 +59,9 @@ from src.recorder.settings import SettingsStore
 from src.recorder.system_info import safe_relpath
 from src.recorder.session_metadata_ai import build_missing_summary, format_keyword_terms, should_prompt_ai_analysis, analyze_session_metadata, merge_keyword_text
 from .cleaning import CleaningSuggestion, apply_cleaning_suggestions, build_cleaning_suggestions
+
+
+logger = get_logger("viewer")
 
 
 def pick_session_from_recordings(
@@ -203,7 +207,9 @@ def pick_session_from_recordings(
     def _format_scan_diagnostics_text(diagnostics: dict[str, object]) -> str:
         total_seconds = float(diagnostics.get("total_seconds", 0.0) or 0.0)
         group_seconds = diagnostics.get("group_seconds", {}) if isinstance(diagnostics.get("group_seconds", {}), dict) else {}
+        slow_candidates = diagnostics.get("slow_candidates", []) if isinstance(diagnostics.get("slow_candidates", []), list) else []
         labeled_groups = [
+            (t("目录枚举", "Discovery"), float(group_seconds.get("discovery", 0.0) or 0.0)),
             (t("事件数", "Events"), float(group_seconds.get("events", 0.0) or 0.0)),
             (t("锁状态", "Lock"), float(group_seconds.get("lock_status", 0.0) or 0.0)),
             (t("基础信息列", "Metadata"), float(group_seconds.get("metadata_columns", 0.0) or 0.0)),
@@ -213,13 +219,41 @@ def pick_session_from_recordings(
         significant_groups = [(label, seconds) for label, seconds in labeled_groups if seconds >= 0.01]
         significant_groups.sort(key=lambda item: item[1], reverse=True)
         top_groups = significant_groups[:3]
+        slow_candidate_summary = ""
+        if slow_candidates:
+            first_candidate = slow_candidates[0] if isinstance(slow_candidates[0], dict) else {}
+            candidate_name = str(first_candidate.get("name", "") or "")
+            phase_name = str(first_candidate.get("slowest_phase", "") or "")
+            phase_seconds = float(first_candidate.get("slowest_phase_seconds", 0.0) or 0.0)
+            if candidate_name:
+                if phase_name:
+                    slow_candidate_summary = t(
+                        f"；最慢 Session: {candidate_name} ({phase_name} {phase_seconds:.2f}s)",
+                        f"; slowest session: {candidate_name} ({phase_name} {phase_seconds:.2f}s)",
+                    )
+                else:
+                    slow_candidate_summary = t(
+                        f"；最慢 Session: {candidate_name}",
+                        f"; slowest session: {candidate_name}",
+                    )
         if not top_groups:
-            return t(f"扫描耗时 {total_seconds:.2f}s", f"Scan {total_seconds:.2f}s")
+            return t(f"扫描耗时 {total_seconds:.2f}s", f"Scan {total_seconds:.2f}s") + slow_candidate_summary
         top_summary = " / ".join(f"{label} {seconds:.2f}s" for label, seconds in top_groups)
         slowest_label, slowest_seconds = top_groups[0]
         return t(
-            f"扫描耗时 {total_seconds:.2f}s；最慢项: {slowest_label} {slowest_seconds:.2f}s；细分: {top_summary}",
-            f"Scan {total_seconds:.2f}s; slowest: {slowest_label} {slowest_seconds:.2f}s; breakdown: {top_summary}",
+            f"扫描耗时 {total_seconds:.2f}s；最慢项: {slowest_label} {slowest_seconds:.2f}s；细分: {top_summary}{slow_candidate_summary}",
+            f"Scan {total_seconds:.2f}s; slowest: {slowest_label} {slowest_seconds:.2f}s; breakdown: {top_summary}{slow_candidate_summary}",
+        )
+
+    def _log_session_picker_scan_diagnostics(recordings_root: Path, diagnostics: dict[str, object]) -> None:
+        total_seconds = float(diagnostics.get("total_seconds", 0.0) or 0.0)
+        log_path = get_logs_dir() / "recorder.log"
+        log_method = logger.warning if total_seconds >= 5.0 else logger.info
+        log_method(
+            "Session picker scan diagnostics | recordings_root=%s | log_path=%s | diagnostics=%s",
+            recordings_root,
+            log_path,
+            json.dumps(diagnostics, ensure_ascii=False, sort_keys=True),
         )
 
     def _set_session_picker_status(base_text: str) -> None:
@@ -519,6 +553,7 @@ def pick_session_from_recordings(
                 sessions.extend(items)
                 last_scan_diagnostics.clear()
                 last_scan_diagnostics.update(diagnostics)
+                _log_session_picker_scan_diagnostics(recordings_root, diagnostics)
                 path_var.set(str(recordings_root))
                 _update_project_filter_options()
                 apply_filters()
