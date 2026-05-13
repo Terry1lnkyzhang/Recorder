@@ -710,13 +710,14 @@ class RecorderEngine:
             "target_control_type": ui_element.control_type,
             "target_rect": dict(highlight_rect) if highlight_rect else {},
         }
+        button_name = str(job["button"])
         event = RecordedEvent(
             event_id=str(job["event_id"]),
             timestamp=str(job["timestamp"]),
-            event_type="controlOperation",
-            action=self._build_action_payload(str(job["button"]), list(job.get("modifiers", []))),
+            event_type="Click" if self._is_right_mouse_button(button_name) else "controlOperation",
+            action=self._build_action_payload(button_name, list(job.get("modifiers", []))),
             screenshot=screenshot,
-            mouse={"x": x, "y": y, "button": str(job["button"])} ,
+            mouse={"x": x, "y": y, "button": button_name} ,
             keyboard=self._build_modifier_keyboard_payload(list(job.get("modifiers", []))),
             window=copy.deepcopy(window_info),
             ui_element=ui_element,
@@ -971,6 +972,11 @@ class RecorderEngine:
         if any(str(item).strip() for item in modifiers):
             return ["press", primary_action]
         return primary_action
+
+    @staticmethod
+    def _is_right_mouse_button(button_name: object) -> bool:
+        normalized = str(button_name or "").strip().lower()
+        return normalized in {"button.right", "right", "mouse.right", "rightbutton"}
 
     def _build_combined_mouse_action_label(self, button_name: str, modifiers: list[str], *, is_drag: bool) -> str:
         readable_modifiers = self._format_modifier_names(modifiers)
