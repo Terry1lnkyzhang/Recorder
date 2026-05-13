@@ -7389,7 +7389,7 @@ class RecorderViewerWindow:
         def worker() -> None:
             try:
                 suggestion_result = self._load_suggestion_result_for_export()
-                step_count = export_suggestions_to_atframework_yaml(suggestion_result, output_path)
+                step_count = export_suggestions_to_atframework_yaml(suggestion_result, output_path, source_root=self.session_dir)
             except Exception as exc:
                 message = str(exc)
                 self.window.after(0, lambda message=message: self._on_export_atframework_yaml_failed(message))
@@ -7667,7 +7667,9 @@ class RecorderViewerWindow:
         self.export_yaml_running = False
         self.export_yaml_button.configure(state=tk.NORMAL)
         self.load_status_var.set(f"已导出 ATFramework YAML: {output_path} | 步骤数 {step_count}")
-        messagebox.showinfo("导出完成", f"已导出 ATFramework YAML:\n{output_path}\n\n步骤数: {step_count}", parent=self.window)
+        screenshot_dir = output_path.parent / "screenshot"
+        screenshot_message = f"\n截图目录: {screenshot_dir}" if screenshot_dir.exists() else ""
+        messagebox.showinfo("导出完成", f"已导出 ATFramework YAML:\n{output_path}\n\n步骤数: {step_count}{screenshot_message}", parent=self.window)
 
     def _on_export_atframework_yaml_failed(self, message: str) -> None:
         self.export_yaml_running = False
