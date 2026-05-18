@@ -35,6 +35,7 @@ from src.common.session_lock import SessionLockHandle, SessionLockError, acquire
 from src.common.session_summary import (
     SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE,
     SESSION_REVIEW_STATUS_DEBUG_COMPLETE,
+    SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING,
     count_session_events,
     normalize_session_review_status,
     update_session_review_fields,
@@ -166,11 +167,13 @@ def pick_session_from_recordings(
     empty_status_label = t("空", "Empty")
     review_status_display_by_value = {
         "": "",
+        SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING: t("录制人员待确定", "Recorder TBD"),
         SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE: t("检查点完成", "Checkpoint Complete"),
         SESSION_REVIEW_STATUS_DEBUG_COMPLETE: t("调试完成", "Debug Complete"),
     }
     review_status_editor_display_by_value = {
         "": empty_status_label,
+        SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING: t("录制人员待确定", "Recorder TBD"),
         SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE: t("检查点完成", "Checkpoint Complete"),
         SESSION_REVIEW_STATUS_DEBUG_COMPLETE: t("调试完成", "Debug Complete"),
     }
