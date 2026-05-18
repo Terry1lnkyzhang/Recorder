@@ -10,6 +10,11 @@ from typing import Callable
 
 from PIL import Image, ImageGrab
 
+try:
+    import mss
+except ImportError:  # pragma: no cover - optional fallback for minimal installs
+    mss = None
+
 from pynput import keyboard, mouse
 
 from .analyzer import build_reuse_suggestions, write_suggestions
@@ -58,6 +63,10 @@ class RecorderEngine:
         self._pending_scroll_timer: threading.Timer | None = None
         self._scroll_flush_interval_seconds = 0.18
         self._drag_threshold_pixels = 8
+        self._slow_click_callback_threshold_seconds = 0.18
+        self._slow_event_processing_threshold_seconds = 0.35
+        self._screen_capture = None
+        self._screen_capture_lock = threading.Lock()
         self.logger = get_logger("engine")
 
     def start(self, metadata: dict[str, object] | None = None) -> str:
@@ -103,6 +112,7 @@ class RecorderEngine:
             self._event_queue.put(None)
             if self._worker_thread:
                 self._worker_thread.join(timeout=3)
+            self._close_screen_capture()
 
             self.is_recording = False
             self.is_paused = False
@@ -385,11 +395,21 @@ class RecorderEngine:
         button_name = str(button)
 
         if pressed:
+            window_started = time.perf_counter()
             window_info = get_window_info_at_point(x, y)
+            window_seconds = time.perf_counter() - window_started
             if not isinstance(window_info, WindowInfo) or not window_info.handle:
                 window_info = self._refresh_cached_window_info()
             if self._should_exclude_window(window_info):
                 return
+            if window_seconds >= self._slow_click_callback_threshold_seconds:
+                self.logger.warning(
+                    "Slow mouse press window lookup | button=%s | x=%s | y=%s | window_seconds=%.3f",
+                    button_name,
+                    x,
+                    y,
+                    window_seconds,
+                )
             timestamp = utc_now_iso()
             with self._input_state_lock:
                 active_modifiers = self._snapshot_pressed_modifiers_locked()
@@ -416,7 +436,10 @@ class RecorderEngine:
         if not state:
             return
 
+        callback_started = time.perf_counter()
+        window_started = time.perf_counter()
         window_info = get_window_info_at_point(x, y)
+        window_seconds = time.perf_counter() - window_started
         if not isinstance(window_info, WindowInfo) or not window_info.handle:
             window_info = self._refresh_cached_window_info()
         press_window = state.get("window")
@@ -456,11 +479,29 @@ class RecorderEngine:
             "max_distance": max_distance,
         }
 
-        ui_element, highlight_rect, captured_image = self._capture_visual_context(x, y)
-        job["ui_element"] = ui_element
-        job["highlight_rect"] = highlight_rect
+        captured_image, captured_image_origin, capture_mode, screenshot_seconds = self._capture_click_screenshot(x, y)
+        callback_seconds = time.perf_counter() - callback_started
         job["captured_image"] = captured_image
+        job["captured_image_origin"] = captured_image_origin
+        job["capture_metrics"] = {
+            "callback_window_seconds": round(window_seconds, 4),
+            "callback_screenshot_seconds": round(screenshot_seconds, 4),
+            "callback_screenshot_mode": capture_mode,
+            "callback_total_seconds": round(callback_seconds, 4),
+        }
         self._event_queue.put(job)
+        if callback_seconds >= self._slow_click_callback_threshold_seconds:
+            self.logger.warning(
+                "Slow mouse click callback | event_id=%s | kind=%s | x=%s | y=%s | callback_seconds=%.3f | window_seconds=%.3f | screenshot_seconds=%.3f | screenshot_mode=%s",
+                job.get("event_id"),
+                job.get("kind"),
+                x,
+                y,
+                callback_seconds,
+                window_seconds,
+                screenshot_seconds,
+                capture_mode,
+            )
 
     def _on_move(self, x: int, y: int) -> None:
         if not self.is_recording or self._is_capture_paused():
@@ -640,35 +681,43 @@ class RecorderEngine:
                 self._event_queue.task_done()
 
     def _record_mouse_click(self, job: dict[str, object]) -> None:
+        processing_started = time.perf_counter()
         x = int(job.get("end_x", job.get("x", 0)) or 0)
         y = int(job.get("end_y", job.get("y", 0)) or 0)
         window_info = job.get("window")
         if not isinstance(window_info, WindowInfo) or self._should_exclude_window(window_info):
             return
-        ui_element = job.get("ui_element")
-        if not isinstance(ui_element, UIElementInfo):
-            ui_element = get_ui_element_at_point(x, y)
-        highlight_rect = job.get("highlight_rect") if isinstance(job.get("highlight_rect"), dict) else None
-        if not highlight_rect:
-            highlight_rect = ui_element.rectangle if ui_element.rectangle else None
+        capture_metrics = self._normalize_capture_metrics(job.get("capture_metrics"))
+        ui_element, highlight_rect = self._resolve_ui_element_and_highlight_rect(x, y, job, capture_metrics)
         captured_image = job.get("captured_image")
+        save_started = time.perf_counter()
         if isinstance(captured_image, Image.Image):
-            screenshot = self.store.save_image(captured_image, "step", highlight_rect=highlight_rect, focus_point=(x, y))
+            screenshot = self.store.save_image(
+                captured_image,
+                "step",
+                highlight_rect=highlight_rect,
+                focus_point=(x, y),
+                image_origin=self._normalize_image_origin(job.get("captured_image_origin")),
+            )
         else:
             screenshot = self.store.capture_screenshot("step", highlight_rect=highlight_rect, focus_point=(x, y))
+        capture_metrics["worker_save_seconds"] = round(time.perf_counter() - save_started, 4)
+        capture_metrics["worker_total_seconds"] = round(time.perf_counter() - processing_started, 4)
+        self._log_slow_mouse_event_processing(job, capture_metrics)
         visual_focus_hint = {
             "red_box_marks_target": bool(highlight_rect),
             "target_control_name": ui_element.name,
             "target_control_type": ui_element.control_type,
             "target_rect": dict(highlight_rect) if highlight_rect else {},
         }
+        button_name = str(job["button"])
         event = RecordedEvent(
             event_id=str(job["event_id"]),
             timestamp=str(job["timestamp"]),
-            event_type="controlOperation",
-            action=self._build_action_payload(str(job["button"]), list(job.get("modifiers", []))),
+            event_type="Click" if self._is_right_mouse_button(button_name) else "controlOperation",
+            action=self._build_action_payload(button_name, list(job.get("modifiers", []))),
             screenshot=screenshot,
-            mouse={"x": x, "y": y, "button": str(job["button"])} ,
+            mouse={"x": x, "y": y, "button": button_name} ,
             keyboard=self._build_modifier_keyboard_payload(list(job.get("modifiers", []))),
             window=copy.deepcopy(window_info),
             ui_element=ui_element,
@@ -683,11 +732,13 @@ class RecorderEngine:
                     is_drag=False,
                 ),
                 "duration_ms": int(job.get("duration_ms", 0) or 0),
+                "capture_performance": capture_metrics,
             },
         )
         self.store.append_event(event)
 
     def _record_mouse_drag(self, job: dict[str, object]) -> None:
+        processing_started = time.perf_counter()
         start_x = int(job["start_x"])
         start_y = int(job["start_y"])
         end_x = int(job["end_x"])
@@ -696,17 +747,23 @@ class RecorderEngine:
         if not isinstance(window_info, WindowInfo) or self._should_exclude_window(window_info):
             return
 
-        ui_element = job.get("ui_element")
-        if not isinstance(ui_element, UIElementInfo):
-            ui_element = get_ui_element_at_point(end_x, end_y)
-        highlight_rect = job.get("highlight_rect") if isinstance(job.get("highlight_rect"), dict) else None
-        if not highlight_rect:
-            highlight_rect = ui_element.rectangle if ui_element.rectangle else None
+        capture_metrics = self._normalize_capture_metrics(job.get("capture_metrics"))
+        ui_element, highlight_rect = self._resolve_ui_element_and_highlight_rect(end_x, end_y, job, capture_metrics)
         captured_image = job.get("captured_image")
+        save_started = time.perf_counter()
         if isinstance(captured_image, Image.Image):
-            screenshot = self.store.save_image(captured_image, "step", highlight_rect=highlight_rect, focus_point=(end_x, end_y))
+            screenshot = self.store.save_image(
+                captured_image,
+                "step",
+                highlight_rect=highlight_rect,
+                focus_point=(end_x, end_y),
+                image_origin=self._normalize_image_origin(job.get("captured_image_origin")),
+            )
         else:
             screenshot = self.store.capture_screenshot("step", highlight_rect=highlight_rect, focus_point=(end_x, end_y))
+        capture_metrics["worker_save_seconds"] = round(time.perf_counter() - save_started, 4)
+        capture_metrics["worker_total_seconds"] = round(time.perf_counter() - processing_started, 4)
+        self._log_slow_mouse_event_processing(job, capture_metrics)
         visual_focus_hint = {
             "red_box_marks_target": bool(highlight_rect),
             "target_control_name": ui_element.name,
@@ -747,6 +804,7 @@ class RecorderEngine:
                 "duration_ms": int(job.get("duration_ms", 0) or 0),
                 "start_timestamp": str(job.get("start_timestamp", "")),
                 "max_distance": int(job.get("max_distance", 0) or 0),
+                "capture_performance": capture_metrics,
             },
         )
         self.store.append_event(event)
@@ -915,6 +973,11 @@ class RecorderEngine:
             return ["press", primary_action]
         return primary_action
 
+    @staticmethod
+    def _is_right_mouse_button(button_name: object) -> bool:
+        normalized = str(button_name or "").strip().lower()
+        return normalized in {"button.right", "right", "mouse.right", "rightbutton"}
+
     def _build_combined_mouse_action_label(self, button_name: str, modifiers: list[str], *, is_drag: bool) -> str:
         readable_modifiers = self._format_modifier_names(modifiers)
         action_label = str(button_name or "").strip()
@@ -1037,11 +1100,140 @@ class RecorderEngine:
             return
         self._event_queue.put(job)
 
-    def _capture_visual_context(self, x: int, y: int) -> tuple[UIElementInfo, dict[str, int] | None, Image.Image | None]:
+    def _capture_click_screenshot(self, x: int, y: int) -> tuple[Image.Image | None, tuple[int, int] | None, str, float]:
+        started = time.perf_counter()
+        image, origin = self._capture_monitor_screenshot(x, y)
+        if image is not None:
+            return image, origin, "monitor", time.perf_counter() - started
+
         try:
             image = ImageGrab.grab(all_screens=True)
         except Exception:
             image = None
-        ui_element = get_ui_element_at_point(x, y)
-        highlight_rect = ui_element.rectangle if ui_element.rectangle else None
-        return ui_element, highlight_rect, image
+        return image, None, "all_screens" if image is not None else "failed", time.perf_counter() - started
+
+    def _capture_monitor_screenshot(self, x: int, y: int) -> tuple[Image.Image | None, tuple[int, int] | None]:
+        if mss is None:
+            return None, None
+
+        with self._screen_capture_lock:
+            return self._capture_monitor_screenshot_locked(x, y)
+
+    def _capture_monitor_screenshot_locked(self, x: int, y: int) -> tuple[Image.Image | None, tuple[int, int] | None]:
+        try:
+            screen_capture = self._get_screen_capture_locked()
+            if screen_capture is None:
+                return None, None
+            monitor = self._find_mss_monitor_for_point(screen_capture.monitors, x, y)
+            if monitor is None:
+                return None, None
+            screenshot = screen_capture.grab(monitor)
+            image = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+            origin = (int(monitor.get("left", 0) or 0), int(monitor.get("top", 0) or 0))
+            return image, origin
+        except Exception:
+            self._close_screen_capture_locked()
+            return None, None
+
+    def _get_screen_capture_locked(self):
+        if mss is None:
+            return None
+        if self._screen_capture is None:
+            self._screen_capture = mss.mss()
+        return self._screen_capture
+
+    def _close_screen_capture(self) -> None:
+        with self._screen_capture_lock:
+            self._close_screen_capture_locked()
+
+    def _close_screen_capture_locked(self) -> None:
+        if self._screen_capture is None:
+            return
+        try:
+            close_method = getattr(self._screen_capture, "close", None)
+            if callable(close_method):
+                close_method()
+        except Exception:
+            pass
+        self._screen_capture = None
+
+    def _resolve_ui_element_and_highlight_rect(
+        self,
+        x: int,
+        y: int,
+        job: dict[str, object],
+        capture_metrics: dict[str, object],
+    ) -> tuple[UIElementInfo, dict[str, int] | None]:
+        ui_element = job.get("ui_element")
+        if not isinstance(ui_element, UIElementInfo):
+            uia_started = time.perf_counter()
+            ui_element = get_ui_element_at_point(x, y)
+            capture_metrics["worker_uia_seconds"] = round(time.perf_counter() - uia_started, 4)
+            capture_metrics["worker_uia_status"] = "ok" if self._ui_element_has_identity(ui_element) else "empty"
+
+        highlight_rect = job.get("highlight_rect") if isinstance(job.get("highlight_rect"), dict) else None
+        if not highlight_rect:
+            highlight_rect = ui_element.rectangle if ui_element.rectangle else None
+        return ui_element, highlight_rect
+
+    @staticmethod
+    def _ui_element_has_identity(ui_element: UIElementInfo) -> bool:
+        return any(
+            [
+                ui_element.name.strip(),
+                ui_element.control_type.strip(),
+                ui_element.automation_id.strip(),
+                ui_element.class_name.strip(),
+                bool(ui_element.rectangle),
+            ]
+        )
+
+    @staticmethod
+    def _find_mss_monitor_for_point(monitors: object, x: int, y: int) -> dict[str, int] | None:
+        if not isinstance(monitors, list):
+            return None
+        for monitor in monitors[1:]:
+            if not isinstance(monitor, dict):
+                continue
+            left = int(monitor.get("left", 0) or 0)
+            top = int(monitor.get("top", 0) or 0)
+            width = int(monitor.get("width", 0) or 0)
+            height = int(monitor.get("height", 0) or 0)
+            if width <= 0 or height <= 0:
+                continue
+            if left <= x < left + width and top <= y < top + height:
+                return monitor
+        return None
+
+    @staticmethod
+    def _normalize_capture_metrics(value: object) -> dict[str, object]:
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): item for key, item in value.items()}
+
+    @staticmethod
+    def _normalize_image_origin(value: object) -> tuple[int, int] | None:
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return None
+        try:
+            return int(value[0]), int(value[1])
+        except Exception:
+            return None
+
+    def _log_slow_mouse_event_processing(self, job: dict[str, object], capture_metrics: dict[str, object]) -> None:
+        total_seconds = float(capture_metrics.get("worker_total_seconds", 0.0) or 0.0)
+        uia_seconds = float(capture_metrics.get("worker_uia_seconds", 0.0) or 0.0)
+        save_seconds = float(capture_metrics.get("worker_save_seconds", 0.0) or 0.0)
+        if max(total_seconds, uia_seconds, save_seconds) < self._slow_event_processing_threshold_seconds:
+            return
+        self.logger.warning(
+            "Slow mouse event processing | event_id=%s | kind=%s | total_seconds=%.3f | uia_seconds=%.3f | save_seconds=%.3f | uia_status=%s | callback_screenshot_seconds=%s | callback_screenshot_mode=%s",
+            job.get("event_id"),
+            job.get("kind"),
+            total_seconds,
+            uia_seconds,
+            save_seconds,
+            capture_metrics.get("worker_uia_status"),
+            capture_metrics.get("callback_screenshot_seconds"),
+            capture_metrics.get("callback_screenshot_mode"),
+        )

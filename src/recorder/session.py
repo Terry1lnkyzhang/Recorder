@@ -169,7 +169,7 @@ class SessionStore:
             image, origin = self._prepare_event_image(image, highlight_rect, focus_point)
             if highlight_rect:
                 self._draw_highlight_rect(image, highlight_rect, origin)
-            image.save(screenshot_path)
+            image.save(screenshot_path, compress_level=1)
             return safe_relpath(screenshot_path, self.session_dir)
         except Exception:
             return None
@@ -187,11 +187,11 @@ class SessionStore:
         if right <= left or bottom <= top:
             return
 
-        layout = get_display_layout_snapshot()
-        virtual_screen = layout.get("virtual_screen", {}) if isinstance(layout, dict) else {}
-        if not isinstance(virtual_screen, dict):
-            return
         if origin is None:
+            layout = get_display_layout_snapshot()
+            virtual_screen = layout.get("virtual_screen", {}) if isinstance(layout, dict) else {}
+            if not isinstance(virtual_screen, dict):
+                return
             screen_left = int(virtual_screen.get("left", 0) or 0)
             screen_top = int(virtual_screen.get("top", 0) or 0)
         else:
@@ -224,6 +224,7 @@ class SessionStore:
         folder_name: str = "screenshots",
         highlight_rect: dict[str, int] | None = None,
         focus_point: tuple[int, int] | None = None,
+        image_origin: tuple[int, int] | None = None,
     ) -> str | None:
         if not self.session_dir:
             return None
@@ -234,10 +235,13 @@ class SessionStore:
             file_name = f"{prefix}_{self._screenshot_counter:04d}.png"
         output_path = target_dir / file_name
         try:
-            image, origin = self._prepare_event_image(image, highlight_rect, focus_point)
+            if image_origin is None:
+                image, origin = self._prepare_event_image(image, highlight_rect, focus_point)
+            else:
+                origin = (int(image_origin[0]), int(image_origin[1]))
             if highlight_rect:
                 self._draw_highlight_rect(image, highlight_rect, origin)
-            image.save(output_path)
+            image.save(output_path, compress_level=1)
             return safe_relpath(output_path, self.session_dir)
         except Exception:
             return None

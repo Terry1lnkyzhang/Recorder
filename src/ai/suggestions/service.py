@@ -342,6 +342,21 @@ def _derive_find_control_by_name_values(
         derived_values["scrollable"] = scrollable
         evidence_map["scrollable"] = [f"AI看图: scroll={str(scrollable).lower()}"]
 
+    table = observation.get("table")
+    if scrollable is True or table is True:
+        click_point = _extract_click_point(event)
+        if click_point is not None:
+            derived_values["clickPoint"] = click_point
+            click_point_evidence = []
+            if scrollable is True:
+                click_point_evidence.append("AI看图: scroll=true")
+            if table is True:
+                click_point_evidence.append("AI看图: table=true")
+            click_point_evidence.append(f"事件明细.mouse=({click_point[0]}, {click_point[1]})")
+            evidence_map["clickPoint"] = click_point_evidence
+        else:
+            missing_map["clickPoint"] = "AI看图判断 scroll=true 或 table=true，但事件明细中没有可用的 mouse.x/mouse.y，无法生成 clickPoint。"
+
     cell_value = _derive_cell_value(event, observation)
     if cell_value is not None and cell_value != "":
         derived_values["cellValue"] = cell_value
@@ -732,7 +747,7 @@ def _should_skip_find_control_parameter(item: MethodParameterSuggestion) -> bool
     name = str(item.name or "").strip().lower()
     if not name:
         return False
-    if name in {"clickpoint", "point", "x", "y", "absolute", "coordinate", "coordinates"}:
+    if name in {"point", "x", "y", "absolute", "coordinate", "coordinates"}:
         return True
     if name in {"scrollable", "scroll"}:
         return _is_false_like_value(item.suggested_value)
@@ -1138,7 +1153,7 @@ def _derive_cell_value(event: dict[str, Any], observation: dict[str, Any] | None
     action_value = format_recorded_action(event.get("action", "")).strip().lower()
     keyboard = event.get("keyboard", {}) if isinstance(event.get("keyboard", {}), dict) else {}
 
-    if event_type == "controlOperation":
+    if event_type in {"controlOperation", "Click"}:
         return "click"
     if event_type == "mouseAction" and action_value != "mouse_scroll":
         return "drag"
@@ -1171,8 +1186,8 @@ def _build_cell_value_evidence(event: dict[str, Any], cell_value: Any, observati
 
     event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
     action_value = format_recorded_action(event.get("action", "")).strip().lower()
-    if event_type == "controlOperation":
-        return "事件类型=controlOperation，按点击处理为 cellValue=click"
+    if event_type in {"controlOperation", "Click"}:
+        return f"事件类型={event_type}，按点击处理为 cellValue=click"
     if event_type == "input" and action_value == "type_input":
         return f"事件明细.keyboard.text={cell_value}"
     if event_type == "input" and action_value == "press":

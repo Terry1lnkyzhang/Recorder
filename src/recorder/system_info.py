@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import platform
+import threading
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ _HELP_TEXT_FALLBACK_BUDGET_SECONDS = 0.03
 _TEXT_NAME_FALLBACK_DEPTH = 2
 _TEXT_NAME_FALLBACK_BUDGET_SECONDS = 0.03
 _TEXT_NAME_FALLBACK_LIMIT = 8
+_TEXT_NAME_FALLBACK_CONTROL_TYPES = {"custom", "document", "group", "image", "pane"}
+_UIA_THREAD_LOCAL = threading.local()
 
 
 def utc_now_iso() -> str:
@@ -74,23 +77,29 @@ def get_window_info_at_point(x: int, y: int) -> WindowInfo:
 
 
 def get_ui_element_at_point(x: int, y: int) -> UIElementInfo:
-    if Desktop is None:
+    desktop = _get_uia_desktop()
+    if desktop is None:
         return UIElementInfo()
 
     try:
-        element = Desktop(backend="uia").from_point(x, y)
+        element = desktop.from_point(x, y)
         rect = element.rectangle()
         info = element.element_info
+        current_name = str(getattr(info, "name", "") or "")
         current_control_type = str(getattr(info, "control_type", "") or "")
-        current_help_text = _extract_help_text(element, info) if current_control_type.strip().lower() == "image" else ""
+        normalized_control_type = current_control_type.strip().lower()
+        current_help_text = _extract_help_text(element, info) if normalized_control_type == "image" else ""
+        name_fallbacks = []
+        if not current_name.strip() or normalized_control_type in _TEXT_NAME_FALLBACK_CONTROL_TYPES:
+            name_fallbacks = _extract_text_child_names(element, info)
         return UIElementInfo(
-            name=getattr(info, "name", "") or "",
+            name=current_name,
             control_type=current_control_type,
             automation_id=getattr(info, "automation_id", "") or "",
             class_name=getattr(info, "class_name", "") or "",
             help_text=current_help_text,
-            help_text_fallback="" if current_help_text or current_control_type.strip().lower() != "image" else _extract_parent_help_text(element),
-            name_fallbacks=_extract_text_child_names(element, info),
+            help_text_fallback="" if current_help_text or normalized_control_type != "image" else _extract_parent_help_text(element),
+            name_fallbacks=name_fallbacks,
             rectangle={
                 "left": rect.left,
                 "top": rect.top,
@@ -100,6 +109,16 @@ def get_ui_element_at_point(x: int, y: int) -> UIElementInfo:
         )
     except Exception:
         return UIElementInfo()
+
+
+def _get_uia_desktop():
+    if Desktop is None:
+        return None
+    desktop = getattr(_UIA_THREAD_LOCAL, "desktop", None)
+    if desktop is None:
+        desktop = Desktop(backend="uia")
+        _UIA_THREAD_LOCAL.desktop = desktop
+    return desktop
 
 
 def _extract_parent_help_text(element: object) -> str:

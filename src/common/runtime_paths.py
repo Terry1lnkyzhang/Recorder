@@ -9,6 +9,7 @@ from pathlib import Path
 APP_NAME = "Recorder"
 NETWORK_RECORDINGS_ROOT = Path(r"\\130.147.129.203\AutomaticShared\Recordings")
 LOCAL_RECORDINGS_ROOT_NAME = "recording"
+LOCAL_RECORDING_STAGING_ROOT_NAME = "recording_staging"
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,17 @@ def get_local_recordings_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / LOCAL_RECORDINGS_ROOT_NAME
     return get_resource_root() / LOCAL_RECORDINGS_ROOT_NAME
+
+
+def get_local_recording_staging_dir(app_name: str = APP_NAME) -> Path:
+    local_app_data = os.getenv("LOCALAPPDATA")
+    if local_app_data:
+        root = Path(local_app_data) / app_name
+    else:
+        root = Path.home() / "AppData" / "Local" / app_name
+    path = root / LOCAL_RECORDING_STAGING_ROOT_NAME
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def get_logs_dir(app_name: str = APP_NAME) -> Path:

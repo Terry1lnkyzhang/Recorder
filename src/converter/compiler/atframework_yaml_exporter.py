@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import ast
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 
-def export_suggestions_to_atframework_yaml(suggestion_result: Any, output_path: Path) -> int:
+def export_suggestions_to_atframework_yaml(suggestion_result: Any, output_path: Path, source_root: Path | None = None) -> int:
     payload = build_atframework_yaml_dict(suggestion_result)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if source_root is not None:
+        _rewrite_wait_for_exists_screenshot_paths(payload, source_root, output_path.parent)
     output_path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     steps = payload.get("Steps", []) if isinstance(payload, dict) else []
     return len(steps) if isinstance(steps, list) else 0
@@ -217,6 +220,231 @@ def _build_export_parameter_payload(parameter_map: dict[str, Any]) -> Any:
     if merged:
         return merged
     return param_dict_value
+
+
+def _rewrite_wait_for_exists_screenshot_paths(payload: dict[str, Any], source_root: Path, export_dir: Path) -> None:
+    steps = payload.get("Steps")
+    if not isinstance(steps, list):
+        return
+
+    screenshot_dir = export_dir / "screenshot"
+    copied_targets_by_source: dict[str, str] = {}
+    used_targets: set[str] = set()
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        for method_key, payload_key in (("Action", "Parameter Value"), ("Check", "Check Parameter Value")):
+            method_name = str(step.get(method_key, "") or "").strip().lower()
+            if method_name != "waitforexists":
+                continue
+            step[payload_key] = _rewrite_wait_for_exists_parameter_blob(
+                step.get(payload_key),
+                source_root,
+                export_dir,
+                screenshot_dir,
+                copied_targets_by_source,
+                used_targets,
+            )
+
+
+def _rewrite_wait_for_exists_parameter_blob(
+    raw_value: Any,
+    source_root: Path,
+    export_dir: Path,
+    screenshot_dir: Path,
+    copied_targets_by_source: dict[str, str],
+    used_targets: set[str],
+) -> Any:
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return raw_value
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return raw_value
+        rewritten = _rewrite_wait_for_exists_parameter_value(
+            parsed,
+            source_root,
+            export_dir,
+            screenshot_dir,
+            copied_targets_by_source,
+            used_targets,
+        )
+        if rewritten is parsed:
+            return raw_value
+        return json.dumps(rewritten, ensure_ascii=False)
+
+    return _rewrite_wait_for_exists_parameter_value(
+        raw_value,
+        source_root,
+        export_dir,
+        screenshot_dir,
+        copied_targets_by_source,
+        used_targets,
+    )
+
+
+def _rewrite_wait_for_exists_parameter_value(
+    value: Any,
+    source_root: Path,
+    export_dir: Path,
+    screenshot_dir: Path,
+    copied_targets_by_source: dict[str, str],
+    used_targets: set[str],
+    parent_key: str = "",
+) -> Any:
+    parent_key_lower = parent_key.strip().lower()
+    if parent_key_lower == "sourcepath":
+        return _copy_wait_for_exists_sources(
+            value,
+            source_root,
+            export_dir,
+            screenshot_dir,
+            copied_targets_by_source,
+            used_targets,
+        )
+
+    if isinstance(value, dict):
+        changed = False
+        converted_dict: dict[Any, Any] = {}
+        for key, item in value.items():
+            converted_item = _rewrite_wait_for_exists_parameter_value(
+                item,
+                source_root,
+                export_dir,
+                screenshot_dir,
+                copied_targets_by_source,
+                used_targets,
+                parent_key=str(key),
+            )
+            if converted_item is not item:
+                changed = True
+            converted_dict[key] = converted_item
+        return converted_dict if changed else value
+
+    if isinstance(value, list):
+        changed = False
+        converted_list: list[Any] = []
+        for item in value:
+            converted_item = _rewrite_wait_for_exists_parameter_value(
+                item,
+                source_root,
+                export_dir,
+                screenshot_dir,
+                copied_targets_by_source,
+                used_targets,
+                parent_key=parent_key,
+            )
+            if converted_item is not item:
+                changed = True
+            converted_list.append(converted_item)
+        return converted_list if changed else value
+
+    return value
+
+
+def _copy_wait_for_exists_sources(
+    value: Any,
+    source_root: Path,
+    export_dir: Path,
+    screenshot_dir: Path,
+    copied_targets_by_source: dict[str, str],
+    used_targets: set[str],
+) -> Any:
+    if isinstance(value, str):
+        return _copy_wait_for_exists_source(
+            value,
+            source_root,
+            export_dir,
+            screenshot_dir,
+            copied_targets_by_source,
+            used_targets,
+        )
+    if isinstance(value, list):
+        changed = False
+        converted_list: list[Any] = []
+        for item in value:
+            if isinstance(item, str):
+                converted_item = _copy_wait_for_exists_source(
+                    item,
+                    source_root,
+                    export_dir,
+                    screenshot_dir,
+                    copied_targets_by_source,
+                    used_targets,
+                )
+            else:
+                converted_item = item
+            if converted_item is not item:
+                changed = True
+            converted_list.append(converted_item)
+        return converted_list if changed else value
+    return value
+
+
+def _copy_wait_for_exists_source(
+    raw_value: str,
+    source_root: Path,
+    export_dir: Path,
+    screenshot_dir: Path,
+    copied_targets_by_source: dict[str, str],
+    used_targets: set[str],
+) -> str:
+    source_path = _resolve_wait_for_exists_source_path(raw_value, source_root)
+    if source_path is None or not source_path.exists() or not source_path.is_file():
+        return raw_value
+
+    source_key = str(source_path.resolve()).casefold()
+    cached_target = copied_targets_by_source.get(source_key)
+    if cached_target:
+        return cached_target
+
+    target_relative = _build_wait_for_exists_target_relative(raw_value, source_path, used_targets)
+    target_path = export_dir / target_relative
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, target_path)
+
+    target_value = target_relative.as_posix()
+    copied_targets_by_source[source_key] = target_value
+    used_targets.add(target_value.casefold())
+    return target_value
+
+
+def _resolve_wait_for_exists_source_path(raw_value: str, source_root: Path) -> Path | None:
+    candidate_text = str(raw_value or "").strip().strip('"')
+    if not candidate_text:
+        return None
+
+    candidate_path = Path(candidate_text)
+    if candidate_path.is_absolute():
+        return candidate_path
+    return (source_root / candidate_path).resolve()
+
+
+def _build_wait_for_exists_target_relative(raw_value: str, source_path: Path, used_targets: set[str]) -> Path:
+    raw_parts = [part for part in str(raw_value or "").replace("\\", "/").split("/") if part and part != "."]
+    while raw_parts and raw_parts[0].lower() in {"screenshot", "screenshots", "media"}:
+        raw_parts = raw_parts[1:]
+    if not raw_parts or any(part == ".." for part in raw_parts):
+        raw_parts = [source_path.name]
+
+    sanitized_parts = [_sanitize_export_path_segment(part) for part in raw_parts]
+    candidate = Path("screenshot", *sanitized_parts)
+    deduplicated = candidate
+    counter = 1
+    while deduplicated.as_posix().casefold() in used_targets:
+        suffix = deduplicated.suffix
+        stem = deduplicated.stem
+        deduplicated = deduplicated.with_name(f"{stem}_{counter}{suffix}")
+        counter += 1
+    return deduplicated
+
+
+def _sanitize_export_path_segment(value: str) -> str:
+    sanitized = "".join("_" if char in '<>:"\\|?*' else char for char in str(value or "").strip())
+    return sanitized or "file"
 
 
 def _normalize_optional_text(value: Any) -> str:

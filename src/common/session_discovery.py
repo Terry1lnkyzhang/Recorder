@@ -8,11 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
-from src.common.session_lock import build_session_lock_status_text, get_session_lock_path, inspect_session_lock, is_session_lock_stale
+from src.common.session_lock import get_session_lock_path, inspect_session_lock
 from src.common.session_summary import count_session_events, get_session_summary_path, read_session_summary
 
 
 SessionCandidateCache = dict[str, dict[str, object]]
+
+
+_SLOW_CANDIDATE_LIMIT = 5
 
 
 def scan_session_candidates(
@@ -37,6 +40,7 @@ def scan_session_candidates(
                     "include_event_counts": include_event_counts,
                     "include_metadata_columns": include_metadata_columns,
                     "group_seconds": {
+                        "discovery": 0.0,
                         "events": 0.0,
                         "lock_status": 0.0,
                         "metadata_columns": 0.0,
@@ -55,12 +59,25 @@ def scan_session_candidates(
     event_count_seconds = 0.0
     metadata_seconds = 0.0
     lock_seconds = 0.0
-    candidate_build_seconds = 0.0
+    candidate_build_total_seconds = 0.0
     sort_seconds = 0.0
+    discovery_started_at = time.perf_counter()
+    candidate_files = list(iter_session_candidate_files(base_dir))
+    discovery_seconds = time.perf_counter() - discovery_started_at
     cache_hits = 0
     cache_misses = 0
+    slow_candidates: list[dict[str, object]] = []
 
-    for session_dir, session_json, events_log in iter_session_candidate_files(base_dir):
+    for session_dir, session_json, events_log in candidate_files:
+        candidate_scan_started_at = time.perf_counter()
+        candidate_stat_seconds = 0.0
+        candidate_summary_seconds = 0.0
+        candidate_event_count_seconds = 0.0
+        candidate_metadata_seconds = 0.0
+        candidate_lock_seconds = 0.0
+        candidate_item_build_seconds = 0.0
+        candidate_cache_hit = False
+        candidate_lock_present = False
         try:
             stat_started_at = time.perf_counter()
             session_stat = _safe_stat(session_json)
@@ -71,7 +88,9 @@ def scan_session_candidates(
             summary_path = get_session_summary_path(session_dir)
             summary_stat = _safe_stat(summary_path)
             lock_stat = _safe_stat(get_session_lock_path(session_dir))
-            stat_seconds += time.perf_counter() - stat_started_at
+            candidate_stat_seconds = time.perf_counter() - stat_started_at
+            stat_seconds += candidate_stat_seconds
+            candidate_lock_present = lock_stat is not None
         except OSError:
             continue
 
@@ -94,6 +113,7 @@ def scan_session_candidates(
         cached = None if force_refresh else resolved_cache.get(cache_key)
         if cached and cached.get("stamp") == stamp:
             cache_hits += 1
+            candidate_cache_hit = True
             event_count = cached.get("events", "")
             testcase_id = str(cached.get("testcase_id", "") or "")
             project = str(cached.get("project", "") or "")
@@ -112,17 +132,20 @@ def scan_session_candidates(
             if include_event_counts or include_metadata_columns:
                 summary_started_at = time.perf_counter()
                 summary_payload = read_session_summary(session_dir) or {}
-                summary_seconds += time.perf_counter() - summary_started_at
+                candidate_summary_seconds = time.perf_counter() - summary_started_at
+                summary_seconds += candidate_summary_seconds
             event_count = summary_payload.get("event_count") if isinstance(summary_payload.get("event_count"), int) else ""
             if include_event_counts and event_count == "":
                 event_count_started_at = time.perf_counter()
                 event_count = count_session_events(session_dir)
-                event_count_seconds += time.perf_counter() - event_count_started_at
+                candidate_event_count_seconds = time.perf_counter() - event_count_started_at
+                event_count_seconds += candidate_event_count_seconds
 
             if include_metadata_columns:
                 metadata_started_at = time.perf_counter()
                 metadata = _extract_session_candidate_metadata(base_dir, session_dir, session_json, summary_payload)
-                metadata_seconds += time.perf_counter() - metadata_started_at
+                candidate_metadata_seconds = time.perf_counter() - metadata_started_at
+                metadata_seconds += candidate_metadata_seconds
                 testcase_id = metadata["testcase_id"]
                 project = metadata["project"]
                 recorder_person = metadata["recorder_person"]
@@ -137,21 +160,30 @@ def scan_session_candidates(
                 review_status = ""
                 review_comments = ""
             lock_started_at = time.perf_counter()
-            lock_info = inspect_session_lock(session_dir, auto_clear_stale=True)
-            is_locked = lock_info is not None
-            is_lock_stale = is_session_lock_stale(lock_info)
-            lock_status = build_session_lock_status_text(lock_info)
             lock_owner = ""
             lock_acquired_at = ""
-            if lock_info is not None:
-                owner_parts = []
-                if lock_info.username:
-                    owner_parts.append(lock_info.username)
-                if lock_info.hostname:
-                    owner_parts.append(f"@{lock_info.hostname}")
-                lock_owner = "".join(owner_parts)
-                lock_acquired_at = lock_info.acquired_at
-            lock_seconds += time.perf_counter() - lock_started_at
+            if lock_stat is None:
+                is_locked = False
+                is_lock_stale = False
+                lock_status = "空闲"
+            else:
+                lock_info = inspect_session_lock(session_dir, auto_clear_stale=True)
+                is_locked = lock_info is not None
+                is_lock_stale = False
+                if lock_info is None:
+                    lock_status = "空闲"
+                else:
+                    owner_label = lock_info.owner_label or lock_info.owner_kind or "占用中"
+                    lock_status = f"占用中: {owner_label}"
+                    owner_parts = []
+                    if lock_info.username:
+                        owner_parts.append(lock_info.username)
+                    if lock_info.hostname:
+                        owner_parts.append(f"@{lock_info.hostname}")
+                    lock_owner = "".join(owner_parts)
+                    lock_acquired_at = lock_info.acquired_at
+            candidate_lock_seconds = time.perf_counter() - lock_started_at
+            lock_seconds += candidate_lock_seconds
             resolved_cache[cache_key] = {
                 "stamp": stamp,
                 "events": event_count,
@@ -169,9 +201,10 @@ def scan_session_candidates(
             }
 
         candidate_started_at = time.perf_counter()
+        candidate_name = format_session_candidate_name(base_dir, session_dir)
         candidates.append(
             {
-                "name": format_session_candidate_name(base_dir, session_dir),
+                "name": candidate_name,
                 "modified": datetime.fromtimestamp(dir_stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 "modified_ts": dir_stat.st_mtime,
                 "events": event_count,
@@ -189,39 +222,67 @@ def scan_session_candidates(
                 "path": str(session_dir),
             }
         )
-        candidate_build_seconds += time.perf_counter() - candidate_started_at
+        candidate_item_build_seconds = time.perf_counter() - candidate_started_at
+        candidate_total_seconds = time.perf_counter() - candidate_scan_started_at
+        slow_candidates.append(
+            {
+                "name": candidate_name,
+                "path": str(session_dir),
+                "cache_hit": candidate_cache_hit,
+                "lock_file_present": candidate_lock_present,
+                "total_seconds": candidate_total_seconds,
+                "phase_seconds": {
+                    "stat": candidate_stat_seconds,
+                    "summary": candidate_summary_seconds,
+                    "event_count": candidate_event_count_seconds,
+                    "metadata": candidate_metadata_seconds,
+                    "lock": candidate_lock_seconds,
+                    "candidate_build": candidate_item_build_seconds,
+                },
+            }
+        )
+        candidate_build_total_seconds += candidate_item_build_seconds
 
     sort_started_at = time.perf_counter()
     candidates.sort(key=lambda item: float(item.get("modified_ts", 0.0) or 0.0), reverse=True)
     for item in candidates:
         item.pop("modified_ts", None)
     sort_seconds += time.perf_counter() - sort_started_at
+    slow_candidates.sort(key=lambda item: float(item.get("total_seconds", 0.0) or 0.0), reverse=True)
+    for item in slow_candidates:
+        phase_seconds = item.get("phase_seconds", {}) if isinstance(item.get("phase_seconds", {}), dict) else {}
+        item["slowest_phase"] = _find_slowest_phase_name(phase_seconds)
+        item["slowest_phase_seconds"] = float(phase_seconds.get(str(item["slowest_phase"]), 0.0) or 0.0) if item.get("slowest_phase") else 0.0
 
     if diagnostics is not None:
         diagnostics.update(
             {
                 "total_seconds": time.perf_counter() - scan_started_at,
                 "candidate_count": len(candidates),
+                "discovered_count": len(candidate_files),
                 "cache_hits": cache_hits,
                 "cache_misses": cache_misses,
                 "include_event_counts": include_event_counts,
                 "include_metadata_columns": include_metadata_columns,
                 "group_seconds": {
+                    "discovery": discovery_seconds,
                     "events": event_count_seconds + (summary_seconds if not include_metadata_columns else 0.0),
                     "lock_status": lock_seconds,
                     "metadata_columns": (summary_seconds + metadata_seconds) if include_metadata_columns else 0.0,
-                    "name_modified": stat_seconds + candidate_build_seconds,
+                    "name_modified": stat_seconds + candidate_build_total_seconds,
                     "sorting": sort_seconds,
                 },
                 "detail_seconds": {
+                    "discovery": discovery_seconds,
                     "stat": stat_seconds,
                     "summary": summary_seconds,
                     "event_count": event_count_seconds,
                     "metadata": metadata_seconds,
                     "lock": lock_seconds,
-                    "candidate_build": candidate_build_seconds,
+                    "candidate_build": candidate_build_total_seconds,
                     "sort": sort_seconds,
                 },
+                "slow_candidates": slow_candidates[:_SLOW_CANDIDATE_LIMIT],
             }
         )
     return candidates
@@ -382,3 +443,14 @@ def _contains_session_payload_files(directory: Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def _find_slowest_phase_name(phase_seconds: dict[str, object]) -> str:
+    best_name = ""
+    best_seconds = -1.0
+    for key, value in phase_seconds.items():
+        seconds = float(value or 0.0)
+        if seconds > best_seconds:
+            best_name = str(key)
+            best_seconds = seconds
+    return best_name

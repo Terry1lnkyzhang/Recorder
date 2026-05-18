@@ -235,8 +235,13 @@ def _is_same_host(hostname: str) -> bool:
     if not normalized_host:
         return False
     current_host = socket.gethostname().strip().lower()
-    fqdn = socket.getfqdn().strip().lower()
-    return normalized_host in {current_host, fqdn}
+    if not current_host:
+        return False
+    current_short_host = current_host.split(".", 1)[0]
+    local_names = {current_host, current_short_host}
+    if normalized_host in local_names:
+        return True
+    return any(normalized_host.startswith(f"{local_name}.") for local_name in local_names if local_name)
 
 
 def _is_process_alive(pid: int) -> bool:

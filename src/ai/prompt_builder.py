@@ -216,7 +216,7 @@ def build_batch_events(events: list[dict[str, object]], start_index: int, batch_
     for event in sliced:
         event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
         keyboard = event.get("keyboard", {}) if event_type == "input" else {}
-        mouse = event.get("mouse", {}) if event_type == "controlOperation" else {}
+        mouse = event.get("mouse", {}) if event_type in {"controlOperation", "Click"} else {}
         row: dict[str, object] = {
             "event_type": event_type,
             "action": event.get("action", ""),
@@ -304,7 +304,7 @@ def collect_observation_inputs(
             row["ui_element"] = ui_element
         event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
         keyboard = event.get("keyboard", {}) if event_type == "input" else {}
-        mouse = event.get("mouse", {}) if event_type == "controlOperation" else {}
+        mouse = event.get("mouse", {}) if event_type in {"controlOperation", "Click"} else {}
         if keyboard:
             row["keyboard"] = keyboard
         if mouse:
@@ -389,7 +389,7 @@ def collect_group_summary_inputs(
             row["ui_element"] = ui_element
         event_type = normalize_event_type(event.get("event_type", ""), event.get("action", ""))
         keyboard = event.get("keyboard", {}) if event_type == "input" else {}
-        mouse = event.get("mouse", {}) if event_type == "controlOperation" else {}
+        mouse = event.get("mouse", {}) if event_type in {"controlOperation", "Click"} else {}
         if keyboard:
             row["keyboard"] = keyboard
         if mouse:
