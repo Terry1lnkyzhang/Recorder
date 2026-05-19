@@ -11,6 +11,7 @@ SESSION_SUMMARY_FILE_NAME = ".recorder_session.summary.json"
 SESSION_REVIEW_STATUS_EMPTY = ""
 SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE = "checkpoint_completed"
 SESSION_REVIEW_STATUS_DEBUG_COMPLETE = "debug_completed"
+SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING = "recorder_person_pending"
 
 
 def get_session_summary_path(session_dir: Path) -> Path:
@@ -32,6 +33,11 @@ def normalize_session_review_status(value: Any) -> str:
         "debug complete": SESSION_REVIEW_STATUS_DEBUG_COMPLETE,
         "debug": SESSION_REVIEW_STATUS_DEBUG_COMPLETE,
         "调试完成": SESSION_REVIEW_STATUS_DEBUG_COMPLETE,
+        "recorder_person_pending": SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING,
+        "recorder person pending": SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING,
+        "recorder pending": SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING,
+        "recorder tbd": SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING,
+        "录制人员待确定": SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING,
     }
     return mapping.get(normalized, SESSION_REVIEW_STATUS_EMPTY)
 
