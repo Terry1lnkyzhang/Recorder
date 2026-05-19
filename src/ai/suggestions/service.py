@@ -494,6 +494,11 @@ def _derive_agent_interface_values(event: dict[str, Any]) -> tuple[dict[str, Any
         derived_values["imageList"] = image_list
         evidence_map["imageList"] = [f"事件明细.media[1:] 路径文件名={image_list}"]
 
+    screenshot_path = str(event.get("screenshot", "") or "").strip()
+    if screenshot_path:
+        derived_values["imageSaveFile"] = screenshot_path
+        evidence_map["imageSaveFile"] = [f"事件明细.screenshot={screenshot_path}"]
+
     return derived_values, evidence_map, missing_map
 
 

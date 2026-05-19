@@ -12,7 +12,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 import tkinter as tk
 
 import requests
@@ -64,6 +64,188 @@ from .cleaning import CleaningSuggestion, apply_cleaning_suggestions, build_clea
 logger = get_logger("viewer")
 
 
+def _pick_directory_with_internal_dialog(
+    parent: tk.Misc,
+    *,
+    current_path: Path,
+    ui_language: str,
+    title: str,
+) -> str:
+    t = lambda zh_text, en_text: pick_text(ui_language, zh_text, en_text)
+    selected_path = ""
+    list_token = 0
+    current_listing_path: Path | None = None
+    current_items: list[Path] = []
+
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.transient(parent)
+    dialog.geometry("760x520")
+    dialog.minsize(560, 360)
+
+    container = ttk.Frame(dialog, padding=12)
+    container.pack(fill=tk.BOTH, expand=True)
+    container.columnconfigure(0, weight=1)
+    container.rowconfigure(3, weight=1)
+
+    ttk.Label(
+        container,
+        text=t("选择或粘贴一个包含 Session 的目录：", "Select or paste a folder containing sessions:"),
+    ).grid(row=0, column=0, sticky=tk.W)
+
+    path_var = tk.StringVar(value=str(current_path))
+    path_entry = ttk.Entry(container, textvariable=path_var)
+    path_entry.grid(row=1, column=0, sticky=tk.EW, pady=(6, 8))
+
+    nav_bar = ttk.Frame(container)
+    nav_bar.grid(row=2, column=0, sticky=tk.EW, pady=(0, 8))
+
+    list_frame = ttk.Frame(container)
+    list_frame.grid(row=3, column=0, sticky=tk.NSEW)
+    list_frame.columnconfigure(0, weight=1)
+    list_frame.rowconfigure(0, weight=1)
+
+    folder_list = tk.Listbox(list_frame, activestyle="dotbox", exportselection=False)
+    folder_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=folder_list.yview)
+    folder_list.configure(yscrollcommand=folder_scrollbar.set)
+    folder_list.grid(row=0, column=0, sticky=tk.NSEW)
+    folder_scrollbar.grid(row=0, column=1, sticky=tk.NS)
+
+    status_var = tk.StringVar(value="")
+    ttk.Label(container, textvariable=status_var).grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
+
+    button_bar = ttk.Frame(container)
+    button_bar.grid(row=5, column=0, sticky=tk.EW, pady=(12, 0))
+
+    def list_windows_drives() -> list[Path]:
+        if os.name != "nt":
+            anchor = Path.home().anchor or "/"
+            return [Path(anchor)]
+        try:
+            import ctypes
+
+            mask = int(ctypes.windll.kernel32.GetLogicalDrives())
+        except Exception:
+            mask = 0
+        drives: list[Path] = []
+        for index in range(26):
+            if mask & (1 << index):
+                drives.append(Path(f"{chr(65 + index)}:\\"))
+        return drives or [Path.home()]
+
+    def show_items(paths: list[Path], *, prefix: str = "") -> None:
+        folder_list.delete(0, tk.END)
+        for item in paths:
+            folder_list.insert(tk.END, f"{prefix}{item.name or str(item)}")
+
+    def load_drives() -> None:
+        nonlocal current_listing_path, current_items, list_token
+        list_token += 1
+        current_listing_path = None
+        current_items = list_windows_drives()
+        show_items(current_items)
+        status_var.set(t("请选择一个磁盘，或直接粘贴目录路径。", "Select a drive, or paste a directory path directly."))
+
+    def load_directory(directory: Path) -> None:
+        nonlocal current_listing_path, current_items, list_token
+        list_token += 1
+        local_token = list_token
+        current_listing_path = directory
+        current_items = []
+        path_var.set(str(directory))
+        folder_list.delete(0, tk.END)
+        folder_list.insert(tk.END, t("正在加载...", "Loading..."))
+        status_var.set(t("正在加载目录...", "Loading folder..."))
+
+        def worker() -> None:
+            items: list[Path] = []
+            error_message = ""
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                items.append(Path(entry.path))
+                        except OSError:
+                            continue
+                items.sort(key=lambda item: item.name.lower())
+            except Exception as exc:
+                error_message = str(exc)
+
+            def apply_results() -> None:
+                nonlocal current_items
+                if local_token != list_token or not dialog.winfo_exists():
+                    return
+                current_items = items
+                show_items(items)
+                if error_message:
+                    status_var.set(t(f"无法读取目录：{error_message}", f"Unable to read folder: {error_message}"))
+                else:
+                    status_var.set(t(f"当前目录包含 {len(items)} 个子目录。", f"Current folder contains {len(items)} subfolders."))
+
+            dialog.after(0, apply_results)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def selected_item_path() -> Path | None:
+        selection = folder_list.curselection()
+        if not selection:
+            return None
+        index = int(selection[0])
+        if index < 0 or index >= len(current_items):
+            return None
+        return current_items[index]
+
+    def on_select(_event: tk.Event | None = None) -> None:
+        item = selected_item_path()
+        if item is not None:
+            path_var.set(str(item))
+
+    def enter_selected_or_typed(_event: tk.Event | None = None) -> None:
+        raw_path = path_var.get().strip().strip('"')
+        if not raw_path:
+            return
+        load_directory(Path(raw_path))
+
+    def go_parent() -> None:
+        if current_listing_path is None:
+            load_drives()
+            return
+        parent_path = current_listing_path.parent
+        if parent_path == current_listing_path:
+            load_drives()
+            return
+        load_directory(parent_path)
+
+    def use_current_path() -> None:
+        nonlocal selected_path
+        raw_path = path_var.get().strip().strip('"')
+        if not raw_path:
+            messagebox.showinfo(t("提示", "Notice"), t("请输入或选择一个目录。", "Enter or select a folder."), parent=dialog)
+            return
+        selected_path = raw_path
+        dialog.destroy()
+
+    ttk.Button(nav_bar, text=t("磁盘列表", "Drives"), command=load_drives).pack(side=tk.LEFT)
+    ttk.Button(nav_bar, text=t("用户目录", "Home"), command=lambda: load_directory(Path.home())).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(nav_bar, text=t("上一级", "Up"), command=go_parent).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(nav_bar, text=t("进入路径", "Open Path"), command=enter_selected_or_typed).pack(side=tk.LEFT, padx=(8, 0))
+
+    ttk.Button(button_bar, text=t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
+    ttk.Button(button_bar, text=t("使用此目录", "Use This Folder"), command=use_current_path).pack(side=tk.RIGHT, padx=(0, 8))
+
+    folder_list.bind("<<ListboxSelect>>", on_select)
+    folder_list.bind("<Double-1>", enter_selected_or_typed)
+    path_entry.bind("<Return>", enter_selected_or_typed)
+    dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+
+    dialog.grab_set()
+    dialog.after(0, lambda: load_directory(Path.home()))
+    path_entry.focus_set()
+    parent.wait_window(dialog)
+    return selected_path
+
+
 def pick_session_from_recordings(
     parent: tk.Misc,
     *,
@@ -74,7 +256,7 @@ def pick_session_from_recordings(
     intro_text: str,
     confirm_button_text: str,
     empty_result_message: str | None = None,
-    on_review_saved: Callable[[Path, dict[str, object]], None] | None = None,
+    on_review_saved: Callable[[Path, dict[str, object], str], None] | None = None,
 ) -> Path | None:
     t = lambda zh_text, en_text: pick_text(ui_language, zh_text, en_text)
     resolved_cache = session_candidate_cache if session_candidate_cache is not None else {}
@@ -103,7 +285,11 @@ def pick_session_from_recordings(
 
     ttk.Label(dialog, text=intro_text, padding=(16, 12, 16, 4)).pack(anchor=tk.W)
     path_var = tk.StringVar(value=str(recordings_root))
-    ttk.Label(dialog, textvariable=path_var, padding=(16, 0, 16, 8)).pack(anchor=tk.W)
+    path_row = ttk.Frame(dialog, padding=(16, 0, 16, 8))
+    path_row.pack(fill=tk.X)
+    choose_root_button = ttk.Button(path_row, text=t("选择其它目录", "Choose Other Folder"))
+    choose_root_button.pack(side=tk.LEFT)
+    ttk.Label(path_row, textvariable=path_var).pack(side=tk.LEFT, padx=(8, 0), fill=tk.X, expand=True)
 
     filters = ttk.Frame(dialog, padding=(16, 0, 16, 8))
     filters.pack(fill=tk.X)
@@ -130,7 +316,7 @@ def pick_session_from_recordings(
     tree_frame.columnconfigure(0, weight=1)
     tree_frame.rowconfigure(0, weight=1)
 
-    columns = ("name", "testcase_id", "project", "recorder_person", "converter_person", "review_status", "lock_status", "review_comments", "modified", "events")
+    columns = ("name", "testcase_id", "project", "recorder_person", "converter_person", "review_status", "lock_status", "lock_ip", "review_comments", "modified", "events")
     tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
     tree.heading("name", text=t("Session 目录", "Session Folder"))
     tree.heading("testcase_id", text=t("Testcase ID", "Testcase ID"))
@@ -139,6 +325,7 @@ def pick_session_from_recordings(
     tree.heading("converter_person", text=t("转换人员", "Converter"))
     tree.heading("review_status", text=t("状态", "Status"))
     tree.heading("lock_status", text=t("锁状态", "Lock Status"))
+    tree.heading("lock_ip", text=t("占用 IP", "Lock IP"))
     tree.heading("review_comments", text="Comments")
     tree.heading("modified", text=t("最后修改时间", "Last Modified"))
     tree.heading("events", text=t("事件数", "Events"))
@@ -148,7 +335,8 @@ def pick_session_from_recordings(
     tree.column("recorder_person", width=110, anchor=tk.W, stretch=False)
     tree.column("converter_person", width=110, anchor=tk.W, stretch=False)
     tree.column("review_status", width=110, anchor=tk.W, stretch=False)
-    tree.column("lock_status", width=130, anchor=tk.W, stretch=False)
+    tree.column("lock_status", width=170, anchor=tk.W, stretch=False)
+    tree.column("lock_ip", width=120, anchor=tk.W, stretch=False)
     tree.column("review_comments", width=190, anchor=tk.W)
     tree.column("modified", width=160, anchor=tk.W, stretch=False)
     tree.column("events", width=72, anchor=tk.CENTER, stretch=False)
@@ -332,6 +520,7 @@ def pick_session_from_recordings(
                     item.get("converter_person", ""),
                     review_status_display_by_value.get(normalize_session_review_status(item.get("review_status", "")), ""),
                     item.get("lock_status", ""),
+                    item.get("lock_ip", ""),
                     item.get("review_comments", ""),
                     item["modified"],
                     item["events"],
@@ -397,6 +586,10 @@ def pick_session_from_recordings(
         cached = resolved_cache.get(cache_key)
         if cached is not None:
             cached.update(updates)
+
+    def _remove_cached_candidate(session_path: Path) -> None:
+        cache_key = os.path.abspath(os.fspath(session_path)).lower()
+        resolved_cache.pop(cache_key, None)
 
     def _apply_event_count_update(session_path: str, event_count: object) -> None:
         for item in sessions:
@@ -564,6 +757,50 @@ def pick_session_from_recordings(
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def choose_recordings_root() -> None:
+        nonlocal recordings_root, selected_path
+        current_grab = dialog.grab_current()
+        try:
+            if current_grab is not None:
+                try:
+                    current_grab.grab_release()
+                except Exception:
+                    current_grab = None
+            raw_dir = _pick_directory_with_internal_dialog(
+                dialog,
+                current_path=recordings_root,
+                ui_language=ui_language,
+                title=t("选择包含 Session 的目录", "Select a folder containing sessions"),
+            )
+        finally:
+            if dialog.winfo_exists():
+                if current_grab is not None and current_grab.winfo_exists():
+                    try:
+                        current_grab.grab_set()
+                    except Exception:
+                        pass
+                dialog.lift()
+                dialog.focus_force()
+        if not raw_dir:
+            return
+
+        selected_dir = Path(raw_dir)
+        try:
+            is_session_dir = (selected_dir / "session.json").exists()
+        except OSError:
+            is_session_dir = False
+        if is_session_dir:
+            selected_path = selected_dir
+            dialog.destroy()
+            return
+
+        recordings_root = selected_dir
+        path_var.set(str(recordings_root))
+        testcase_filter_var.set("")
+        project_filter_var.set(all_projects_label)
+        recorder_filter_var.set("")
+        populate(force_refresh=True)
+
     def confirm() -> None:
         nonlocal selected_path
         selection = tree.selection()
@@ -594,6 +831,68 @@ def pick_session_from_recordings(
             return
         populate(force_refresh=True)
 
+    def delete_selected_session() -> None:
+        selection = tree.selection()
+        if not selection:
+            messagebox.showinfo(t("提示", "Notice"), t("请选择一个 session。", "Select a session."), parent=dialog)
+            return
+        item = visible_sessions[int(selection[0])]
+        session_dir = Path(str(item.get("path", "")))
+        if bool(item.get("is_locked", False)):
+            messagebox.showinfo(
+                t("Session 占用中", "Session Locked"),
+                t("当前 Session 正被占用，不能删除。请先关闭占用方或强制解锁后再删除。", "The selected session is currently locked and cannot be deleted. Close the owner or force-unlock it first."),
+                parent=dialog,
+            )
+            return
+        if not session_dir.exists():
+            messagebox.showinfo(t("目录不存在", "Folder not found"), t(f"Session 目录不存在:\n{session_dir}", f"Session folder does not exist:\n{session_dir}"), parent=dialog)
+            _remove_cached_candidate(session_dir)
+            sessions[:] = [candidate for candidate in sessions if str(candidate.get("path", "")) != str(session_dir)]
+            _update_project_filter_options()
+            apply_filters()
+            return
+        if not messagebox.askyesno(
+            t("确认删除", "Confirm Delete"),
+            t(
+                f"确定要永久删除这个 Session 目录吗？\n\n{session_dir}\n\n此操作不可恢复。",
+                f"Permanently delete this session folder?\n\n{session_dir}\n\nThis action cannot be undone.",
+            ),
+            parent=dialog,
+            icon="warning",
+            default="no",
+        ):
+            return
+        try:
+            shutil.rmtree(session_dir)
+        except Exception as exc:
+            messagebox.showerror(t("删除失败", "Delete failed"), t(f"无法删除 Session 目录:\n{session_dir}\n\n{exc}", f"Unable to delete session folder:\n{session_dir}\n\n{exc}"), parent=dialog)
+            return
+        _remove_cached_candidate(session_dir)
+        sessions[:] = [candidate for candidate in sessions if str(candidate.get("path", "")) != str(session_dir)]
+        _update_project_filter_options()
+        apply_filters()
+        status_var.set(t(f"已删除 Session 目录: {session_dir}", f"Deleted session folder: {session_dir}"))
+
+    session_context_menu = tk.Menu(dialog, tearoff=False)
+    session_context_menu.add_command(label=t("删除 Session 目录", "Delete Session Folder"), command=delete_selected_session)
+
+    def show_session_context_menu(event: tk.Event) -> str:
+        item_id = tree.identify_row(event.y)
+        if not item_id:
+            return "break"
+        tree.selection_set(item_id)
+        tree.focus(item_id)
+        _load_review_editor_from_selection()
+        try:
+            session_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                session_context_menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
     def save_review_fields() -> None:
         selection = tree.selection()
         if not selection:
@@ -601,6 +900,7 @@ def pick_session_from_recordings(
             return
         item = visible_sessions[int(selection[0])]
         session_dir = Path(str(item.get("path", "")))
+        previous_status = normalize_session_review_status(item.get("review_status", ""))
         if bool(item.get("is_locked", False)):
             messagebox.showinfo(
                 t("Session 占用中", "Session Locked"),
@@ -636,9 +936,12 @@ def pick_session_from_recordings(
             converter_person=normalized_converter_person,
         )
         if on_review_saved is not None:
-            on_review_saved(session_dir, metadata_payload)
+            on_review_saved(session_dir, metadata_payload, previous_status)
         _refresh_session_tree()
-        status_var.set(t("状态、备注和转换人员已保存", "Status, comments, and converter saved"))
+        if previous_status != normalized_status and normalized_status == SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE:
+            status_var.set(t("状态已保存；已在后台启动 AI 分析。", "Status saved; AI analysis started in the background."))
+        else:
+            status_var.set(t("状态、备注和转换人员已保存", "Status, comments, and converter saved"))
 
     def _open_path(path: Path) -> None:
         try:
@@ -647,12 +950,14 @@ def pick_session_from_recordings(
             messagebox.showerror(t("打开失败", "Open failed"), t(f"无法打开文件:\n{path}\n\n{exc}", f"Unable to open path:\n{path}\n\n{exc}"), parent=dialog)
 
     save_review_button.configure(command=save_review_fields)
+    choose_root_button.configure(command=choose_recordings_root)
     review_comments_entry.bind("<Return>", lambda _event: save_review_fields())
     testcase_filter_var.trace_add("write", apply_filters)
     project_filter_var.trace_add("write", apply_filters)
     recorder_filter_var.trace_add("write", apply_filters)
     tree.bind("<<TreeviewSelect>>", lambda _event: _load_review_editor_from_selection())
     tree.bind("<Double-1>", lambda _event: confirm())
+    tree.bind("<Button-3>", show_session_context_menu)
 
     ttk.Button(button_bar, text=t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
     ttk.Button(button_bar, text=t("打开 recordings 目录", "Open recordings folder"), command=lambda: _open_path(recordings_root)).pack(side=tk.LEFT, padx=(8, 0))
@@ -701,6 +1006,7 @@ class RecorderViewerWindow:
         self._event_list_batch_size = 300
         self._session_load_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
+        self._checkpoint_auto_ai_sessions: set[str] = set()
         self._synchronizing_tree_selection = False
         self.copied_event_rows: list[dict[str, object]] = []
         self.cleaning_suggestions: list[CleaningSuggestion] = []
@@ -1073,7 +1379,7 @@ class RecorderViewerWindow:
             self.load_session(candidate)
 
     def _show_session_picker(self) -> None:
-        def _handle_review_saved(session_dir: Path, metadata_payload: dict[str, object]) -> None:
+        def _handle_review_saved(session_dir: Path, metadata_payload: dict[str, object], previous_review_status: str) -> None:
             normalized_status = normalize_session_review_status(metadata_payload.get("review_status", ""))
             normalized_comments = str(metadata_payload.get("review_comments", "") or "")
             normalized_converter_person = str(metadata_payload.get("converter_person", "") or "")
@@ -1086,6 +1392,7 @@ class RecorderViewerWindow:
                 self.session_data["metadata"] = metadata
                 self.session_converter_person_var.set(normalized_converter_person)
                 self.summary_var.set(self._build_session_summary_text())
+            self._maybe_start_checkpoint_complete_ai_analysis(session_dir, previous_review_status, normalized_status)
 
         session_dir = pick_session_from_recordings(
             self.window,
@@ -1099,6 +1406,80 @@ class RecorderViewerWindow:
         )
         if session_dir is not None:
             self.load_session(session_dir)
+
+    def _maybe_start_checkpoint_complete_ai_analysis(self, session_dir: Path, previous_status: str, current_status: str) -> None:
+        if normalize_session_review_status(previous_status) == SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE:
+            return
+        if normalize_session_review_status(current_status) != SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE:
+            return
+        self._start_checkpoint_complete_ai_analysis(session_dir)
+
+    def _start_checkpoint_complete_ai_analysis(self, session_dir: Path) -> None:
+        resolved_session_dir = Path(os.path.abspath(os.fspath(session_dir)))
+        session_key = os.path.normcase(os.fspath(resolved_session_dir))
+        if session_key in self._checkpoint_auto_ai_sessions:
+            logger.info("Checkpoint auto AI analysis is already running | session_dir=%s", resolved_session_dir)
+            return
+        self._checkpoint_auto_ai_sessions.add(session_key)
+        logger.info("Checkpoint auto AI analysis started | session_dir=%s", resolved_session_dir)
+        if self._is_current_session_path(resolved_session_dir) and not self.analysis_running:
+            self.ai_var.set(self._t("检查点完成，后台 AI 分析已启动...", "Checkpoint complete; background AI analysis started..."))
+
+        def worker() -> None:
+            success = False
+            message = ""
+            try:
+                session_path = resolved_session_dir / "session.json"
+                session_data = json.loads(session_path.read_text(encoding="utf-8"))
+                if not isinstance(session_data, dict):
+                    raise ValueError("session.json 格式无效")
+                settings = self.settings_store.load()
+                if settings.use_remote_ai_service:
+                    result = RemoteAIServiceClient(settings).analyze_session(resolved_session_dir, session_data)
+                    self._write_ai_analysis_payload(resolved_session_dir, result.to_dict())
+                else:
+                    result = SessionWorkflowAnalyzer(settings).analyze(resolved_session_dir, session_data)
+                    self._write_ai_analysis_payload(resolved_session_dir, result.to_dict())
+                success = True
+                message = "AI 分析完成"
+                logger.info("Checkpoint auto AI analysis completed | session_dir=%s", resolved_session_dir)
+            except Exception as exc:
+                message = str(exc)
+                logger.exception("Checkpoint auto AI analysis failed | session_dir=%s", resolved_session_dir)
+                try:
+                    (resolved_session_dir / "ai_analysis_auto_error.txt").write_text(message, encoding="utf-8")
+                except Exception:
+                    pass
+            finally:
+                self._checkpoint_auto_ai_sessions.discard(session_key)
+                try:
+                    self.window.after(0, lambda success=success, message=message, session_dir=resolved_session_dir: self._on_checkpoint_auto_ai_analysis_finished(session_dir, success, message))
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _write_ai_analysis_payload(self, session_dir: Path, analysis: dict[str, object]) -> None:
+        analysis_path = session_dir / "ai_analysis.json"
+        yaml_path = session_dir / "ai_analysis.yaml"
+        analysis_path.write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
+        yaml_path.write_text(yaml.safe_dump(analysis, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    def _on_checkpoint_auto_ai_analysis_finished(self, session_dir: Path, success: bool, message: str) -> None:
+        if not self._is_current_session_path(session_dir) or self.analysis_running:
+            return
+        self._update_historical_ai_button_state()
+        if success:
+            self.ai_var.set(self._t("后台 AI 分析完成，可点击“加载历史AI结果”查看。", "Background AI analysis completed. Load historical AI results to view it."))
+        else:
+            self.ai_var.set(self._t(f"后台 AI 分析失败：{message}", f"Background AI analysis failed: {message}"))
+
+    def _is_current_session_path(self, session_dir: Path) -> bool:
+        if not self.session_dir:
+            return False
+        current_key = os.path.normcase(os.path.abspath(os.fspath(self.session_dir)))
+        target_key = os.path.normcase(os.path.abspath(os.fspath(session_dir)))
+        return current_key == target_key
 
     def _prompt_session_to_import(self) -> Path | None:
         sessions = self._find_session_candidates(self.recordings_root)

@@ -456,6 +456,13 @@ entries:
       required: false
       default: null
       example: null
+    - name: imageSaveFile
+      type: string
+      description: Output image file used by AgentInterface report artifacts; parameter
+        recommendation defaults to the recorded event screenshot value.
+      required: false
+      default: null
+      example: screenshots/step_0001.png
     - name: rect
       type: string
       description: Screen capture region `[left, top, right, bottom]`.

@@ -578,7 +578,12 @@ class RecorderApp:
             self.logger.info("Start recording ignored because another operation is in progress")
             return
 
-        metadata_draft = open_session_metadata_dialog(self.root, self.session_metadata_draft, self.settings_store)
+        metadata_draft = open_session_metadata_dialog(
+            self.root,
+            self.session_metadata_draft,
+            self.settings_store,
+            recordings_root=self.recordings_target_root,
+        )
         if metadata_draft is None:
             self.logger.info("Start recording cancelled in session metadata dialog")
             self._set_status(self._t("已取消开始录制", "Start recording canceled"))

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import getpass
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ class SessionLockInfo:
     owner_label: str
     username: str
     hostname: str
+    ip_address: str
     pid: int
     acquired_at: str
 
@@ -40,6 +42,7 @@ class SessionLockInfo:
                 owner_label=str(payload.get("owner_label", "") or ""),
                 username=str(payload.get("username", "") or ""),
                 hostname=str(payload.get("hostname", "") or ""),
+                ip_address=_extract_lock_ip_address(payload),
                 pid=int(payload.get("pid", 0) or 0),
                 acquired_at=str(payload.get("acquired_at", "") or ""),
             )
@@ -117,6 +120,7 @@ def acquire_session_lock(session_dir: Path, owner_kind: str, owner_label: str) -
         owner_label=str(owner_label or "").strip(),
         username=_safe_get_username(),
         hostname=socket.gethostname().strip(),
+        ip_address=_safe_get_primary_ip_address(),
         pid=os.getpid(),
         acquired_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
@@ -192,11 +196,13 @@ def build_session_lock_message(session_dir: Path, lock_info: SessionLockInfo | N
         owner_parts.append(f"@{lock_info.hostname}")
     owner_text = "".join(owner_parts) if owner_parts else "(未知用户)"
     acquired_at = lock_info.acquired_at or "(未知时间)"
+    ip_line = f"IP: {lock_info.ip_address}\n" if lock_info.ip_address else ""
     return (
         f"当前 Session 已打开，暂时不能重复操作。\n\n"
         f"Session: {session_dir}\n"
         f"占用方: {owner_label}\n"
         f"用户: {owner_text}\n"
+        f"{ip_line}"
         f"PID: {lock_info.pid or '(未知)'}\n"
         f"开始时间(UTC): {acquired_at}"
     )
@@ -206,9 +212,10 @@ def build_session_lock_status_text(lock_info: SessionLockInfo | None) -> str:
     if lock_info is None:
         return "空闲"
     owner_label = lock_info.owner_label or lock_info.owner_kind or "占用中"
+    ip_suffix = f" ({lock_info.ip_address})" if lock_info.ip_address else ""
     if is_session_lock_stale(lock_info):
-        return f"陈旧锁: {owner_label}"
-    return f"占用中: {owner_label}"
+        return f"陈旧锁: {owner_label}{ip_suffix}"
+    return f"占用中: {owner_label}{ip_suffix}"
 
 
 def _safe_get_username() -> str:
@@ -216,6 +223,56 @@ def _safe_get_username() -> str:
         return getpass.getuser().strip()
     except Exception:
         return ""
+
+
+def _extract_lock_ip_address(payload: dict[str, object]) -> str:
+    explicit_ip = _normalize_ip_address(payload.get("ip_address") or payload.get("ip") or payload.get("host_ip"))
+    if explicit_ip:
+        return explicit_ip
+    hostname = str(payload.get("hostname", "") or "").strip()
+    if hostname and _is_same_host(hostname):
+        return _safe_get_primary_ip_address()
+    return ""
+
+
+def _safe_get_primary_ip_address() -> str:
+    candidates: list[str] = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidates.append(str(sock.getsockname()[0]))
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname().strip()
+        if hostname:
+            candidates.extend(str(address) for address in socket.gethostbyname_ex(hostname)[2])
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        normalized = _normalize_ip_address(candidate)
+        if normalized:
+            return normalized
+    for candidate in candidates:
+        fallback = str(candidate or "").strip()
+        if fallback:
+            return fallback
+    return ""
+
+
+def _normalize_ip_address(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        ip_value = ipaddress.ip_address(text)
+    except ValueError:
+        return ""
+    if ip_value.is_loopback or ip_value.is_unspecified:
+        return ""
+    return text
 
 
 def _normalize_session_dir(session_dir: Path) -> Path:

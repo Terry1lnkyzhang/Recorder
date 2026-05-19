@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import threading
 import tkinter as tk
@@ -77,6 +78,74 @@ SESSION_PROJECT_OPTIONS = ["Earth_kylin", "Taichi", "Kylin", "Earth_Kylin", "Ear
 MAX_AI_CHECKPOINT_IMAGES = 5
 AI_CHECKPOINT_PREVIEW_HEIGHT = 220
 AI_CHECKPOINT_SCROLLBAR_WIDTH = 18
+
+
+def _sanitize_session_path_part(value: str) -> str:
+    cleaned = str(value or "").strip()
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", cleaned)
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    return cleaned.strip("._ ")
+
+
+def _contains_session_payload(directory: Path) -> bool:
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.name in {"session.json", "events.jsonl"}:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _list_existing_sessions_for_testcase(recordings_root: Path, testcase_id: str, limit: int = 5) -> list[Path]:
+    raw_testcase_id = str(testcase_id or "").strip()
+    sanitized_testcase_id = _sanitize_session_path_part(raw_testcase_id)
+    testcase_dir_names: list[str] = []
+    for candidate in (raw_testcase_id, sanitized_testcase_id):
+        if candidate and candidate not in testcase_dir_names:
+            testcase_dir_names.append(candidate)
+
+    sessions: list[tuple[float, Path]] = []
+    for testcase_dir_name in testcase_dir_names:
+        testcase_dir = recordings_root / testcase_dir_name
+        try:
+            project_entries = list(os.scandir(testcase_dir))
+        except OSError:
+            continue
+        for project_entry in project_entries:
+            try:
+                if not project_entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            project_dir = Path(project_entry.path)
+            if _contains_session_payload(project_dir):
+                sessions.append((_safe_dir_mtime(project_dir), project_dir))
+                continue
+            try:
+                session_entries = list(os.scandir(project_dir))
+            except OSError:
+                continue
+            for session_entry in session_entries:
+                try:
+                    if not session_entry.is_dir(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                session_dir = Path(session_entry.path)
+                if _contains_session_payload(session_dir):
+                    sessions.append((_safe_dir_mtime(session_dir), session_dir))
+    sessions.sort(key=lambda item: item[0], reverse=True)
+    return [path for _mtime, path in sessions[: max(1, limit)]]
+
+
+def _safe_dir_mtime(directory: Path) -> float:
+    try:
+        return directory.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _set_text(widget: tk.Text, text: str) -> None:
@@ -263,16 +332,24 @@ class SessionMetadataDraft:
 
 
 class SessionMetadataDialog:
-    def __init__(self, parent: tk.Misc, draft: SessionMetadataDraft | None = None, settings_store: SettingsStore | None = None) -> None:
+    def __init__(
+        self,
+        parent: tk.Misc,
+        draft: SessionMetadataDraft | None = None,
+        settings_store: SettingsStore | None = None,
+        recordings_root: Path | None = None,
+    ) -> None:
         self.parent = parent
         self.draft = draft or SessionMetadataDraft()
         self.settings_store = settings_store or SettingsStore(Path("recorder_settings.json"))
+        self.recordings_root = recordings_root
         self.result: SessionMetadataDraft | None = None
         self.ai_running = False
         self._metadata_canvas: tk.Canvas | None = None
         self._metadata_canvas_window: int | None = None
         self._testcase_lookup_after_id: str | None = None
         self._testcase_lookup_token = 0
+        self._session_lookup_token = 0
         self._baseline_lookup_token = 0
         self._baseline_design_steps_after_id: str | None = None
         self._baseline_design_steps_token = 0
@@ -300,6 +377,7 @@ class SessionMetadataDialog:
         self.scope_var = tk.StringVar(value=self.draft.scope if self.draft.scope in SESSION_SCOPE_OPTIONS else "All")
         self.testcase_lookup_status_var = tk.StringVar(value="")
         self.testcase_lookup_details_var = tk.StringVar(value="")
+        self.session_lookup_status_var = tk.StringVar(value="")
         self.baseline_lookup_status_var = tk.StringVar(value=self._t("BaselineName 加载中...", "Loading BaselineName..."))
         self.baseline_design_steps_status_var = tk.StringVar(value="")
 
@@ -391,6 +469,12 @@ class SessionMetadataDialog:
         ttk.Label(testcase_frame, textvariable=self.testcase_lookup_status_var).grid(row=1, column=0, sticky=tk.W, pady=(4, 0))
         ttk.Label(testcase_frame, textvariable=self.testcase_lookup_details_var, wraplength=520, justify=tk.LEFT).grid(
             row=2,
+            column=0,
+            sticky=tk.W,
+            pady=(2, 0),
+        )
+        ttk.Label(testcase_frame, textvariable=self.session_lookup_status_var, wraplength=520, justify=tk.LEFT).grid(
+            row=3,
             column=0,
             sticky=tk.W,
             pady=(2, 0),
@@ -487,6 +571,7 @@ class SessionMetadataDialog:
         self.secondary_id_entry.grid_remove()
         self.testcase_lookup_status_var.set("")
         self.testcase_lookup_details_var.set("")
+        self.session_lookup_status_var.set("")
         self.baseline_design_steps_status_var.set("")
         self.name_label.grid(row=4, column=0, sticky=tk.W, padx=(0, 18), pady=(6, 6))
         self.name_entry.grid(row=4, column=1, sticky=tk.EW, pady=(6, 6))
@@ -554,10 +639,13 @@ class SessionMetadataDialog:
         if not self._is_prs_recording_selected() or not testcase_id:
             self.testcase_lookup_status_var.set("")
             self.testcase_lookup_details_var.set("")
+            self.session_lookup_status_var.set("")
+            self._session_lookup_token += 1
             return
 
         self.testcase_lookup_status_var.set(self._t("测试用例查询中...", "Looking up test case..."))
         self.testcase_lookup_details_var.set("")
+        self.session_lookup_status_var.set("")
         delay_ms = 0 if immediate else 350
         self._testcase_lookup_after_id = self.window.after(delay_ms, self._start_testcase_lookup)
 
@@ -610,6 +698,7 @@ class SessionMetadataDialog:
         if not self._is_prs_recording_selected() or not testcase_id:
             self.testcase_lookup_status_var.set("")
             self.testcase_lookup_details_var.set("")
+            self.session_lookup_status_var.set("")
             return
 
         self._testcase_lookup_token += 1
@@ -634,6 +723,7 @@ class SessionMetadataDialog:
         if record is None:
             self.testcase_lookup_status_var.set(self._t("未找到该 Testcase ID 的数据库记录", "No database record was found for this test case ID"))
             self.testcase_lookup_details_var.set("")
+            self._start_existing_session_lookup(testcase_id)
             return
 
         self.testcase_lookup_status_var.set(self._t("已匹配到最新数据库记录", "Matched the latest database record"))
@@ -642,6 +732,7 @@ class SessionMetadataDialog:
         )
         if record.script_version and not self.version_number_var.get().strip():
             self.version_number_var.set(record.script_version)
+        self._start_existing_session_lookup(testcase_id)
 
     def _finish_testcase_lookup_error(self, token: int, testcase_id: str, message: str) -> None:
         if token != self._testcase_lookup_token:
@@ -650,6 +741,58 @@ class SessionMetadataDialog:
             return
         self.testcase_lookup_status_var.set(self._t("数据库查询失败", "Database query failed"))
         self.testcase_lookup_details_var.set(message)
+        self._start_existing_session_lookup(testcase_id)
+
+    def _start_existing_session_lookup(self, testcase_id: str) -> None:
+        testcase_id = str(testcase_id or "").strip()
+        if not testcase_id or not self.recordings_root:
+            self.session_lookup_status_var.set("")
+            return
+
+        self._session_lookup_token += 1
+        token = self._session_lookup_token
+        recordings_root = Path(self.recordings_root)
+        self.session_lookup_status_var.set(self._t("正在查询默认 Session 目录...", "Checking the default session folder..."))
+
+        def worker() -> None:
+            try:
+                sessions = _list_existing_sessions_for_testcase(recordings_root, testcase_id, limit=5)
+            except Exception as exc:
+                self.window.after(0, lambda: self._finish_existing_session_lookup_error(token, testcase_id, str(exc)))
+                return
+            self.window.after(0, lambda: self._finish_existing_session_lookup_success(token, testcase_id, recordings_root, sessions))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_existing_session_lookup_success(self, token: int, testcase_id: str, recordings_root: Path, sessions: list[Path]) -> None:
+        if token != self._session_lookup_token:
+            return
+        if testcase_id != self.testcase_id_var.get().strip():
+            return
+        if not sessions:
+            self.session_lookup_status_var.set(self._t("默认 Session 目录未找到该 Testcase 的历史录制。", "No historical session was found for this test case in the default session folder."))
+            return
+        preview_items: list[str] = []
+        for session_dir in sessions[:3]:
+            try:
+                preview_items.append(session_dir.relative_to(recordings_root).as_posix())
+            except ValueError:
+                preview_items.append(str(session_dir))
+        preview = "；".join(preview_items)
+        more_text = self._t(" 等", " etc.") if len(sessions) > 3 else ""
+        self.session_lookup_status_var.set(
+            self._t(
+                f"⚠ 默认 Session 目录已存在该 Testcase 的历史录制：{preview}{more_text}",
+                f"⚠ Historical sessions for this test case already exist in the default session folder: {preview}{more_text}",
+            )
+        )
+
+    def _finish_existing_session_lookup_error(self, token: int, testcase_id: str, message: str) -> None:
+        if token != self._session_lookup_token:
+            return
+        if testcase_id != self.testcase_id_var.get().strip():
+            return
+        self.session_lookup_status_var.set(self._t(f"默认 Session 目录查询失败: {message}", f"Default session folder lookup failed: {message}"))
 
     def _finish_baseline_design_steps_lookup_success(self, token: int, testcase_id: str, baseline_name: str, record) -> None:
         if token != self._baseline_design_steps_token:
@@ -2621,8 +2764,9 @@ def open_session_metadata_dialog(
     parent: tk.Misc,
     draft: SessionMetadataDraft | None = None,
     settings_store: SettingsStore | None = None,
+    recordings_root: Path | None = None,
 ) -> SessionMetadataDraft | None:
-    dialog = SessionMetadataDialog(parent, draft, settings_store=settings_store)
+    dialog = SessionMetadataDialog(parent, draft, settings_store=settings_store, recordings_root=recordings_root)
     parent.wait_window(dialog.window)
     return dialog.result
 

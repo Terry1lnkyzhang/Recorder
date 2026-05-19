@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
-from src.common.session_lock import get_session_lock_path, inspect_session_lock
+from src.common.session_lock import build_session_lock_status_text, get_session_lock_path, inspect_session_lock
 from src.common.session_summary import count_session_events, get_session_summary_path, read_session_summary
 
 
@@ -123,6 +123,7 @@ def scan_session_candidates(
             review_comments = str(cached.get("review_comments", "") or "")
             lock_status = str(cached.get("lock_status", "") or "")
             lock_owner = str(cached.get("lock_owner", "") or "")
+            lock_ip = str(cached.get("lock_ip", "") or "")
             lock_acquired_at = str(cached.get("lock_acquired_at", "") or "")
             is_locked = bool(cached.get("is_locked", False))
             is_lock_stale = bool(cached.get("is_lock_stale", False))
@@ -161,26 +162,27 @@ def scan_session_candidates(
                 review_comments = ""
             lock_started_at = time.perf_counter()
             lock_owner = ""
+            lock_ip = ""
             lock_acquired_at = ""
             if lock_stat is None:
                 is_locked = False
                 is_lock_stale = False
-                lock_status = "空闲"
+                lock_status = build_session_lock_status_text(None)
             else:
                 lock_info = inspect_session_lock(session_dir, auto_clear_stale=True)
                 is_locked = lock_info is not None
                 is_lock_stale = False
                 if lock_info is None:
-                    lock_status = "空闲"
+                    lock_status = build_session_lock_status_text(None)
                 else:
-                    owner_label = lock_info.owner_label or lock_info.owner_kind or "占用中"
-                    lock_status = f"占用中: {owner_label}"
+                    lock_status = build_session_lock_status_text(lock_info)
                     owner_parts = []
                     if lock_info.username:
                         owner_parts.append(lock_info.username)
                     if lock_info.hostname:
                         owner_parts.append(f"@{lock_info.hostname}")
                     lock_owner = "".join(owner_parts)
+                    lock_ip = lock_info.ip_address
                     lock_acquired_at = lock_info.acquired_at
             candidate_lock_seconds = time.perf_counter() - lock_started_at
             lock_seconds += candidate_lock_seconds
@@ -195,6 +197,7 @@ def scan_session_candidates(
                 "review_comments": review_comments,
                 "lock_status": lock_status,
                 "lock_owner": lock_owner,
+                "lock_ip": lock_ip,
                 "lock_acquired_at": lock_acquired_at,
                 "is_locked": is_locked,
                 "is_lock_stale": is_lock_stale,
@@ -216,6 +219,7 @@ def scan_session_candidates(
                 "review_comments": review_comments,
                 "lock_status": lock_status,
                 "lock_owner": lock_owner,
+                "lock_ip": lock_ip,
                 "lock_acquired_at": lock_acquired_at,
                 "is_locked": is_locked,
                 "is_lock_stale": is_lock_stale,
