@@ -1015,6 +1015,8 @@ class SettingsDialog:
         self.remote_ai_service_url_var = tk.StringVar(value=self.settings.remote_ai_service_url)
         self.remote_ai_service_api_key_var = tk.StringVar(value=self.settings.remote_ai_service_api_key)
         self.remote_ai_service_timeout_var = tk.StringVar(value=str(self.settings.remote_ai_service_timeout_seconds))
+        self.auto_save_recording_enabled_var = tk.BooleanVar(value=self.settings.auto_save_recording_enabled)
+        self.auto_save_recording_interval_var = tk.StringVar(value=str(self.settings.auto_save_recording_interval_minutes))
         self.show_design_steps_overlay_var = tk.BooleanVar(value=self.settings.show_design_steps_overlay)
         self.design_steps_overlay_width_var = tk.StringVar(value=str(self.settings.design_steps_overlay_width))
         self.design_steps_overlay_height_var = tk.StringVar(value=str(self.settings.design_steps_overlay_height))
@@ -1213,6 +1215,23 @@ class SettingsDialog:
             justify=tk.LEFT,
         ).grid(row=len(database_rows), column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
+        auto_save_frame = ttk.LabelFrame(parent, text=self._t("录制自动保存", "Recording Auto Save"), padding=12)
+        auto_save_frame.pack(fill=tk.X, pady=(12, 0))
+        auto_save_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            auto_save_frame,
+            text=self._t("录制过程中自动定时保存", "Automatically save while recording"),
+            variable=self.auto_save_recording_enabled_var,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(auto_save_frame, text=self._t("保存间隔(分钟)", "Save interval (minutes)")).grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(auto_save_frame, textvariable=self.auto_save_recording_interval_var, width=12).grid(row=1, column=1, sticky=tk.W, pady=(8, 0))
+        ttk.Label(
+            auto_save_frame,
+            text=self._t("默认 5 分钟保存一次；关闭后仅手动 Save 或 Stop 时落盘。", "Default is every 5 minutes. If disabled, data is persisted only on manual Save or Stop."),
+            wraplength=820,
+            justify=tk.LEFT,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
         overlay_frame = ttk.LabelFrame(parent, text=self._t("Design Steps 悬浮窗", "Design Steps Overlay"), padding=12)
         overlay_frame.pack(fill=tk.X, pady=(12, 0))
         overlay_frame.columnconfigure(1, weight=1)
@@ -1339,6 +1358,8 @@ class SettingsDialog:
                 remote_ai_service_url=self.remote_ai_service_url_var.get().strip(),
                 remote_ai_service_api_key=self.remote_ai_service_api_key_var.get().strip(),
                 remote_ai_service_timeout_seconds=int(self.remote_ai_service_timeout_var.get().strip()),
+                auto_save_recording_enabled=self.auto_save_recording_enabled_var.get(),
+                auto_save_recording_interval_minutes=int(self.auto_save_recording_interval_var.get().strip()),
                 show_design_steps_overlay=self.show_design_steps_overlay_var.get(),
                 design_steps_overlay_width=int(self.design_steps_overlay_width_var.get().strip()),
                 design_steps_overlay_height=int(self.design_steps_overlay_height_var.get().strip()),
@@ -1360,6 +1381,8 @@ class SettingsDialog:
                 raise ValueError(self._t("Design Steps 悬浮窗高度不能小于 160", "Design Steps overlay height must be at least 160"))
             if not 0.1 <= settings.design_steps_overlay_opacity <= 1.0:
                 raise ValueError(self._t("Design Steps 悬浮窗透明度必须在 0.1 到 1 之间", "Design Steps overlay opacity must be between 0.1 and 1"))
+            if settings.auto_save_recording_enabled and settings.auto_save_recording_interval_minutes < 1:
+                raise ValueError(self._t("录制自动保存间隔不能小于 1 分钟", "Recording auto-save interval must be at least 1 minute"))
             self.window.winfo_rgb(settings.design_steps_overlay_bg_color)
         except Exception as exc:
             messagebox.showerror(self._t("保存失败", "Save failed"), str(exc), parent=self.window)
@@ -1488,6 +1511,8 @@ class SettingsDialog:
             remote_ai_service_url=self.remote_ai_service_url_var.get().strip(),
             remote_ai_service_api_key=self.remote_ai_service_api_key_var.get().strip(),
             remote_ai_service_timeout_seconds=int(self.remote_ai_service_timeout_var.get().strip()),
+            auto_save_recording_enabled=self.auto_save_recording_enabled_var.get(),
+            auto_save_recording_interval_minutes=int(self.auto_save_recording_interval_var.get().strip()),
             prompt_db_connection_string=self.prompt_db_connection_var.get().strip(),
             checkpoint_prompt_table=self.checkpoint_prompt_table_var.get().strip() or "agentprompt",
             checkpoint_prompt_key_column=self.checkpoint_prompt_key_column_var.get().strip(),

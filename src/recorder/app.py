@@ -31,7 +31,12 @@ from .capture import select_region
 from .i18n import pick_text
 from .recorder import RecorderEngine
 from .settings import Settings, SettingsStore
-from src.viewer.window import open_viewer_window, pick_session_from_recordings
+from src.viewer.window import (
+    format_checkpoint_background_ai_jobs_message,
+    get_checkpoint_background_ai_job_count,
+    open_viewer_window,
+    pick_session_from_recordings,
+)
 
 
 class DesignStepsOverlay:
@@ -469,6 +474,12 @@ class RecorderApp:
         self.stop_in_progress = False
         self.save_in_progress = False
         self.import_in_progress = False
+        self._close_after_stop = False
+        self._root_close_finalized = False
+        self._close_wait_dialog: tk.Toplevel | None = None
+        self._close_wait_message_var: tk.StringVar | None = None
+        self._auto_save_after_id: str | None = None
+        self._auto_save_in_progress = False
         self.ai_checkpoint_draft = AICheckpointDraft()
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
@@ -602,6 +613,7 @@ class RecorderApp:
         self._show_design_steps_overlay(metadata_draft.design_steps)
         self._set_active_session_text(self._t("录制中", "Recording"))
         self._refresh_controls()
+        self._schedule_auto_save_recording()
 
     def _confirm_recordings_output_dir(self, recordings_dir: RecordingsDirResolution) -> None:
         if recordings_dir.using_network_share:
@@ -702,6 +714,7 @@ class RecorderApp:
             return
 
         self.logger.info("Stop recording requested")
+        self._cancel_auto_save_recording()
         self.stop_in_progress = True
         self._refresh_controls()
         self._set_status(self._t("正在停止录制并等待后台任务落盘...", "Stopping recording and waiting for background tasks to finish..."))
@@ -754,6 +767,81 @@ class RecorderApp:
             self.root.after(0, lambda: self._on_save_success(session_dir, suggestions_path))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _get_auto_save_interval_ms(self) -> int | None:
+        settings = self.current_settings
+        if not bool(getattr(settings, "auto_save_recording_enabled", True)):
+            return None
+        try:
+            interval_minutes = int(getattr(settings, "auto_save_recording_interval_minutes", 5) or 5)
+        except Exception:
+            interval_minutes = 5
+        interval_minutes = max(1, interval_minutes)
+        return interval_minutes * 60 * 1000
+
+    def _cancel_auto_save_recording(self) -> None:
+        if self._auto_save_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._auto_save_after_id)
+        except Exception:
+            pass
+        self._auto_save_after_id = None
+
+    def _schedule_auto_save_recording(self) -> None:
+        self._cancel_auto_save_recording()
+        if not self.engine.is_recording or self.stop_in_progress or self._close_after_stop:
+            return
+        interval_ms = self._get_auto_save_interval_ms()
+        if interval_ms is None:
+            self.logger.info("Recording auto-save is disabled")
+            return
+        self._auto_save_after_id = self.root.after(interval_ms, self._run_auto_save_recording)
+        self.logger.info("Recording auto-save scheduled | interval_ms=%s", interval_ms)
+
+    def _run_auto_save_recording(self) -> None:
+        self._auto_save_after_id = None
+        if not self.engine.is_recording or self.stop_in_progress or self._close_after_stop:
+            return
+        if self.save_in_progress or self._auto_save_in_progress:
+            self.logger.info("Recording auto-save skipped because another save is in progress")
+            self._schedule_auto_save_recording()
+            return
+
+        self._auto_save_in_progress = True
+        self.logger.info("Recording auto-save started")
+
+        def worker() -> None:
+            try:
+                session_dir, suggestions_path = self.engine.save_snapshot()
+            except Exception as exc:
+                message = str(exc)
+                self.logger.exception("Recording auto-save failed")
+                try:
+                    self.root.after(0, lambda message=message: self._on_auto_save_failed(message))
+                except Exception:
+                    pass
+                return
+            try:
+                self.root.after(0, lambda session_dir=session_dir, suggestions_path=suggestions_path: self._on_auto_save_success(session_dir, suggestions_path))
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_auto_save_success(self, session_dir: Path, suggestions_path: Path) -> None:
+        self._auto_save_in_progress = False
+        if self.engine.is_recording and not self.stop_in_progress and not self._close_after_stop:
+            self._set_status(self._t(f"已自动保存: {session_dir} | 建议文件: {suggestions_path.name}", f"Auto-saved: {session_dir} | Suggestions: {suggestions_path.name}"))
+            self._schedule_auto_save_recording()
+        self.logger.info("Recording auto-save completed | session_dir=%s | suggestions=%s", session_dir, suggestions_path)
+
+    def _on_auto_save_failed(self, message: str) -> None:
+        self._auto_save_in_progress = False
+        if self.engine.is_recording and not self.stop_in_progress and not self._close_after_stop:
+            self._set_status(self._t(f"自动保存失败，将等待下次自动保存: {message}", f"Auto-save failed; waiting for next auto-save: {message}"))
+            self._schedule_auto_save_recording()
+        self.logger.error("Recording auto-save failed | message=%s", message)
 
     def toggle_pause_resume(self) -> None:
         if not self.engine.is_recording or self.stop_in_progress or self.save_in_progress:
@@ -1000,6 +1088,7 @@ class RecorderApp:
         self.design_steps_overlay.apply_settings(self.current_settings)
         self.engine.reload_capture_filters()
         if self.engine.is_recording:
+            self._schedule_auto_save_recording()
             metadata = self.engine.store.data.metadata if self.engine.store.data else None
             if self.current_settings.show_design_steps_overlay and metadata is not None:
                 self._show_design_steps_overlay(metadata.design_steps)
@@ -1014,6 +1103,15 @@ class RecorderApp:
         self.session_var.set(self._t(f"已停止: {session_dir.name}", f"Stopped: {session_dir.name}"))
         self.last_session_dir = session_dir
         self._refresh_controls()
+        if self._close_after_stop:
+            if sync_error:
+                self.logger.error("Auto-stop before close completed with sync failure | session_dir=%s | suggestions=%s | local_session_dir=%s | sync_error=%s", session_dir, suggestions_path, local_session_dir, sync_error)
+            else:
+                self.logger.info("Auto-stop before close completed | session_dir=%s | suggestions=%s | local_session_dir=%s", session_dir, suggestions_path, local_session_dir)
+            self._set_status(self._t("录制已停止，正在退出 Recorder...", "Recording stopped; exiting Recorder..."))
+            self._show_close_wait_dialog(self._t("录制已停止，正在退出 Recorder...", "Recording stopped; exiting Recorder..."))
+            self._finalize_root_close_after_recording()
+            return
         if sync_error:
             local_hint = f"\n\n本地录制结果仍保留在:\n{local_session_dir}" if local_session_dir else ""
             self._set_status(self._t(f"本地录制已完成，但同步共享目录失败: {sync_error}", f"Local recording completed, but syncing to the shared folder failed: {sync_error}"))
@@ -1047,6 +1145,21 @@ class RecorderApp:
         self.session_var.set(self._t(f"已停止: {local_session_dir.name}", f"Stopped: {local_session_dir.name}"))
         self.last_session_dir = local_session_dir
         self._refresh_controls()
+        if self._close_after_stop:
+            self._set_status(
+                self._t(
+                    f"本地录制已完成，正在同步到共享目录，完成后自动退出: {local_session_dir.name}",
+                    f"Local recording completed and is syncing to the shared folder. Recorder will exit when done: {local_session_dir.name}",
+                )
+            )
+            self._show_close_wait_dialog(
+                self._t(
+                    f"录制已停止，正在同步到共享目录，请稍候...\n\n{local_session_dir.name}",
+                    f"Recording stopped. Syncing to the shared folder, please wait...\n\n{local_session_dir.name}",
+                )
+            )
+            self.logger.info("Local stop completed before close; waiting for background sync | local_session_dir=%s | suggestions=%s", local_session_dir, local_suggestions_path)
+            return
         self._set_status(
             self._t(
                 f"本地录制已完成，正在后台同步到共享目录: {local_session_dir.name}。可以开始下一条录制。",
@@ -1060,6 +1173,12 @@ class RecorderApp:
         self._release_continued_session_target(local_session_dir)
         if self.last_session_dir == local_session_dir:
             self.last_session_dir = session_dir
+        if self._close_after_stop:
+            self._set_status(self._t(f"同步完成，正在退出 Recorder: {session_dir}", f"Sync completed; exiting Recorder: {session_dir}"))
+            self._show_close_wait_dialog(self._t("同步完成，正在退出 Recorder...", "Sync completed; exiting Recorder..."))
+            self.logger.info("Background sync completed before close | session_dir=%s | suggestions=%s | local_session_dir=%s", session_dir, suggestions_path, local_session_dir)
+            self._finalize_root_close_after_recording()
+            return
         self._set_status(self._t(f"同步完成: {session_dir} | 建议文件: {suggestions_path.name}", f"Sync completed: {session_dir} | Suggestions: {suggestions_path.name}"))
         self.logger.info("Background sync completed | session_dir=%s | suggestions=%s | local_session_dir=%s", session_dir, suggestions_path, local_session_dir)
 
@@ -1067,6 +1186,12 @@ class RecorderApp:
         self._finish_sync_job(local_session_dir)
         self._release_continued_session_target(local_session_dir)
         self.last_session_dir = local_session_dir
+        if self._close_after_stop:
+            self._set_status(self._t(f"同步共享目录失败，本地结果仍保留，正在退出: {local_session_dir}", f"Sync failed. Local output is retained; exiting: {local_session_dir}"))
+            self._show_close_wait_dialog(self._t("同步共享目录失败，本地结果仍保留，正在退出 Recorder...", "Sync failed. Local output is retained; exiting Recorder..."))
+            self.logger.error("Background sync failed before close | local_session_dir=%s | message=%s", local_session_dir, message)
+            self._finalize_root_close_after_recording()
+            return
         self._set_status(self._t(f"同步共享目录失败，本地结果仍保留: {local_session_dir}", f"Sync to shared folder failed. Local output is still available: {local_session_dir}"))
         messagebox.showwarning(
             self._t("同步失败", "Sync failed"),
@@ -1079,7 +1204,11 @@ class RecorderApp:
 
     def _on_stop_failed(self, message: str) -> None:
         self.stop_in_progress = False
+        self._close_after_stop = False
+        self._destroy_close_wait_dialog()
         self._refresh_controls()
+        if self.engine.is_recording:
+            self._schedule_auto_save_recording()
         self.logger.error("Stop recording failed | message=%s", message)
         messagebox.showerror(self._t("停止失败", "Stop failed"), message)
 
@@ -1125,6 +1254,7 @@ class RecorderApp:
         else:
             self._set_status(message)
         self.logger.info("Import-and-continue completed | session_dir=%s | target_session_dir=%s", session_dir, target_session_dir)
+        self._schedule_auto_save_recording()
 
     def _on_import_failed(self, message: str) -> None:
         self.import_in_progress = False
@@ -1140,7 +1270,86 @@ class RecorderApp:
     def _hide_design_steps_overlay(self) -> None:
         self.design_steps_overlay.hide()
 
+    def _show_close_wait_dialog(self, message: str) -> None:
+        if self._root_close_finalized:
+            return
+        if self._close_wait_dialog is not None and self._close_wait_dialog.winfo_exists():
+            if self._close_wait_message_var is not None:
+                self._close_wait_message_var.set(message)
+            try:
+                self._close_wait_dialog.lift(self.root)
+            except Exception:
+                pass
+            return
+
+        self._close_wait_dialog = tk.Toplevel(self.root)
+        self._close_wait_dialog.title(self._t("正在关闭 Recorder", "Closing Recorder"))
+        self._close_wait_dialog.resizable(False, False)
+        self._close_wait_dialog.transient(self.root)
+        self._close_wait_dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        frame = ttk.Frame(self._close_wait_dialog, padding=18)
+        frame.pack(fill=tk.BOTH, expand=True)
+        self._close_wait_message_var = tk.StringVar(value=message)
+        ttk.Label(
+            frame,
+            textvariable=self._close_wait_message_var,
+            wraplength=420,
+            justify=tk.LEFT,
+        ).pack(fill=tk.X)
+        progress = ttk.Progressbar(frame, mode="indeterminate", length=360)
+        progress.pack(fill=tk.X, pady=(14, 0))
+        progress.start(12)
+
+        self._close_wait_dialog.update_idletasks()
+        width = self._close_wait_dialog.winfo_width()
+        height = self._close_wait_dialog.winfo_height()
+        root_x = self.root.winfo_rootx()
+        root_y = self.root.winfo_rooty()
+        root_width = max(1, self.root.winfo_width())
+        root_height = max(1, self.root.winfo_height())
+        x = root_x + max(0, (root_width - width) // 2)
+        y = root_y + max(0, (root_height - height) // 2)
+        self._close_wait_dialog.geometry(f"+{x}+{y}")
+        try:
+            self._close_wait_dialog.lift(self.root)
+            self._close_wait_dialog.focus_set()
+        except Exception:
+            pass
+
+    def _destroy_close_wait_dialog(self) -> None:
+        dialog = self._close_wait_dialog
+        self._close_wait_dialog = None
+        self._close_wait_message_var = None
+        if dialog is None:
+            return
+        try:
+            if dialog.winfo_exists():
+                dialog.destroy()
+        except Exception:
+            pass
+
     def _handle_root_close(self) -> None:
+        if self._root_close_finalized:
+            return
+        if self.engine.is_recording:
+            if self._close_after_stop:
+                self._set_status(self._t("正在停止录制，完成后自动退出 Recorder...", "Stopping recording; Recorder will exit when complete..."))
+                self._show_close_wait_dialog(self._t("正在停止录制请稍候...\n\n停止录制并同步完成后会自动关闭 Recorder。", "Stopping recording, please wait...\n\nRecorder will close automatically after stop and sync complete."))
+                return
+            self.logger.info("Root close requested while recording; auto-stop before exit")
+            self._close_after_stop = True
+            self._set_status(self._t("正在停止录制，完成后自动退出 Recorder...", "Stopping recording; Recorder will exit when complete..."))
+            self._show_close_wait_dialog(self._t("正在停止录制请稍候...\n\n停止录制并同步完成后会自动关闭 Recorder。", "Stopping recording, please wait...\n\nRecorder will close automatically after stop and sync complete."))
+            self._refresh_controls()
+            self.stop_recording()
+            return
+        if self.stop_in_progress:
+            self._close_after_stop = True
+            self._set_status(self._t("正在停止录制，完成后自动退出 Recorder...", "Stopping recording; Recorder will exit when complete..."))
+            self._show_close_wait_dialog(self._t("正在停止录制请稍候...\n\n停止录制并同步完成后会自动关闭 Recorder。", "Stopping recording, please wait...\n\nRecorder will close automatically after stop and sync complete."))
+            self._refresh_controls()
+            return
         active_sync_count = self._get_active_sync_job_count()
         if active_sync_count > 0:
             if not messagebox.askyesno(
@@ -1154,6 +1363,58 @@ class RecorderApp:
                 default="no",
             ):
                 return
+        if self._wait_for_checkpoint_background_ai_before_root_close():
+            return
+        self._destroy_root_window()
+
+    def _wait_for_checkpoint_background_ai_before_root_close(self) -> bool:
+        active_ai_count = get_checkpoint_background_ai_job_count()
+        if active_ai_count <= 0:
+            return False
+        message = format_checkpoint_background_ai_jobs_message(self.current_settings.ui_language)
+        self._set_status(self._t("正在等待后台 AI 分析完成，完成后自动退出 Recorder...", "Waiting for background AI analysis to finish; Recorder will exit when done..."))
+        self._show_close_wait_dialog(message)
+        self.root.after(1000, self._finalize_root_close_after_background_ai)
+        return True
+
+    def _finalize_root_close_after_background_ai(self) -> None:
+        if self._root_close_finalized:
+            return
+        if get_checkpoint_background_ai_job_count() > 0:
+            self._show_close_wait_dialog(format_checkpoint_background_ai_jobs_message(self.current_settings.ui_language))
+            self.root.after(1000, self._finalize_root_close_after_background_ai)
+            return
+        self._destroy_root_window()
+
+    def _finalize_root_close_after_recording(self) -> None:
+        if self._root_close_finalized:
+            return
+        active_sync_count = self._get_active_sync_job_count()
+        if active_sync_count > 0:
+            self._set_status(
+                self._t(
+                    f"正在等待 {active_sync_count} 个同步任务完成，完成后自动退出 Recorder...",
+                    f"Waiting for {active_sync_count} sync job(s) to finish; Recorder will exit when done...",
+                )
+            )
+            self._show_close_wait_dialog(
+                self._t(
+                    f"正在等待 {active_sync_count} 个同步任务完成，请稍候...",
+                    f"Waiting for {active_sync_count} sync job(s) to finish, please wait...",
+                )
+            )
+            self.root.after(1000, self._finalize_root_close_after_recording)
+            return
+        if self._wait_for_checkpoint_background_ai_before_root_close():
+            return
+        self._destroy_root_window()
+
+    def _destroy_root_window(self) -> None:
+        if self._root_close_finalized:
+            return
+        self._root_close_finalized = True
+        self._cancel_auto_save_recording()
+        self._destroy_close_wait_dialog()
         self.design_steps_overlay.destroy()
         self.root.destroy()
 
@@ -1165,6 +1426,24 @@ class RecorderApp:
         self.session_var.set(f"{prefix}: {session_dir.name}")
 
     def _refresh_controls(self) -> None:
+        if self._close_after_stop:
+            for button in (
+                self.start_button,
+                self.import_button,
+                self.stop_button,
+                self.save_button,
+                self.pause_resume_button,
+                self.comment_button,
+                self.wait_button,
+                self.screenshot_button,
+                self.checkpoint_button,
+                self.viewer_button,
+                self.android_button,
+                self.settings_button,
+            ):
+                button.configure(state=tk.DISABLED)
+            return
+
         is_recording = self.engine.is_recording
         can_operate = is_recording and not self.stop_in_progress and not self.save_in_progress
 
@@ -1352,6 +1631,17 @@ class RecorderApp:
 
         percent = 100.0 if total_files <= 0 else min(100.0, max(0.0, files_copied / total_files * 100.0))
         active_suffix = f" | 后台同步任务 {active_count}" if active_count > 1 else ""
+        if self._close_after_stop:
+            message = self._t(
+                f"正在同步到共享目录: {local_session_dir.name} {percent:.1f}% ({files_copied}/{total_files} 个文件，{self._format_bytes(bytes_copied)}/{self._format_bytes(total_bytes)}){active_suffix}；完成后自动退出。",
+                f"Syncing to shared folder: {local_session_dir.name} {percent:.1f}% ({files_copied}/{total_files} files, {self._format_bytes(bytes_copied)}/{self._format_bytes(total_bytes)}){active_suffix}; Recorder will exit when done.",
+            )
+            self._set_status(message)
+            try:
+                self.root.after(0, lambda message=message: self._show_close_wait_dialog(message))
+            except Exception:
+                pass
+            return
         self._set_status(
             self._t(
                 f"正在同步到共享目录: {local_session_dir.name} {percent:.1f}% ({files_copied}/{total_files} 个文件，{self._format_bytes(bytes_copied)}/{self._format_bytes(total_bytes)}){active_suffix}；可继续录制下一条。",

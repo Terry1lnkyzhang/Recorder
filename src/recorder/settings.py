@@ -42,6 +42,8 @@ class Settings:
     remote_ai_service_url: str = "http://127.0.0.1:8010"
     remote_ai_service_api_key: str = ""
     remote_ai_service_timeout_seconds: int = 180
+    auto_save_recording_enabled: bool = True
+    auto_save_recording_interval_minutes: int = 5
     show_design_steps_overlay: bool = True
     design_steps_overlay_width: int = 520
     design_steps_overlay_height: int = 220

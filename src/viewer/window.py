@@ -23,8 +23,6 @@ from src.ai import AISuggestionService
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.method_mapping import resolve_method_name_for_event
 from src.ai.prompt_builder import build_step_observation_prompt
-from src.ai.remote_service_client import RemoteAIServiceClient
-from src.ai.session_analyzer import SessionWorkflowAnalyzer
 from src.ai.suggestions import MethodParameterSuggestion
 from src.common.app_logging import get_logger
 from src.common.display_utils import prepare_image_path_for_ai
@@ -62,6 +60,155 @@ from .cleaning import CleaningSuggestion, apply_cleaning_suggestions, build_clea
 
 
 logger = get_logger("viewer")
+
+_CHECKPOINT_BACKGROUND_AI_LOCK = threading.Lock()
+_CHECKPOINT_BACKGROUND_AI_JOBS: dict[str, dict[str, object]] = {}
+
+
+def get_checkpoint_background_ai_job_count() -> int:
+    with _CHECKPOINT_BACKGROUND_AI_LOCK:
+        return len(_CHECKPOINT_BACKGROUND_AI_JOBS)
+
+
+def get_checkpoint_background_ai_jobs_snapshot() -> list[dict[str, object]]:
+    with _CHECKPOINT_BACKGROUND_AI_LOCK:
+        return [dict(job) for job in _CHECKPOINT_BACKGROUND_AI_JOBS.values()]
+
+
+def format_checkpoint_background_ai_jobs_message(ui_language: str) -> str:
+    jobs = get_checkpoint_background_ai_jobs_snapshot()
+    if not jobs:
+        return pick_text(ui_language, "后台 AI 分析已完成，正在关闭 Recorder...", "Background AI analysis completed; closing Recorder...")
+    lines = [
+        pick_text(
+            ui_language,
+            f"正在进行 {len(jobs)} 个后台 AI 分析任务。",
+            f"{len(jobs)} background AI analysis job(s) are running.",
+        ),
+        pick_text(ui_language, "执行完成后会自动关闭 Recorder。", "Recorder will close automatically when they finish."),
+        "",
+    ]
+    for job in jobs[:5]:
+        session_name = Path(str(job.get("session_dir", ""))).name or "session"
+        processed = int(job.get("processed", 0) or 0)
+        total = int(job.get("total", 0) or 0)
+        status = str(job.get("status", "running") or "running")
+        if total > 0:
+            lines.append(f"- {session_name}: {processed}/{total} | {status}")
+        else:
+            lines.append(f"- {session_name}: {status}")
+    if len(jobs) > 5:
+        lines.append(f"... +{len(jobs) - 5}")
+    return "\n".join(lines)
+
+
+def _coerce_positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = int(text)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _coerce_optional_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_invalid_step_ids(item: dict[str, object]) -> list[int]:
+    raw_step_ids = item.get("step_ids", [])
+    candidates: list[object]
+    if isinstance(raw_step_ids, list):
+        candidates = list(raw_step_ids)
+    else:
+        candidates = []
+
+    single_step_id = item.get("step_id")
+    if single_step_id is not None:
+        candidates.append(single_step_id)
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        step_id = _coerce_positive_int(candidate)
+        if step_id is None or step_id in seen:
+            continue
+        seen.add(step_id)
+        normalized.append(step_id)
+    return normalized
+
+
+def _build_invalid_step_groups(analysis: dict[str, object] | None, event_count: int) -> list[dict[str, object]]:
+    if not isinstance(analysis, dict) or event_count <= 0:
+        return []
+
+    raw_items = analysis.get("invalid_steps", [])
+    if not isinstance(raw_items, list):
+        return []
+
+    groups: list[dict[str, object]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+
+        item = dict(raw_item)
+        step_ids = _normalize_invalid_step_ids(item)
+        kept_step_id = _coerce_positive_int(item.get("kept_step_id"))
+        row_indexes: list[int] = []
+        seen_rows: set[int] = set()
+        for step_id in step_ids:
+            if kept_step_id is not None and step_id == kept_step_id:
+                continue
+            row_index = step_id - 1
+            if row_index < 0 or row_index >= event_count or row_index in seen_rows:
+                continue
+            seen_rows.add(row_index)
+            row_indexes.append(row_index)
+        if not row_indexes:
+            continue
+
+        decision = str(item.get("decision", "review") or "review").strip().lower()
+        if decision not in {"delete", "review"}:
+            decision = "review"
+        confidence = _coerce_optional_float(item.get("confidence"))
+        if confidence is not None:
+            confidence = max(0.0, min(1.0, confidence))
+
+        group: dict[str, object] = {
+            "step_ids": step_ids,
+            "row_indexes": row_indexes,
+            "decision": decision,
+            "category": str(item.get("category", "") or "").strip(),
+            "reason": str(item.get("reason", "") or "").strip(),
+            "default_checked": decision == "delete",
+            "source": item,
+        }
+        if kept_step_id is not None:
+            group["kept_step_id"] = kept_step_id
+        if confidence is not None:
+            group["confidence"] = confidence
+        groups.append(group)
+    return groups
 
 
 def _pick_directory_with_internal_dialog(
@@ -838,6 +985,7 @@ def pick_session_from_recordings(
             return
         item = visible_sessions[int(selection[0])]
         session_dir = Path(str(item.get("path", "")))
+        previous_status = normalize_session_review_status(item.get("review_status", ""))
         if bool(item.get("is_locked", False)):
             messagebox.showinfo(
                 t("Session 占用中", "Session Locked"),
@@ -938,10 +1086,7 @@ def pick_session_from_recordings(
         if on_review_saved is not None:
             on_review_saved(session_dir, metadata_payload, previous_status)
         _refresh_session_tree()
-        if previous_status != normalized_status and normalized_status == SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE:
-            status_var.set(t("状态已保存；已在后台启动 AI 分析。", "Status saved; AI analysis started in the background."))
-        else:
-            status_var.set(t("状态、备注和转换人员已保存", "Status, comments, and converter saved"))
+        status_var.set(t("状态、备注和转换人员已保存", "Status, comments, and converter saved"))
 
     def _open_path(path: Path) -> None:
         try:
@@ -1006,7 +1151,6 @@ class RecorderViewerWindow:
         self._event_list_batch_size = 300
         self._session_load_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
-        self._checkpoint_auto_ai_sessions: set[str] = set()
         self._synchronizing_tree_selection = False
         self.copied_event_rows: list[dict[str, object]] = []
         self.cleaning_suggestions: list[CleaningSuggestion] = []
@@ -1022,7 +1166,7 @@ class RecorderViewerWindow:
         self.parameter_prompt_by_step: dict[int, str] = {}
         self.parameter_response_by_step: dict[int, str] = {}
         self._current_parameter_items: list[object] = []
-        self.current_analyzer: SessionWorkflowAnalyzer | OpenAICompatibleAIClient | None = None
+        self.current_analyzer: OpenAICompatibleAIClient | None = None
         self.close_callback = None
         self.analysis_running = False
         self.analysis_cancel_event = threading.Event()
@@ -1081,6 +1225,9 @@ class RecorderViewerWindow:
     def _handle_close(self) -> None:
         if self.analysis_running:
             self.cancel_ai_analysis()
+        self._finish_viewer_close()
+
+    def _finish_viewer_close(self) -> None:
         self._close_event_list_window()
         self._release_session_lock_handle()
         if self.close_callback:
@@ -1392,7 +1539,7 @@ class RecorderViewerWindow:
                 self.session_data["metadata"] = metadata
                 self.session_converter_person_var.set(normalized_converter_person)
                 self.summary_var.set(self._build_session_summary_text())
-            self._maybe_start_checkpoint_complete_ai_analysis(session_dir, previous_review_status, normalized_status)
+            self._maybe_start_checkpoint_missing_ai_analysis(session_dir, previous_review_status, normalized_status)
 
         session_dir = pick_session_from_recordings(
             self.window,
@@ -1407,72 +1554,190 @@ class RecorderViewerWindow:
         if session_dir is not None:
             self.load_session(session_dir)
 
-    def _maybe_start_checkpoint_complete_ai_analysis(self, session_dir: Path, previous_status: str, current_status: str) -> None:
+    def _maybe_start_checkpoint_missing_ai_analysis(self, session_dir: Path, previous_status: str, current_status: str) -> None:
         if normalize_session_review_status(previous_status) == SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE:
             return
         if normalize_session_review_status(current_status) != SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE:
             return
-        self._start_checkpoint_complete_ai_analysis(session_dir)
+        self._start_checkpoint_missing_ai_analysis(session_dir)
 
-    def _start_checkpoint_complete_ai_analysis(self, session_dir: Path) -> None:
+    def _start_checkpoint_missing_ai_analysis(self, session_dir: Path) -> None:
         resolved_session_dir = Path(os.path.abspath(os.fspath(session_dir)))
-        session_key = os.path.normcase(os.fspath(resolved_session_dir))
-        if session_key in self._checkpoint_auto_ai_sessions:
-            logger.info("Checkpoint auto AI analysis is already running | session_dir=%s", resolved_session_dir)
-            return
-        self._checkpoint_auto_ai_sessions.add(session_key)
-        logger.info("Checkpoint auto AI analysis started | session_dir=%s", resolved_session_dir)
-        if self._is_current_session_path(resolved_session_dir) and not self.analysis_running:
-            self.ai_var.set(self._t("检查点完成，后台 AI 分析已启动...", "Checkpoint complete; background AI analysis started..."))
+        job_key = os.path.normcase(os.fspath(resolved_session_dir))
+        with _CHECKPOINT_BACKGROUND_AI_LOCK:
+            if job_key in _CHECKPOINT_BACKGROUND_AI_JOBS:
+                logger.info("Checkpoint missing-row AI analysis already running | session_dir=%s", resolved_session_dir)
+                return
+            _CHECKPOINT_BACKGROUND_AI_JOBS[job_key] = {
+                "session_dir": str(resolved_session_dir),
+                "started_at": time.time(),
+                "status": "starting",
+                "processed": 0,
+                "total": 0,
+            }
+        logger.info("Checkpoint missing-row AI analysis queued | session_dir=%s", resolved_session_dir)
 
         def worker() -> None:
-            success = False
-            message = ""
             try:
-                session_path = resolved_session_dir / "session.json"
-                session_data = json.loads(session_path.read_text(encoding="utf-8"))
-                if not isinstance(session_data, dict):
-                    raise ValueError("session.json 格式无效")
-                settings = self.settings_store.load()
-                if settings.use_remote_ai_service:
-                    result = RemoteAIServiceClient(settings).analyze_session(resolved_session_dir, session_data)
-                    self._write_ai_analysis_payload(resolved_session_dir, result.to_dict())
-                else:
-                    result = SessionWorkflowAnalyzer(settings).analyze(resolved_session_dir, session_data)
-                    self._write_ai_analysis_payload(resolved_session_dir, result.to_dict())
-                success = True
-                message = "AI 分析完成"
-                logger.info("Checkpoint auto AI analysis completed | session_dir=%s", resolved_session_dir)
-            except Exception as exc:
-                message = str(exc)
-                logger.exception("Checkpoint auto AI analysis failed | session_dir=%s", resolved_session_dir)
-                try:
-                    (resolved_session_dir / "ai_analysis_auto_error.txt").write_text(message, encoding="utf-8")
-                except Exception:
-                    pass
+                self._run_checkpoint_missing_ai_analysis_job(job_key, resolved_session_dir)
+            except Exception:
+                logger.exception("Checkpoint missing-row AI analysis failed | session_dir=%s", resolved_session_dir)
             finally:
-                self._checkpoint_auto_ai_sessions.discard(session_key)
-                try:
-                    self.window.after(0, lambda success=success, message=message, session_dir=resolved_session_dir: self._on_checkpoint_auto_ai_analysis_finished(session_dir, success, message))
-                except Exception:
-                    pass
+                self._finish_checkpoint_background_ai_job(job_key, resolved_session_dir)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _write_ai_analysis_payload(self, session_dir: Path, analysis: dict[str, object]) -> None:
+    def _run_checkpoint_missing_ai_analysis_job(self, job_key: str, session_dir: Path) -> None:
+        settings = self.settings_store.load()
+        session_path = session_dir / "session.json"
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"session.json 格式无效: {session_path}")
+        raw_events = payload.get("events", [])
+        events = [item if isinstance(item, dict) else {} for item in raw_events] if isinstance(raw_events, list) else []
+        existing_analysis = self._load_ai_analysis(session_dir) or {}
+        missing_rows = self._build_missing_ai_analysis_row_indexes(session_dir, events, existing_analysis, settings)
+        self._update_checkpoint_background_ai_job(job_key, status="detected", processed=0, total=len(missing_rows))
+        logger.info(
+            "Checkpoint missing-row AI analysis detected rows | session_dir=%s | missing_count=%s | rows=%s",
+            session_dir,
+            len(missing_rows),
+            [row_index + 1 for row_index in missing_rows],
+        )
+        if not missing_rows:
+            return
+
+        client = OpenAICompatibleAIClient(settings)
+        analyses: list[dict[str, object]] = []
+        for position, row_index in enumerate(missing_rows, start=1):
+            targets = self._build_ai_analysis_targets_for_session([row_index], settings, session_dir, payload, events)
+            if not targets:
+                logger.info(
+                    "Checkpoint missing-row AI analysis skipped row after target check | session_dir=%s | step_id=%s | processed=%s/%s",
+                    session_dir,
+                    row_index + 1,
+                    position,
+                    len(missing_rows),
+                )
+                self._update_checkpoint_background_ai_job(job_key, status="skipped", processed=position, total=len(missing_rows))
+                continue
+            target = targets[0]
+            self._update_checkpoint_background_ai_job(job_key, status="running", processed=position - 1, total=len(missing_rows))
+            logger.info(
+                "Checkpoint missing-row AI analysis running | session_dir=%s | step_id=%s | progress=%s/%s",
+                session_dir,
+                target.get("step_id"),
+                position,
+                len(missing_rows),
+            )
+            user_prompt = self._build_ai_analysis_user_prompt(targets)
+            system_prompt = self._build_ai_analysis_system_prompt(targets, settings)
+            try:
+                response = client.query(
+                    user_prompt=user_prompt,
+                    image_paths=[target["image_path"]],
+                    system_prompt=system_prompt,
+                    progress_callback=lambda stage, progress_payload, step_id=target.get("step_id"), position=position, total=len(missing_rows): logger.info(
+                        "Checkpoint missing-row AI analysis progress | session_dir=%s | step_id=%s | progress=%s/%s | stage=%s | payload=%s",
+                        session_dir,
+                        step_id,
+                        position,
+                        total,
+                        stage,
+                        progress_payload,
+                    ),
+                )
+                analyses.append(self._build_single_pass_ai_analysis_result_for_session(targets, str(response.get("response_text", "")), user_prompt, payload, session_dir))
+            except Exception:
+                logger.exception(
+                    "Checkpoint missing-row AI analysis row failed | session_dir=%s | step_id=%s | progress=%s/%s",
+                    session_dir,
+                    target.get("step_id"),
+                    position,
+                    len(missing_rows),
+                )
+                self._update_checkpoint_background_ai_job(job_key, status="row_failed", processed=position, total=len(missing_rows))
+                continue
+            self._update_checkpoint_background_ai_job(job_key, status="running", processed=position, total=len(missing_rows))
+            logger.info(
+                "Checkpoint missing-row AI analysis row completed | session_dir=%s | step_id=%s | progress=%s/%s",
+                session_dir,
+                target.get("step_id"),
+                position,
+                len(missing_rows),
+            )
+
+        if not analyses:
+            return
+        partial_analysis = self._combine_single_pass_ai_analysis_results_for_session(analyses, 1, payload, session_dir)
+        selected_step_ids = {row_index + 1 for row_index in missing_rows}
+        merged_analysis = self._merge_selected_ai_analysis(existing_analysis, partial_analysis, selected_step_ids)
+        self._persist_ai_analysis_for_session(session_dir, merged_analysis)
+        logger.info(
+            "Checkpoint missing-row AI analysis wrote result | session_dir=%s | analyzed_count=%s | total_missing=%s",
+            session_dir,
+            len(analyses),
+            len(missing_rows),
+        )
+
+        if self._is_current_session_path(session_dir):
+            try:
+                if self.window.winfo_exists():
+                    self.window.after(0, self._update_historical_ai_button_state)
+            except Exception:
+                pass
+
+    def _build_missing_ai_analysis_row_indexes(self, session_dir: Path, events: list[dict[str, object]], analysis: dict[str, object], settings) -> list[int]:
+        analyzed_step_ids = self._build_analyzed_ai_step_ids(analysis)
+        missing_rows: list[int] = []
+        for row_index, event in enumerate(events):
+            step_id = row_index + 1
+            if step_id in analyzed_step_ids:
+                continue
+            if self._is_event_supported_for_ai_analysis_in_session(event, settings, session_dir):
+                missing_rows.append(row_index)
+        return missing_rows
+
+    def _build_analyzed_ai_step_ids(self, analysis: dict[str, object] | None) -> set[int]:
+        if not isinstance(analysis, dict):
+            return set()
+        step_ids: set[int] = set()
+        for key in ("step_observations", "step_insights"):
+            values = analysis.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for item in values:
+                if not isinstance(item, dict):
+                    continue
+                step_id = _coerce_positive_int(item.get("step_id"))
+                if step_id is not None:
+                    step_ids.add(step_id)
+        for batch in analysis.get("batches", []) if isinstance(analysis.get("batches", []), list) else []:
+            if not isinstance(batch, dict):
+                continue
+            event_indexes = batch.get("event_indexes", []) if isinstance(batch.get("event_indexes", []), list) else []
+            for value in event_indexes:
+                step_id = _coerce_positive_int(value)
+                if step_id is not None:
+                    step_ids.add(step_id)
+        return step_ids
+
+    def _combine_single_pass_ai_analysis_results_for_session(
+        self,
+        analyses: list[dict[str, object]],
+        batch_size: int,
+        session_data: dict[str, object],
+        session_dir: Path,
+    ) -> dict[str, object]:
+        combined = self._combine_single_pass_ai_analysis_results(analyses, batch_size)
+        combined["session_id"] = str(session_data.get("session_id", session_dir.name))
+        return combined
+
+    def _persist_ai_analysis_for_session(self, session_dir: Path, analysis: dict[str, object]) -> None:
         analysis_path = session_dir / "ai_analysis.json"
         yaml_path = session_dir / "ai_analysis.yaml"
         analysis_path.write_text(json.dumps(analysis, indent=2, ensure_ascii=False), encoding="utf-8")
         yaml_path.write_text(yaml.safe_dump(analysis, allow_unicode=True, sort_keys=False), encoding="utf-8")
-
-    def _on_checkpoint_auto_ai_analysis_finished(self, session_dir: Path, success: bool, message: str) -> None:
-        if not self._is_current_session_path(session_dir) or self.analysis_running:
-            return
-        self._update_historical_ai_button_state()
-        if success:
-            self.ai_var.set(self._t("后台 AI 分析完成，可点击“加载历史AI结果”查看。", "Background AI analysis completed. Load historical AI results to view it."))
-        else:
-            self.ai_var.set(self._t(f"后台 AI 分析失败：{message}", f"Background AI analysis failed: {message}"))
 
     def _is_current_session_path(self, session_dir: Path) -> bool:
         if not self.session_dir:
@@ -1480,6 +1745,21 @@ class RecorderViewerWindow:
         current_key = os.path.normcase(os.path.abspath(os.fspath(self.session_dir)))
         target_key = os.path.normcase(os.path.abspath(os.fspath(session_dir)))
         return current_key == target_key
+
+    def _update_checkpoint_background_ai_job(self, job_key: str, **updates: object) -> None:
+        with _CHECKPOINT_BACKGROUND_AI_LOCK:
+            job = _CHECKPOINT_BACKGROUND_AI_JOBS.get(job_key)
+            if job is not None:
+                job.update(updates)
+
+    def _finish_checkpoint_background_ai_job(self, job_key: str, session_dir: Path) -> None:
+        with _CHECKPOINT_BACKGROUND_AI_LOCK:
+            job = _CHECKPOINT_BACKGROUND_AI_JOBS.pop(job_key, None)
+            remaining = len(_CHECKPOINT_BACKGROUND_AI_JOBS)
+        if job is None:
+            return
+        elapsed = max(0.0, time.time() - float(job.get("started_at", time.time()) or time.time()))
+        logger.info("Checkpoint missing-row AI analysis finished | session_dir=%s | elapsed_seconds=%.1f | remaining_jobs=%s", session_dir, elapsed, remaining)
 
     def _prompt_session_to_import(self) -> Path | None:
         sessions = self._find_session_candidates(self.recordings_root)
@@ -2935,6 +3215,11 @@ class RecorderViewerWindow:
         return [row_index for row_index, event in enumerate(self.event_rows) if self._is_event_supported_for_ai_analysis(event, settings)]
 
     def _is_event_supported_for_ai_analysis(self, event: dict[str, object], settings) -> bool:
+        if not self.session_dir:
+            return False
+        return self._is_event_supported_for_ai_analysis_in_session(event, settings, self.session_dir)
+
+    def _is_event_supported_for_ai_analysis_in_session(self, event: dict[str, object], settings, session_dir: Path) -> bool:
         event_type = self._extract_event_type(event).strip().lower()
         action = format_recorded_action(self._extract_event_action(event)).strip().lower()
         if event_type in {"comment", "checkpoint", "getscreenshot"}:
@@ -2943,7 +3228,7 @@ class RecorderViewerWindow:
             return False
         if self._is_process_excluded_for_ai_analysis(event, settings):
             return False
-        return self._resolve_event_primary_image_path(event) is not None
+        return self._resolve_event_primary_image_path_for_session(session_dir, event) is not None
 
     def _is_process_excluded_for_ai_analysis(self, event: dict[str, object], settings) -> bool:
         process_name = self._normalize_process_name_for_ai_filter(self._extract_process_name(event))
@@ -2978,31 +3263,56 @@ class RecorderViewerWindow:
     def _resolve_event_primary_image_path(self, event: dict[str, object]) -> Path | None:
         if not self.session_dir:
             return None
+        return self._resolve_event_primary_image_path_for_session(self.session_dir, event)
+
+    def _resolve_event_primary_image_path_for_session(self, session_dir: Path, event: dict[str, object]) -> Path | None:
         media_items = event.get("media", [])
         if isinstance(media_items, list):
             for item in media_items:
                 if isinstance(item, dict) and item.get("type") == "image" and item.get("path"):
-                    candidate = self.session_dir / str(item.get("path"))
+                    candidate = session_dir / str(item.get("path"))
                     if candidate.exists():
                         return candidate
         screenshot = event.get("screenshot")
         if screenshot:
-            candidate = self.session_dir / str(screenshot)
+            candidate = session_dir / str(screenshot)
             if candidate.exists():
                 return candidate
         return None
 
     def _build_ai_analysis_targets(self, row_indexes: list[int], settings, upscale_single_selected_image: bool = False) -> list[dict[str, object]]:
-        display_layout = self._get_session_display_layout()
-        cache_dir = self.session_dir / "ai_preprocessed" / "viewer_single_pass"
+        if not self.session_dir or not isinstance(self.session_data, dict):
+            return []
+        return self._build_ai_analysis_targets_for_session(
+            row_indexes,
+            settings,
+            self.session_dir,
+            self.session_data,
+            self.event_rows,
+            upscale_single_selected_image=upscale_single_selected_image,
+        )
+
+    def _build_ai_analysis_targets_for_session(
+        self,
+        row_indexes: list[int],
+        settings,
+        session_dir: Path,
+        session_data: dict[str, object],
+        events: list[dict[str, object]],
+        upscale_single_selected_image: bool = False,
+    ) -> list[dict[str, object]]:
+        display_layout = self._get_session_display_layout_from_payload(session_data)
+        cache_dir = session_dir / "ai_preprocessed" / "viewer_single_pass"
         targets: list[dict[str, object]] = []
         for row_index in row_indexes:
-            if not (0 <= row_index < len(self.event_rows)):
+            if not (0 <= row_index < len(events)):
                 continue
-            event = self.event_rows[row_index]
-            if not self._is_event_supported_for_ai_analysis(event, settings):
+            event = events[row_index]
+            if not isinstance(event, dict):
                 continue
-            image_path = self._resolve_event_primary_image_path(event)
+            if not self._is_event_supported_for_ai_analysis_in_session(event, settings, session_dir):
+                continue
+            image_path = self._resolve_event_primary_image_path_for_session(session_dir, event)
             if image_path is None:
                 continue
             prepared_path, _was_cropped = prepare_image_path_for_ai(
@@ -3013,7 +3323,8 @@ class RecorderViewerWindow:
                 send_fullscreen=settings.send_fullscreen_screenshots,
                 cache_key=f"viewer_single_pass_{row_index + 1:04d}",
             )
-            optimized_path = self._optimize_ai_analysis_image(
+            optimized_path = self._optimize_ai_analysis_image_for_session(
+                session_dir,
                 prepared_path,
                 row_index + 1,
                 upscale_double=upscale_single_selected_image,
@@ -3035,7 +3346,10 @@ class RecorderViewerWindow:
     def _optimize_ai_analysis_image(self, image_path: Path, step_id: int, upscale_double: bool = False) -> Path:
         if not self.session_dir:
             return image_path
-        output_dir = self.session_dir / "ai_preprocessed" / "viewer_single_pass_resized"
+        return self._optimize_ai_analysis_image_for_session(self.session_dir, image_path, step_id, upscale_double=upscale_double)
+
+    def _optimize_ai_analysis_image_for_session(self, session_dir: Path, image_path: Path, step_id: int, upscale_double: bool = False) -> Path:
+        output_dir = session_dir / "ai_preprocessed" / "viewer_single_pass_resized"
         output_dir.mkdir(parents=True, exist_ok=True)
         suffix = "_2x" if upscale_double else ""
         output_path = output_dir / f"step_{step_id:04d}{suffix}.jpg"
@@ -3129,6 +3443,22 @@ class RecorderViewerWindow:
         return json.dumps(instruction, ensure_ascii=False, indent=2)
 
     def _build_single_pass_ai_analysis_result(self, targets: list[dict[str, object]], response_text: str, prompt_text: str) -> dict[str, object]:
+        return self._build_single_pass_ai_analysis_result_for_session(
+            targets,
+            response_text,
+            prompt_text,
+            self.session_data if isinstance(self.session_data, dict) else {},
+            self.session_dir,
+        )
+
+    def _build_single_pass_ai_analysis_result_for_session(
+        self,
+        targets: list[dict[str, object]],
+        response_text: str,
+        prompt_text: str,
+        session_data: dict[str, object],
+        session_dir: Path | None,
+    ) -> dict[str, object]:
         parsed = self._parse_viewer_ai_json(response_text)
         values = parsed.get("step_results", []) if isinstance(parsed, dict) else []
         if not isinstance(values, list) or not values:
@@ -3174,7 +3504,7 @@ class RecorderViewerWindow:
             step_insights.append({"step_id": step_id, "description": observation})
 
         return {
-            "session_id": str((self.session_data or {}).get("session_id", self.session_dir.name if self.session_dir else "")),
+            "session_id": str(session_data.get("session_id", session_dir.name if session_dir else "")),
             "batch_size": len(targets),
             "status": "completed",
             "failure_message": "",
@@ -3185,7 +3515,7 @@ class RecorderViewerWindow:
                     "start_step": targets[0]["step_id"],
                     "end_step": targets[-1]["step_id"],
                     "event_indexes": [item["step_id"] for item in targets],
-                    "image_paths": [str(Path(item["image_path"]).relative_to(self.session_dir).as_posix()) for item in targets],
+                    "image_paths": [self._format_analysis_image_path_for_payload(Path(item["image_path"]), session_dir) for item in targets],
                     "prompt_preview": prompt_text[:2000],
                     "response_text": response_text,
                     "parsed_result": parsed,
@@ -3199,6 +3529,14 @@ class RecorderViewerWindow:
             "analysis_notes": [],
             "workflow_report_markdown": "",
         }
+
+    def _format_analysis_image_path_for_payload(self, image_path: Path, session_dir: Path | None) -> str:
+        if session_dir is not None:
+            try:
+                return image_path.relative_to(session_dir).as_posix()
+            except Exception:
+                pass
+        return str(image_path)
 
     def _combine_single_pass_ai_analysis_results(self, analyses: list[dict[str, object]], batch_size: int) -> dict[str, object]:
         combined = {
@@ -4021,7 +4359,12 @@ class RecorderViewerWindow:
         return batches
 
     def _get_session_display_layout(self) -> dict[str, object] | None:
-        environment = self.session_data.get("environment", {}) if isinstance(self.session_data, dict) and isinstance(self.session_data.get("environment", {}), dict) else {}
+        if not isinstance(self.session_data, dict):
+            return None
+        return self._get_session_display_layout_from_payload(self.session_data)
+
+    def _get_session_display_layout_from_payload(self, session_data: dict[str, object]) -> dict[str, object] | None:
+        environment = session_data.get("environment", {}) if isinstance(session_data.get("environment", {}), dict) else {}
         return environment.get("display_layout") if isinstance(environment, dict) else None
 
     def _optimize_image_for_ai_batch(self, image_path: Path, step_id: int) -> Path:
