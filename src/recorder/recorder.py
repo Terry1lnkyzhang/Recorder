@@ -410,6 +410,7 @@ class RecorderEngine:
                     y,
                     window_seconds,
                 )
+            press_context = self._capture_mouse_press_context(x, y)
             timestamp = utc_now_iso()
             with self._input_state_lock:
                 active_modifiers = self._snapshot_pressed_modifiers_locked()
@@ -427,6 +428,7 @@ class RecorderEngine:
                     "max_distance": 0,
                     "window": window_info,
                     "modifiers": active_modifiers,
+                    **press_context,
                 }
             return
 
@@ -479,16 +481,33 @@ class RecorderEngine:
             "max_distance": max_distance,
         }
 
-        captured_image, captured_image_origin, capture_mode, screenshot_seconds = self._capture_click_screenshot(x, y)
+        capture_metrics = dict(state.get("press_capture_metrics", {})) if not is_drag and isinstance(state.get("press_capture_metrics"), dict) else {}
+        captured_image = state.get("press_captured_image") if not is_drag else None
+        captured_image_origin = state.get("press_captured_image_origin") if not is_drag else None
+        if not is_drag and isinstance(state.get("press_ui_element"), UIElementInfo):
+            job["ui_element"] = state.get("press_ui_element")
+        if not is_drag and isinstance(state.get("press_highlight_rect"), dict):
+            job["highlight_rect"] = copy.deepcopy(state.get("press_highlight_rect"))
+
+        if isinstance(captured_image, Image.Image):
+            capture_mode = f"press_{str(capture_metrics.get('press_screenshot_mode', 'screenshot'))}"
+            screenshot_seconds = 0.0
+            capture_metrics["callback_used_press_snapshot"] = True
+        else:
+            captured_image, captured_image_origin, capture_mode, screenshot_seconds = self._capture_click_screenshot(x, y)
+            capture_metrics["callback_used_press_snapshot"] = False
         callback_seconds = time.perf_counter() - callback_started
         job["captured_image"] = captured_image
         job["captured_image_origin"] = captured_image_origin
-        job["capture_metrics"] = {
-            "callback_window_seconds": round(window_seconds, 4),
-            "callback_screenshot_seconds": round(screenshot_seconds, 4),
-            "callback_screenshot_mode": capture_mode,
-            "callback_total_seconds": round(callback_seconds, 4),
-        }
+        capture_metrics.update(
+            {
+                "callback_window_seconds": round(window_seconds, 4),
+                "callback_screenshot_seconds": round(screenshot_seconds, 4),
+                "callback_screenshot_mode": capture_mode,
+                "callback_total_seconds": round(callback_seconds, 4),
+            }
+        )
+        job["capture_metrics"] = capture_metrics
         self._event_queue.put(job)
         if callback_seconds >= self._slow_click_callback_threshold_seconds:
             self.logger.warning(
@@ -1099,6 +1118,42 @@ class RecorderEngine:
         if not self.is_recording or self._is_capture_paused():
             return
         self._event_queue.put(job)
+
+    def _capture_mouse_press_context(self, x: int, y: int) -> dict[str, object]:
+        context: dict[str, object] = {}
+        metrics: dict[str, object] = {}
+        started = time.perf_counter()
+
+        uia_started = time.perf_counter()
+        ui_element = get_ui_element_at_point(x, y)
+        metrics["press_uia_seconds"] = round(time.perf_counter() - uia_started, 4)
+        metrics["press_uia_status"] = "ok" if self._ui_element_has_identity(ui_element) else "empty"
+        if self._ui_element_has_identity(ui_element):
+            context["press_ui_element"] = ui_element
+            if ui_element.rectangle:
+                context["press_highlight_rect"] = copy.deepcopy(ui_element.rectangle)
+
+        image, origin, capture_mode, screenshot_seconds = self._capture_click_screenshot(x, y)
+        metrics["press_screenshot_seconds"] = round(screenshot_seconds, 4)
+        metrics["press_screenshot_mode"] = capture_mode
+        metrics["press_total_seconds"] = round(time.perf_counter() - started, 4)
+        if isinstance(image, Image.Image):
+            context["press_captured_image"] = image
+            context["press_captured_image_origin"] = origin
+        context["press_capture_metrics"] = metrics
+
+        total_seconds = float(metrics.get("press_total_seconds", 0.0) or 0.0)
+        if total_seconds >= self._slow_click_callback_threshold_seconds:
+            self.logger.warning(
+                "Slow mouse press context capture | x=%s | y=%s | total_seconds=%.3f | uia_seconds=%s | screenshot_seconds=%s | screenshot_mode=%s",
+                x,
+                y,
+                total_seconds,
+                metrics.get("press_uia_seconds"),
+                metrics.get("press_screenshot_seconds"),
+                capture_mode,
+            )
+        return context
 
     def _capture_click_screenshot(self, x: int, y: int) -> tuple[Image.Image | None, tuple[int, int] | None, str, float]:
         started = time.perf_counter()

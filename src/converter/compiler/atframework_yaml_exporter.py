@@ -38,12 +38,13 @@ def _build_atframework_step(suggestion: Any) -> dict[str, Any]:
     expect_result = _extract_text_parameter(parameter_map, param_dict_raw, "Expect")
 
     if method_name in {"ManualCheck", "AgentInterface"}:
+        check_parameter_raw = _remove_check_text_parameters(export_parameter_raw)
         return {
             "ControlName": control_name,
             "Action": "Null",
             "Parameter Value": "",
             "Check": method_name,
-            "Check Parameter Value": export_parameter_value,
+            "Check Parameter Value": _stringify_param_dict(check_parameter_raw),
             "Step Description": step_description,
             "Expect result": expect_result,
         }
@@ -222,6 +223,35 @@ def _build_export_parameter_payload(parameter_map: dict[str, Any]) -> Any:
     return param_dict_value
 
 
+def _remove_check_text_parameters(value: Any) -> Any:
+    if isinstance(value, dict):
+        filtered = {
+            key: item
+            for key, item in value.items()
+            if str(key or "").strip().lower() not in {"description", "expect"}
+        }
+        return filtered or None
+    if isinstance(value, str):
+        parsed = _parse_param_dict_text(value)
+        if isinstance(parsed, dict):
+            return _remove_check_text_parameters(parsed)
+    return value
+
+
+def _parse_param_dict_text(value: str) -> Any:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    try:
+        return ast.literal_eval(text)
+    except Exception:
+        return None
+
+
 def _rewrite_wait_for_exists_screenshot_paths(payload: dict[str, Any], source_root: Path, export_dir: Path) -> None:
     steps = payload.get("Steps")
     if not isinstance(steps, list):
@@ -236,7 +266,7 @@ def _rewrite_wait_for_exists_screenshot_paths(payload: dict[str, Any], source_ro
             continue
         for method_key, payload_key in (("Action", "Parameter Value"), ("Check", "Check Parameter Value")):
             method_name = str(step.get(method_key, "") or "").strip().lower()
-            if method_name != "waitforexists":
+            if method_name not in {"waitforexists", "matchingclick"}:
                 continue
             step[payload_key] = _rewrite_wait_for_exists_parameter_blob(
                 step.get(payload_key),

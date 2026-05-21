@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
@@ -17,12 +18,12 @@ import tkinter as tk
 
 import requests
 import yaml
-from PIL import Image
+from PIL import Image, ImageDraw, ImageTk
 
 from src.ai import AISuggestionService
 from src.ai.client import OpenAICompatibleAIClient
-from src.ai.method_mapping import resolve_method_name_for_event
-from src.ai.prompt_builder import build_step_observation_prompt
+from src.ai.method_mapping import resolve_method_name_for_event, resolve_method_options_for_event
+from src.ai.prompt_builder import build_select_datagrid_rows_observation_prompt, build_step_observation_prompt
 from src.ai.suggestions import MethodParameterSuggestion
 from src.common.app_logging import get_logger
 from src.common.display_utils import prepare_image_path_for_ai
@@ -42,6 +43,7 @@ from src.common.session_summary import (
     write_session_summary_from_session_payload,
 )
 from src.converter.compiler import build_atframework_yaml_dict, export_suggestions_to_atframework_yaml
+from src.converter.registry.loader import load_method_registry
 from src.recorder.i18n import pick_text
 from src.recorder.models import format_recorded_action, normalize_event_type, normalize_keyboard_key_name
 from src.recorder.dialogs import (
@@ -1166,6 +1168,10 @@ class RecorderViewerWindow:
         self.step_method_suggestions: dict[int, str] = {}
         self.step_module_suggestions: dict[int, str] = {}
         self.step_parameter_summaries: dict[int, str] = {}
+        self._method_registry_cache_path: Path | None = None
+        self._method_registry_cache_mtime_ns: int | None = None
+        self._method_registry_entry_cache: dict[str, object] = {}
+        self._registry_has_entries_cache: dict[str, tuple[int, bool]] = {}
         self.parameter_prompt_by_step: dict[int, str] = {}
         self.parameter_response_by_step: dict[int, str] = {}
         self._current_parameter_items: list[object] = []
@@ -1384,9 +1390,16 @@ class RecorderViewerWindow:
         self.details_notebook.add(self.ai_chat_tab, text="AI Chat")
         self.details_notebook.add(coverage_tab, text=self._t("AI总结/覆盖", "AI Summary/Coverage"))
 
-        self.details_text = tk.Text(event_tab, wrap=tk.WORD, font=("Consolas", 10))
+        event_toolbar = ttk.Frame(event_tab)
+        event_toolbar.pack(fill=tk.X, padx=4, pady=(4, 0))
+        ttk.Button(event_toolbar, text="重画 rectangle", command=self.edit_selected_event_rectangle).pack(side=tk.LEFT)
+        ttk.Label(event_toolbar, text="在截图上拖拽框选后自动转换为屏幕坐标").pack(side=tk.LEFT, padx=(8, 0))
+
+        details_body = ttk.Frame(event_tab)
+        details_body.pack(fill=tk.BOTH, expand=True)
+        self.details_text = tk.Text(details_body, wrap=tk.WORD, font=("Consolas", 10))
         self.details_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-        details_scroll = ttk.Scrollbar(event_tab, orient=tk.VERTICAL, command=self.details_text.yview)
+        details_scroll = ttk.Scrollbar(details_body, orient=tk.VERTICAL, command=self.details_text.yview)
         details_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.details_text.configure(yscrollcommand=details_scroll.set, state=tk.DISABLED)
 
@@ -2641,6 +2654,9 @@ class RecorderViewerWindow:
         paste_state = tk.NORMAL if self.copied_event_rows else tk.DISABLED
         menu.add_command(label="粘贴", command=lambda idx=row_index: self.paste_event_rows_after_row(idx), state=paste_state)
         menu.add_separator()
+        edit_rectangle_state = tk.NORMAL if len(selected_rows) == 1 else tk.DISABLED
+        menu.add_command(label="重画 rectangle", command=lambda idx=row_index: self.edit_event_rectangle(idx), state=edit_rectangle_state)
+        menu.add_separator()
         delete_label = "删除选中行" if len(selected_rows) > 1 else "删除"
         menu.add_command(label=delete_label, command=self.delete_selected_events)
 
@@ -2894,7 +2910,6 @@ class RecorderViewerWindow:
 
             self._update_event_comment(index, new_comment)
             self._persist_session()
-            self._invalidate_derived_outputs_for_rows([index], reason="备注")
             self._reload_tree()
             self._reload_event_list_popup()
             self._select_row_index(index)
@@ -3332,12 +3347,15 @@ class RecorderViewerWindow:
                 row_index + 1,
                 upscale_double=upscale_single_selected_image,
             )
+            method_name = self._resolve_ai_analysis_method_name(row_index, event)
+            analysis_mode = self._determine_ai_analysis_mode(event, settings, method_name)
             targets.append(
                 {
                     "row_index": row_index,
                     "step_id": row_index + 1,
                     "image_path": optimized_path,
-                    "analysis_mode": self._determine_ai_analysis_mode(event, settings),
+                    "analysis_mode": analysis_mode,
+                    "method_name": method_name,
                     "event_type": self._extract_event_type(event),
                     "action": self._extract_event_action(event),
                     "process_name": self._extract_process_name(event),
@@ -3369,17 +3387,34 @@ class RecorderViewerWindow:
         except Exception:
             return image_path
 
-    def _determine_ai_analysis_mode(self, event: dict[str, object], settings) -> str:
+    def _resolve_ai_analysis_method_name(self, row_index: int, event: dict[str, object]) -> str:
+        suggestion = self._find_suggestion_by_row_index(row_index)
+        if suggestion is not None:
+            method_name = str(getattr(suggestion, "method_name", "") or "").strip()
+            if method_name:
+                return method_name
+        cached_method_name = str(self.step_method_suggestions.get(row_index, "") or "").strip()
+        if cached_method_name:
+            return cached_method_name
+        return resolve_method_name_for_event(event)
+
+    def _determine_ai_analysis_mode(self, event: dict[str, object], settings, method_name: str = "") -> str:
         if self._is_process_excluded_for_ai_analysis(event, settings):
             return "image_summary"
+        if str(method_name or "").strip().lower() == "selectdatagridrows":
+            return "datagrid_row_locator"
         return "control_observation"
 
     def _build_ai_analysis_user_prompt(self, targets: list[dict[str, object]]) -> str:
+        if self._should_use_datagrid_row_locator_prompt(targets):
+            return build_select_datagrid_rows_observation_prompt(self._build_datagrid_row_locator_prompt_steps(targets))
         if self._should_use_legacy_observation_prompt(targets):
             return build_step_observation_prompt()
         return self._build_single_pass_ai_analysis_prompt(targets)
 
     def _build_ai_analysis_system_prompt(self, targets: list[dict[str, object]], settings) -> str:
+        if self._should_use_datagrid_row_locator_prompt(targets):
+            return "你是桌面自动化表格行定位助手。必须只输出严格 JSON。"
         if self._should_use_legacy_observation_prompt(targets):
             return str(getattr(settings, "analysis_system_prompt", "")).strip() or "你是桌面自动化操作分析助手。"
         return (
@@ -3391,6 +3426,25 @@ class RecorderViewerWindow:
     @staticmethod
     def _should_use_legacy_observation_prompt(targets: list[dict[str, object]]) -> bool:
         return bool(targets) and all(str(item.get("analysis_mode", "")).strip() == "control_observation" for item in targets)
+
+    @staticmethod
+    def _should_use_datagrid_row_locator_prompt(targets: list[dict[str, object]]) -> bool:
+        return bool(targets) and all(str(item.get("analysis_mode", "")).strip() == "datagrid_row_locator" for item in targets)
+
+    @staticmethod
+    def _build_datagrid_row_locator_prompt_steps(targets: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [
+            {
+                "step_id": item["step_id"],
+                "analysis_mode": item["analysis_mode"],
+                "method_name": item.get("method_name", "SelectDataGridRows"),
+                "event_type": item["event_type"],
+                "action": item["action"],
+                "process_name": item["process_name"],
+                "ui_element": item["ui_element"],
+            }
+            for item in targets
+        ]
 
     def _build_prompt_ui_element_for_viewer(self, event: dict[str, object]) -> dict[str, object]:
         ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
@@ -3408,6 +3462,7 @@ class RecorderViewerWindow:
                 "你会按顺序看到多张截图，每张截图对应 steps 数组里的同序步骤。",
                 "必须输出 step_results，且顺序与 steps 一致，step_id 必须原样返回。",
                 "当 analysis_mode=control_observation 时，沿用旧的 FindControlByName 看图规则，输出 control_type、label、relative_position、need_scroll、is_table、action，并尽量同时补 observation。",
+                "当 analysis_mode=datagrid_row_locator 时，红框是表格/DataGrid 里被选择的行，请输出 rowValue 对象，key 为列名、value 为该行单元格值；红框行里所有能看清且非空的列都要列出，不要自行筛选唯一定位列。",
                 "当 analysis_mode=image_summary 时，请只基于当前单张截图，输出详细中文 observation，总结这一步界面上发生了什么、用户在做什么。此时其余字段可留空或省略。",
                 "不要跨步骤合并，不要输出额外解释，只输出 JSON。",
             ],
@@ -3426,6 +3481,12 @@ class RecorderViewerWindow:
                     },
                     {
                         "step_id": 12,
+                        "analysis_mode": "datagrid_row_locator",
+                        "rowValue": {"series": "301", "patientID": "205"},
+                        "observation": "rowValue={\"series\":\"301\",\"patientID\":\"205\"}",
+                    },
+                    {
+                        "step_id": 13,
                         "analysis_mode": "image_summary",
                         "observation": "当前在资源管理器中浏览目标文件夹内容，并准备进行下一步操作。",
                     },
@@ -3435,6 +3496,7 @@ class RecorderViewerWindow:
                 {
                     "step_id": item["step_id"],
                     "analysis_mode": item["analysis_mode"],
+                    "method_name": item.get("method_name", ""),
                     "event_type": item["event_type"],
                     "action": item["action"],
                     "process_name": item["process_name"],
@@ -3466,6 +3528,14 @@ class RecorderViewerWindow:
         values = parsed.get("step_results", []) if isinstance(parsed, dict) else []
         if not isinstance(values, list) or not values:
             values = parsed.get("step_observations", []) if isinstance(parsed, dict) else []
+        if (not isinstance(values, list) or not values) and len(targets) == 1 and isinstance(parsed, dict):
+            target_mode = str(targets[0].get("analysis_mode", ""))
+            if target_mode == "datagrid_row_locator":
+                row_value = self._extract_datagrid_row_value_from_ai_item(parsed)
+                if not row_value:
+                    row_value = self._normalize_datagrid_row_value_payload(parsed)
+                if row_value:
+                    values = [{"step_id": int(targets[0]["step_id"]), "rowValue": row_value}]
         results_by_step: dict[int, dict[str, object]] = {}
         if isinstance(values, list):
             for index, item in enumerate(values):
@@ -3486,7 +3556,8 @@ class RecorderViewerWindow:
             if not observation:
                 continue
             observation_item: dict[str, object] = {"step_id": step_id, "observation": observation}
-            if target["analysis_mode"] == "control_observation":
+            analysis_mode = str(target.get("analysis_mode", ""))
+            if analysis_mode == "control_observation":
                 control_type = str(item.get("control_type", "")).strip()
                 label = str(item.get("label", "")).strip()
                 relative_position = str(item.get("relative_position", "")).strip()
@@ -3503,6 +3574,13 @@ class RecorderViewerWindow:
                 action = str(item.get("action", "")).strip()
                 if action:
                     observation_item["action"] = action
+            elif analysis_mode == "datagrid_row_locator":
+                row_value = self._extract_datagrid_row_value_from_ai_item(item)
+                if row_value:
+                    observation_item["rowValue"] = row_value
+                missing_reason = str(item.get("missing_reason", item.get("reason", "")) or "").strip()
+                if missing_reason:
+                    observation_item["missing_reason"] = missing_reason
             step_observations.append(observation_item)
             step_insights.append({"step_id": step_id, "description": observation})
 
@@ -3583,7 +3661,18 @@ class RecorderViewerWindow:
 
     def _normalize_single_pass_observation_text(self, target: dict[str, object], item: dict[str, object]) -> str:
         direct_observation = self._clean_sentence(str(item.get("observation", item.get("description", ""))))
-        if target["analysis_mode"] != "control_observation":
+        analysis_mode = str(target.get("analysis_mode", ""))
+        if analysis_mode == "datagrid_row_locator":
+            row_value = self._extract_datagrid_row_value_from_ai_item(item)
+            if row_value:
+                return f"rowValue={json.dumps(row_value, ensure_ascii=False, separators=(',', ':'))}"
+            if direct_observation:
+                return direct_observation
+            missing_reason = self._clean_sentence(str(item.get("missing_reason", item.get("reason", "")) or ""))
+            if missing_reason:
+                return f"rowValue={{}} | missing_reason={missing_reason}"
+            return ""
+        if analysis_mode != "control_observation":
             return direct_observation
         parts: list[str] = []
         label = self._clean_sentence(str(item.get("label", "")))
@@ -3606,6 +3695,34 @@ class RecorderViewerWindow:
             return " | ".join(parts)
         return direct_observation
 
+    @classmethod
+    def _extract_datagrid_row_value_from_ai_item(cls, item: dict[str, object]) -> dict[str, str]:
+        for key in ("rowValue", "row_value", "rowLocator", "row_locator", "locator"):
+            value = item.get(key)
+            row_value = cls._normalize_datagrid_row_value_payload(value)
+            if row_value:
+                return row_value
+        return {}
+
+    @staticmethod
+    def _normalize_datagrid_row_value_payload(value: object) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, str] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if not key or raw_value is None:
+                continue
+            if isinstance(raw_value, str):
+                cell_value = raw_value.strip()
+            elif isinstance(raw_value, (int, float, bool)):
+                cell_value = str(raw_value).strip()
+            else:
+                cell_value = json.dumps(raw_value, ensure_ascii=False, default=str).strip()
+            if cell_value:
+                result[key] = cell_value
+        return result
+
     def _parse_viewer_ai_json(self, response_text: str) -> dict[str, object]:
         text = str(response_text or "").strip()
         candidates = [text]
@@ -3616,6 +3733,12 @@ class RecorderViewerWindow:
             try:
                 payload = json.loads(candidate)
             except Exception:
+                try:
+                    payload = ast.literal_eval(candidate)
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    return payload
                 start = candidate.find("{")
                 end = candidate.rfind("}")
                 if start == -1 or end == -1 or end <= start:
@@ -3623,7 +3746,10 @@ class RecorderViewerWindow:
                 try:
                     payload = json.loads(candidate[start : end + 1])
                 except Exception:
-                    continue
+                    try:
+                        payload = ast.literal_eval(candidate[start : end + 1])
+                    except Exception:
+                        continue
             if isinstance(payload, dict):
                 return payload
         raise ValueError("AI 返回无法解析为 JSON。")
@@ -4704,7 +4830,15 @@ class RecorderViewerWindow:
         dialog.wait_window()
         return result["value"]
 
-    def _show_choice_dialog(self, title: str, current_value: str, choices: list[str]) -> str | None:
+    def _show_choice_dialog(
+        self,
+        title: str,
+        current_value: str,
+        choices: list[str],
+        *,
+        label: str = "请选择类型:",
+        allow_custom: bool = False,
+    ) -> str | None:
         dialog = tk.Toplevel(self.window)
         dialog.title(title)
         dialog.geometry("420x140")
@@ -4719,8 +4853,8 @@ class RecorderViewerWindow:
         container.pack(fill=tk.BOTH, expand=True)
         container.columnconfigure(0, weight=1)
 
-        ttk.Label(container, text="请选择类型:").grid(row=0, column=0, sticky="w")
-        combo = ttk.Combobox(container, textvariable=choice_var, state="readonly", values=choices, width=42)
+        ttk.Label(container, text=label).grid(row=0, column=0, sticky="w")
+        combo = ttk.Combobox(container, textvariable=choice_var, state="normal" if allow_custom else "readonly", values=choices, width=42)
         combo.grid(row=1, column=0, sticky="ew", pady=(8, 0))
 
         def save() -> None:
@@ -4764,6 +4898,9 @@ class RecorderViewerWindow:
         if suggestion is None or not self.session_dir or self.suggestion_result is None:
             messagebox.showinfo("提示", f"步骤 {row_index + 1} 暂无可编辑的建议。", parent=self.window)
             return
+        if field_name == "method_name":
+            self._edit_method_suggestion(row_index, suggestion)
+            return
         title = "方法建议" if field_name == "method_name" else "模块建议"
         current_value = str(getattr(suggestion, field_name, "") or "")
         edited_value = self._show_edit_text_dialog(f"编辑步骤 {row_index + 1} {title}", current_value)
@@ -4772,6 +4909,164 @@ class RecorderViewerWindow:
         setattr(suggestion, field_name, edited_value.strip())
         self._persist_suggestion_result()
         self._after_edit_row_content(row_index)
+
+    def _edit_method_suggestion(self, row_index: int, suggestion) -> None:
+        current_value = str(getattr(suggestion, "method_name", "") or "").strip()
+        choices = self._build_method_suggestion_candidates(row_index, suggestion, current_value)
+        edited_value = self._show_choice_dialog(
+            f"编辑步骤 {row_index + 1} 方法建议",
+            current_value,
+            choices,
+            label="请选择方法:",
+            allow_custom=True,
+        )
+        if edited_value is None:
+            return
+        selected_method = edited_value.strip()
+        self._apply_selected_method_suggestion(row_index, suggestion, selected_method)
+        self._persist_suggestion_result()
+        self._refresh_event_row_display(row_index)
+        self._select_row_index(row_index)
+
+    def _build_method_suggestion_candidates(self, row_index: int, suggestion, current_value: str = "") -> list[str]:
+        candidates: list[str] = []
+        seen: set[str] = set()
+
+        def add_candidate(value: object) -> None:
+            name = str(value or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                return
+            candidates.append(name)
+            seen.add(key)
+
+        payload = getattr(suggestion, "candidate_payload", {})
+        option_payloads = payload.get("method_options", []) if isinstance(payload, dict) and isinstance(payload.get("method_options", []), list) else []
+        for item in option_payloads:
+            if isinstance(item, dict):
+                add_candidate(item.get("name", ""))
+
+        event = self.event_rows[row_index] if 0 <= row_index < len(self.event_rows) and isinstance(self.event_rows[row_index], dict) else {}
+        for option in resolve_method_options_for_event(event):
+            add_candidate(option.name)
+
+        add_candidate(current_value)
+        return candidates
+
+    def _apply_selected_method_suggestion(self, row_index: int, suggestion, selected_method: str) -> None:
+        old_method = str(getattr(suggestion, "method_name", "") or "").strip()
+        suggestion.method_name = selected_method
+        suggestion.candidate_payload = self._build_candidate_payload_for_selected_method(row_index, suggestion, selected_method)
+        suggestion.method_summary = str(suggestion.candidate_payload.get("summary", "") or "") if isinstance(suggestion.candidate_payload, dict) else ""
+        if old_method != selected_method:
+            suggestion.parameters = []
+            self.parameter_prompt_by_step.pop(row_index, None)
+            self.parameter_response_by_step.pop(row_index, None)
+            if old_method and selected_method:
+                suggestion.reason = f"人工选择方法：{old_method} -> {selected_method}"
+            elif selected_method:
+                suggestion.reason = f"人工选择方法：{selected_method}"
+            else:
+                suggestion.reason = "人工清空方法建议"
+
+    def _build_candidate_payload_for_selected_method(self, row_index: int, suggestion, selected_method: str) -> dict[str, object]:
+        existing_payload = dict(getattr(suggestion, "candidate_payload", {}) or {}) if isinstance(getattr(suggestion, "candidate_payload", {}), dict) else {}
+        existing_payload.pop("viewer_parameter_summary_override", None)
+        registry_entry = self._find_method_registry_entry(selected_method)
+        if registry_entry is not None:
+            payload: dict[str, object] = asdict(registry_entry)
+        else:
+            payload = {key: value for key, value in existing_payload.items() if key not in {"parameters", "source", "tags", "aliases", "examples", "when_to_use", "when_not_to_use"}}
+
+        payload["method_options"] = self._build_method_option_payloads_for_row(row_index, existing_payload, selected_method)
+        default_name = ""
+        for item in payload["method_options"]:
+            if isinstance(item, dict) and item.get("is_default"):
+                default_name = str(item.get("name", "") or "")
+                break
+        if default_name:
+            payload["default_method_name"] = default_name
+        if selected_method:
+            payload["selected_method_name"] = selected_method
+        return payload
+
+    def _build_method_option_payloads_for_row(self, row_index: int, existing_payload: dict[str, object], selected_method: str = "") -> list[dict[str, object]]:
+        payloads: list[dict[str, object]] = []
+        seen: set[str] = set()
+
+        def add_option(name: object, *, reason: object = "", score: object = 100.0, confidence: object = 1.0, is_default: bool = False) -> None:
+            method_name = str(name or "").strip()
+            key = method_name.lower()
+            if not method_name or key in seen:
+                return
+            entry = self._find_method_registry_entry(method_name)
+            payloads.append(
+                {
+                    "name": method_name,
+                    "reason": str(reason or ""),
+                    "score": score,
+                    "confidence": confidence,
+                    "is_default": is_default,
+                    "available_in_registry": entry is not None,
+                    "summary": str(getattr(entry, "summary", "") or "") if entry is not None else "",
+                }
+            )
+            seen.add(key)
+
+        existing_options = existing_payload.get("method_options", []) if isinstance(existing_payload.get("method_options", []), list) else []
+        for item in existing_options:
+            if isinstance(item, dict):
+                add_option(
+                    item.get("name", ""),
+                    reason=item.get("reason", ""),
+                    score=item.get("score", 100.0),
+                    confidence=item.get("confidence", 1.0),
+                    is_default=bool(item.get("is_default", False)),
+                )
+
+        event = self.event_rows[row_index] if 0 <= row_index < len(self.event_rows) and isinstance(self.event_rows[row_index], dict) else {}
+        for index, option in enumerate(resolve_method_options_for_event(event)):
+            add_option(option.name, reason=option.reason, score=option.score, confidence=option.confidence, is_default=index == 0)
+
+        add_option(selected_method, reason="人工选择的方法", score=100.0, confidence=1.0)
+        return payloads
+
+    def _find_method_registry_entry(self, method_name: str):
+        target = str(method_name or "").strip().lower()
+        if not target:
+            return None
+        return self._get_method_registry_entry_map().get(target)
+
+    def _get_method_registry_entry_map(self) -> dict[str, object]:
+        registry_paths = self._resolve_suggestion_registry_paths()
+        if not registry_paths:
+            return {}
+        methods_path, _scripts_path = registry_paths
+        try:
+            mtime_ns = methods_path.stat().st_mtime_ns
+        except Exception:
+            return {}
+        cached_path = getattr(self, "_method_registry_cache_path", None)
+        cached_mtime = getattr(self, "_method_registry_cache_mtime_ns", None)
+        cached_entries = getattr(self, "_method_registry_entry_cache", {})
+        if cached_path == methods_path and cached_mtime == mtime_ns and isinstance(cached_entries, dict):
+            return cached_entries
+        try:
+            registry = load_method_registry(methods_path)
+        except Exception:
+            self._method_registry_cache_path = methods_path
+            self._method_registry_cache_mtime_ns = mtime_ns
+            self._method_registry_entry_cache = {}
+            return {}
+        entries = {
+            str(getattr(entry, "name", "") or "").strip().lower(): entry
+            for entry in registry.entries
+            if str(getattr(entry, "name", "") or "").strip()
+        }
+        self._method_registry_cache_path = methods_path
+        self._method_registry_cache_mtime_ns = mtime_ns
+        self._method_registry_entry_cache = entries
+        return entries
 
     def _edit_parameter_suggestion(self, row_index: int) -> None:
         suggestion = self._find_suggestion_by_row_index(row_index)
@@ -4791,7 +5086,8 @@ class RecorderViewerWindow:
         if isinstance(getattr(suggestion, "candidate_payload", None), dict):
             suggestion.candidate_payload.pop("viewer_parameter_summary_override", None)
         self._persist_suggestion_result()
-        self._after_edit_row_content(row_index)
+        self._refresh_event_row_display(row_index)
+        self._select_row_index(row_index)
 
     def _edit_ai_note(self, row_index: int) -> None:
         current_value = self._describe_event_for_view(row_index, self.event_rows[row_index])
@@ -4816,6 +5112,16 @@ class RecorderViewerWindow:
     def _after_edit_row_content(self, row_index: int) -> None:
         self._reload_tree()
         self._select_row_index(row_index)
+
+    def _refresh_event_row_display(self, row_index: int) -> None:
+        if not (0 <= row_index < len(self.event_rows)):
+            return
+        values = self._build_event_row_values(row_index, self.event_rows[row_index])
+        row_id = str(row_index)
+        if self.tree.exists(row_id):
+            self.tree.item(row_id, values=values, tags=self._build_row_tags(row_index))
+        if self.event_list_tree is not None and self.event_list_tree.winfo_exists() and self.event_list_tree.exists(row_id):
+            self.event_list_tree.item(row_id, values=values, tags=self._build_row_tags(row_index))
 
     def _invalidate_derived_outputs_for_rows(self, row_indexes: list[int], *, reason: str) -> None:
         normalized_rows = sorted({row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)})
@@ -5158,12 +5464,14 @@ class RecorderViewerWindow:
         if not normalized_row_indexes:
             return
         self.copied_event_rows = []
+        source_session_dir = str(self.session_dir) if self.session_dir else ""
         for selected_row_index in normalized_row_indexes:
             suggestion = self._find_suggestion_by_row_index(selected_row_index)
             self.copied_event_rows.append(
                 {
                     "event": copy.deepcopy(self.event_rows[selected_row_index]),
                     "suggestion": copy.deepcopy(suggestion) if suggestion is not None else None,
+                    "source_session_dir": source_session_dir,
                 }
             )
         if len(normalized_row_indexes) == 1:
@@ -5670,6 +5978,11 @@ class RecorderViewerWindow:
         if engine is None or engine.store.session_dir is None or not self.session_data:
             return
         inserted_events = [self._clone_recorded_event_for_current_session(event, source_session_dir, engine) for event in recorded_events]
+        self._insert_cloned_events_after_row(row_index, inserted_events)
+
+    def _insert_cloned_events_after_row(self, row_index: int, inserted_events: list[dict[str, object]]) -> None:
+        if not self.session_data or not inserted_events:
+            return
         insert_at = row_index + 1
         original_event_count = len(self.event_rows)
         self.event_rows[insert_at:insert_at] = inserted_events
@@ -5684,19 +5997,43 @@ class RecorderViewerWindow:
         self._select_row_index(insert_at)
 
     def _insert_copied_events_after_row(self, row_index: int, copied_events: list[dict[str, object]]) -> None:
-        if not self.session_dir:
+        if not self.session_dir or not self.session_data:
             return
-        clipboard_events = [
-            copy.deepcopy(item.get("event"))
-            for item in copied_events
-            if isinstance(item, dict) and isinstance(item.get("event"), dict)
-        ]
-        if not clipboard_events:
+        engine = self._create_session_edit_engine()
+        if engine is None or engine.store.session_dir is None:
             return
-        self._insert_recorded_events_after_row(row_index, clipboard_events, self.session_dir)
-        self._apply_copied_suggestions_after_insertion(row_index, copied_events)
 
-    def _apply_copied_suggestions_after_insertion(self, row_index: int, copied_events: list[dict[str, object]]) -> None:
+        inserted_events: list[dict[str, object]] = []
+        valid_copied_items: list[dict[str, object]] = []
+        for item in copied_events:
+            if not isinstance(item, dict) or not isinstance(item.get("event"), dict):
+                continue
+            source_session_dir = self._resolve_copied_event_source_session_dir(item)
+            inserted_events.append(
+                self._clone_recorded_event_for_current_session(
+                    copy.deepcopy(item["event"]),
+                    source_session_dir,
+                    engine,
+                )
+            )
+            valid_copied_items.append(item)
+        if not inserted_events:
+            return
+        self._insert_cloned_events_after_row(row_index, inserted_events)
+        self._apply_copied_suggestions_after_insertion(row_index, valid_copied_items, engine)
+
+    def _resolve_copied_event_source_session_dir(self, copied_item: dict[str, object]) -> Path:
+        raw_source = copied_item.get("source_session_dir")
+        if raw_source:
+            return Path(str(raw_source))
+        return self.session_dir if self.session_dir else Path.cwd()
+
+    def _apply_copied_suggestions_after_insertion(
+        self,
+        row_index: int,
+        copied_events: list[dict[str, object]],
+        engine: RecorderEngine,
+    ) -> None:
         result = self._load_existing_suggestion_result()
         if result is None:
             return
@@ -5710,6 +6047,11 @@ class RecorderViewerWindow:
                 continue
             copied_suggestion = copy.deepcopy(suggestion)
             copied_suggestion.step_id = row_index + offset + 1
+            self._copy_suggestion_artifacts_for_current_session(
+                copied_suggestion,
+                self._resolve_copied_event_source_session_dir(item),
+                engine,
+            )
             inserted_suggestions.append(copied_suggestion)
 
         if not inserted_suggestions:
@@ -5721,6 +6063,51 @@ class RecorderViewerWindow:
         self._persist_suggestion_result()
         self._reload_tree()
         self._select_row_index(row_index + 1)
+
+    def _copy_suggestion_artifacts_for_current_session(
+        self,
+        suggestion: object,
+        source_session_dir: Path,
+        engine: RecorderEngine,
+    ) -> None:
+        parameters = getattr(suggestion, "parameters", None)
+        if not isinstance(parameters, list):
+            return
+        for parameter in parameters:
+            name = str(getattr(parameter, "name", "") or "").strip().lower()
+            if name not in {"sourcepath", "bgimage"}:
+                continue
+            copied_value = self._copy_parameter_artifact_value_for_current_session(
+                getattr(parameter, "suggested_value", None),
+                source_session_dir,
+                engine,
+            )
+            if copied_value is not None:
+                parameter.suggested_value = copied_value
+
+    def _copy_parameter_artifact_value_for_current_session(
+        self,
+        value: object,
+        source_session_dir: Path,
+        engine: RecorderEngine,
+    ) -> object | None:
+        if isinstance(value, str):
+            if not value.strip():
+                return value
+            preferred_folder = self._detect_media_folder(value, "image")
+            return self._copy_session_artifact(value, source_session_dir, engine, preferred_folder=preferred_folder)
+        if isinstance(value, list):
+            copied_items = []
+            changed = False
+            for item in value:
+                copied_item = self._copy_parameter_artifact_value_for_current_session(item, source_session_dir, engine)
+                if copied_item is None:
+                    copied_item = item
+                if copied_item != item:
+                    changed = True
+                copied_items.append(copied_item)
+            return copied_items if changed else value
+        return None
 
     def _clone_recorded_event_for_current_session(
         self,
@@ -5757,11 +6144,14 @@ class RecorderViewerWindow:
         engine: RecorderEngine,
         preferred_folder: str,
     ) -> str:
-        source_path = source_session_dir / relative_path
+        source_candidate = Path(relative_path)
+        source_path = source_candidate if source_candidate.is_absolute() else source_session_dir / source_candidate
         if not source_path.exists() or engine.store.session_dir is None:
             return relative_path
         extension = source_path.suffix or ".png"
         target_path = engine.store.allocate_media_path(source_path.stem, extension, folder_name=preferred_folder)
+        while target_path.exists():
+            target_path = engine.store.allocate_media_path(source_path.stem, extension, folder_name=preferred_folder)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source_path, target_path)
         return safe_relpath(target_path, engine.store.session_dir)
@@ -6012,6 +6402,9 @@ class RecorderViewerWindow:
         ]
         if suggestion.method_summary:
             lines.append(f"方法摘要: {suggestion.method_summary}")
+        method_options = self._extract_method_option_names_from_suggestion(suggestion)
+        if method_options:
+            lines.append(f"可选方法: {', '.join(method_options)}")
         if suggestion.script_summary:
             lines.append(f"模块摘要: {suggestion.script_summary}")
         if suggestion.reason:
@@ -6023,6 +6416,22 @@ class RecorderViewerWindow:
         parameter_count = len(suggestion.parameters or [])
         lines.append(f"参数推荐数: {parameter_count}")
         return "\n".join(lines)
+
+    def _extract_method_option_names_from_suggestion(self, suggestion) -> list[str]:
+        payload = getattr(suggestion, "candidate_payload", {})
+        option_payloads = payload.get("method_options", []) if isinstance(payload, dict) and isinstance(payload.get("method_options", []), list) else []
+        names: list[str] = []
+        seen: set[str] = set()
+        for item in option_payloads:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            key = name.lower()
+            if not name or key in seen:
+                continue
+            names.append(name)
+            seen.add(key)
+        return names
 
     def _build_parameter_status_label(self, item) -> str:
         if item.missing_reason:
@@ -6334,7 +6743,8 @@ class RecorderViewerWindow:
         if media_type == "image" and self.preview_single_monitor_var.get():
             prepared_path = self._prepare_preview_image_path(media_path, event)
 
-        cache_key = f"{media_type}:{prepared_path.resolve()}:{'single' if self.preview_single_monitor_var.get() else 'full'}"
+        rectangle_signature = self._build_event_rectangle_preview_signature(event) if media_type == "image" else ""
+        cache_key = f"{media_type}:{prepared_path.resolve()}:{'single' if self.preview_single_monitor_var.get() else 'full'}:{rectangle_signature}"
         if cache_key in self.media_cache:
             cached = self.media_cache[cache_key]
             if cached is None:
@@ -6354,6 +6764,9 @@ class RecorderViewerWindow:
                 else:
                     with Image.open(prepared_path) as image:
                         loaded = image.copy()
+                    if event is not None:
+                        overlay_source_path = media_path if prepared_path == media_path else None
+                        loaded = self._draw_event_rectangle_overlay(loaded, event, overlay_source_path)
             except Exception:
                 loaded = None
             self.media_cache[cache_key] = loaded
@@ -7323,6 +7736,568 @@ class RecorderViewerWindow:
         details["viewer_comment"] = comment
         event["additional_details"] = details
 
+    def edit_selected_event_rectangle(self) -> None:
+        row_index = self._get_primary_selected_row_index()
+        if row_index is None:
+            messagebox.showinfo("提示", "请先选择一行事件。", parent=self.window)
+            return
+        self.edit_event_rectangle(row_index)
+
+    def edit_event_rectangle(self, row_index: int) -> None:
+        if row_index < 0 or row_index >= len(self.event_rows):
+            return
+        image_info = self._resolve_event_primary_image_info(self.event_rows[row_index])
+        if image_info is None:
+            messagebox.showinfo("提示", "当前事件没有可用于画框的截图。", parent=self.window)
+            return
+        image_path, media_region = image_info
+        try:
+            with Image.open(image_path) as image:
+                source_image = image.copy()
+        except Exception as exc:
+            messagebox.showerror("打开失败", f"无法打开截图:\n{image_path}\n\n{exc}", parent=self.window)
+            return
+
+        event = self.event_rows[row_index]
+        image_origin = self._infer_event_image_origin(source_image.size, event, media_region, image_path)
+        current_rect = self._extract_event_rectangle(event)
+        current_image_rect = self._screen_rect_to_image_rect(current_rect, image_origin, source_image.size) if current_rect else None
+        self._show_rectangle_editor_dialog(row_index, image_path, source_image, image_origin, current_image_rect)
+
+    def _show_rectangle_editor_dialog(
+        self,
+        row_index: int,
+        image_path: Path,
+        source_image: Image.Image,
+        image_origin: tuple[int, int],
+        current_image_rect: tuple[int, int, int, int] | None,
+    ) -> None:
+        image_width, image_height = source_image.size
+        if image_width <= 0 or image_height <= 0:
+            messagebox.showerror("打开失败", "截图尺寸无效。", parent=self.window)
+            return
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title(f"重画 rectangle - 第 {row_index + 1} 行")
+        dialog.transient(self.window)
+        dialog.grab_set()
+
+        screen_width = max(800, self.window.winfo_screenwidth())
+        screen_height = max(600, self.window.winfo_screenheight())
+        max_display_width = max(560, min(1400, screen_width - 160))
+        max_display_height = max(360, min(900, screen_height - 240))
+        initial_scale = min(max_display_width / image_width, max_display_height / image_height, 1.0)
+        max_scale = max(initial_scale, min(4.0, 6000 / max(image_width, image_height)))
+        current_scale = initial_scale
+        display_width = max(1, int(round(image_width * current_scale)))
+        display_height = max(1, int(round(image_height * current_scale)))
+        viewport_width = display_width
+        viewport_height = display_height
+
+        resample_filter = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        photo_image = ImageTk.PhotoImage(source_image.resize((display_width, display_height), resample_filter) if current_scale != 1.0 else source_image)
+
+        instruction = (
+            "黄色框是当前 rectangle（如果能推断出来）。鼠标滚轮缩放图片，放大后可用滚动条移动视图；按住左键拖拽绘制新的 rectangle。"
+        )
+        ttk.Label(dialog, text=instruction, wraplength=max(viewport_width, 560)).pack(fill=tk.X, padx=12, pady=(12, 6))
+
+        canvas_frame = ttk.Frame(dialog)
+        canvas_frame.pack(padx=12, pady=6)
+        canvas = tk.Canvas(
+            canvas_frame,
+            width=viewport_width,
+            height=viewport_height,
+            highlightthickness=1,
+            highlightbackground="#999999",
+            cursor="crosshair",
+            xscrollincrement=1,
+            yscrollincrement=1,
+        )
+        x_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=canvas.xview)
+        y_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        canvas_frame.columnconfigure(0, weight=1)
+        canvas_frame.rowconfigure(0, weight=1)
+        image_item_id = canvas.create_image(0, 0, anchor=tk.NW, image=photo_image)
+        canvas.configure(scrollregion=(0, 0, display_width, display_height))
+        canvas.image = photo_image
+
+        status_var = tk.StringVar(value=f"缩放: {current_scale * 100:.0f}% | 图片原点: ({image_origin[0]}, {image_origin[1]})，图片尺寸: {image_width}x{image_height}")
+        ttk.Label(dialog, textvariable=status_var).pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        current_rect_id: int | None = None
+        if current_image_rect is not None:
+            x1, y1, x2, y2 = self._scale_image_rect_for_canvas(current_image_rect, current_scale)
+            current_rect_id = canvas.create_rectangle(x1, y1, x2, y2, outline="#ffd400", width=2, dash=(6, 3))
+
+        drag_start: tuple[int, int] | None = None
+        selected_image_rect: tuple[int, int, int, int] | None = None
+        selection_rect_id: int | None = None
+
+        def canvas_to_image_point(x: int, y: int) -> tuple[int, int]:
+            canvas_x = max(0.0, min(float(display_width), canvas.canvasx(x)))
+            canvas_y = max(0.0, min(float(display_height), canvas.canvasy(y)))
+            return (
+                max(0, min(image_width, int(round(canvas_x / current_scale)))),
+                max(0, min(image_height, int(round(canvas_y / current_scale)))),
+            )
+
+        def image_rect_to_canvas_rect(image_rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+            return self._scale_image_rect_for_canvas(image_rect, current_scale)
+
+        def refresh_rect_items() -> None:
+            if current_rect_id is not None and current_image_rect is not None:
+                canvas.coords(current_rect_id, *image_rect_to_canvas_rect(current_image_rect))
+                canvas.tag_raise(current_rect_id)
+            if selection_rect_id is not None and selected_image_rect is not None:
+                canvas.coords(selection_rect_id, *image_rect_to_canvas_rect(selected_image_rect))
+                canvas.tag_raise(selection_rect_id)
+
+        def update_zoom(new_scale: float, anchor_x: int | None = None, anchor_y: int | None = None) -> None:
+            nonlocal current_scale, display_width, display_height, photo_image
+            bounded_scale = max(initial_scale, min(max_scale, new_scale))
+            if abs(bounded_scale - current_scale) < 0.001:
+                return
+            if anchor_x is not None and anchor_y is not None:
+                anchor_image_x, anchor_image_y = canvas_to_image_point(anchor_x, anchor_y)
+            else:
+                anchor_image_x, anchor_image_y = image_width // 2, image_height // 2
+
+            current_scale = bounded_scale
+            display_width = max(1, int(round(image_width * current_scale)))
+            display_height = max(1, int(round(image_height * current_scale)))
+            resized_image = source_image.resize((display_width, display_height), resample_filter) if current_scale != 1.0 else source_image
+            photo_image = ImageTk.PhotoImage(resized_image)
+            canvas.itemconfigure(image_item_id, image=photo_image)
+            canvas.image = photo_image
+            canvas.configure(scrollregion=(0, 0, display_width, display_height))
+            refresh_rect_items()
+
+            if anchor_x is not None and anchor_y is not None:
+                target_canvas_x = anchor_image_x * current_scale - anchor_x
+                target_canvas_y = anchor_image_y * current_scale - anchor_y
+                if display_width > viewport_width:
+                    canvas.xview_moveto(max(0.0, min(1.0, target_canvas_x / max(1, display_width))))
+                if display_height > viewport_height:
+                    canvas.yview_moveto(max(0.0, min(1.0, target_canvas_y / max(1, display_height))))
+            status_var.set(f"缩放: {current_scale * 100:.0f}% | 图片原点: ({image_origin[0]}, {image_origin[1]})，图片尺寸: {image_width}x{image_height}")
+
+        def update_selection(x1: int, y1: int, x2: int, y2: int) -> None:
+            nonlocal selected_image_rect, selection_rect_id
+            left_img, right_img = sorted((max(0, min(image_width, x1)), max(0, min(image_width, x2))))
+            top_img, bottom_img = sorted((max(0, min(image_height, y1)), max(0, min(image_height, y2))))
+            selected_image_rect = (left_img, top_img, right_img, bottom_img)
+            left_canvas, top_canvas, right_canvas, bottom_canvas = image_rect_to_canvas_rect(selected_image_rect)
+            if selection_rect_id is None:
+                selection_rect_id = canvas.create_rectangle(left_canvas, top_canvas, right_canvas, bottom_canvas, outline="#ff2b2b", width=3)
+            else:
+                canvas.coords(selection_rect_id, left_canvas, top_canvas, right_canvas, bottom_canvas)
+
+            screen_rect = self._image_rect_to_screen_rect(selected_image_rect, image_origin)
+            status_var.set(
+                f"缩放: {current_scale * 100:.0f}% | 新 rectangle: "
+                f"left={screen_rect['left']}, top={screen_rect['top']}, "
+                f"right={screen_rect['right']}, bottom={screen_rect['bottom']}"
+            )
+
+        def on_mouse_down(event: tk.Event) -> str:
+            nonlocal drag_start
+            drag_start = canvas_to_image_point(int(event.x), int(event.y))
+            update_selection(drag_start[0], drag_start[1], drag_start[0], drag_start[1])
+            return "break"
+
+        def on_mouse_drag(event: tk.Event) -> str:
+            if drag_start is None:
+                return "break"
+            current_point = canvas_to_image_point(int(event.x), int(event.y))
+            update_selection(drag_start[0], drag_start[1], current_point[0], current_point[1])
+            return "break"
+
+        def on_mouse_up(event: tk.Event) -> str:
+            nonlocal drag_start
+            if drag_start is not None:
+                current_point = canvas_to_image_point(int(event.x), int(event.y))
+                update_selection(drag_start[0], drag_start[1], current_point[0], current_point[1])
+                drag_start = None
+            return "break"
+
+        def on_mouse_wheel(event: tk.Event) -> str:
+            delta = int(getattr(event, "delta", 0) or 0)
+            wheel_num = int(getattr(event, "num", 0) or 0)
+            zoom_in = delta > 0 or wheel_num == 4
+            zoom_factor = 1.2 if zoom_in else 1 / 1.2
+            update_zoom(current_scale * zoom_factor, int(event.x), int(event.y))
+            return "break"
+
+        def save() -> None:
+            if selected_image_rect is None:
+                messagebox.showinfo("提示", "请先在截图上拖拽绘制一个 rectangle。", parent=dialog)
+                return
+            left, top, right, bottom = selected_image_rect
+            if right - left < 2 or bottom - top < 2:
+                messagebox.showinfo("提示", "绘制区域太小，请重新拖拽。", parent=dialog)
+                return
+            screen_rect = self._image_rect_to_screen_rect(selected_image_rect, image_origin)
+            self._apply_event_rectangle_edit(row_index, screen_rect, image_path, image_origin)
+            dialog.destroy()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        actions = ttk.Frame(dialog)
+        actions.pack(fill=tk.X, padx=12, pady=(0, 12))
+        ttk.Button(actions, text="保存", command=save).pack(side=tk.RIGHT)
+        ttk.Button(actions, text="取消", command=cancel).pack(side=tk.RIGHT, padx=(0, 8))
+
+        canvas.bind("<ButtonPress-1>", on_mouse_down)
+        canvas.bind("<B1-Motion>", on_mouse_drag)
+        canvas.bind("<ButtonRelease-1>", on_mouse_up)
+        canvas.bind("<MouseWheel>", on_mouse_wheel)
+        canvas.bind("<Button-4>", on_mouse_wheel)
+        canvas.bind("<Button-5>", on_mouse_wheel)
+        dialog.bind("<Escape>", lambda _event: cancel())
+        dialog.bind("<Control-s>", lambda _event: save())
+        dialog.geometry(f"{viewport_width + 48}x{viewport_height + 170}")
+        dialog.focus_set()
+
+    def _apply_event_rectangle_edit(
+        self,
+        row_index: int,
+        rectangle: dict[str, int],
+        image_path: Path,
+        image_origin: tuple[int, int],
+    ) -> None:
+        if row_index < 0 or row_index >= len(self.event_rows):
+            return
+        event = self.event_rows[row_index]
+        previous_rect = self._extract_event_rectangle(event)
+
+        ui_element = event.get("ui_element")
+        if not isinstance(ui_element, dict):
+            ui_element = {}
+        else:
+            ui_element = dict(ui_element)
+        ui_element["rectangle"] = dict(rectangle)
+        event["ui_element"] = ui_element
+
+        details = event.get("additional_details")
+        if not isinstance(details, dict):
+            details = {}
+        else:
+            details = dict(details)
+        focus_hint = details.get("visual_focus_hint")
+        if not isinstance(focus_hint, dict):
+            focus_hint = {}
+        else:
+            focus_hint = dict(focus_hint)
+        focus_hint["target_rect"] = dict(rectangle)
+        focus_hint["red_box_marks_target"] = True
+        details["visual_focus_hint"] = focus_hint
+        details["rectangle_manual_edit"] = {
+            "edited_at": datetime.now().isoformat(timespec="seconds"),
+            "previous_rectangle": previous_rect,
+            "image_path": self._format_session_relative_path(image_path),
+            "image_origin": {"left": image_origin[0], "top": image_origin[1]},
+        }
+        event["additional_details"] = details
+
+        self._persist_session()
+        self.media_cache.clear()
+        self._refresh_event_row_display(row_index)
+        self._select_row_index(row_index)
+        self._set_details(event)
+        self._show_event_media(event)
+        self.load_status_var.set(
+            "已更新 rectangle: "
+            f"left={rectangle['left']}, top={rectangle['top']}, right={rectangle['right']}, bottom={rectangle['bottom']}。"
+            "如已有参数建议依赖旧框，请重新生成参数建议。"
+        )
+
+    def _resolve_event_primary_image_info(self, event: dict[str, object]) -> tuple[Path, dict[str, int] | None] | None:
+        if not self.session_dir:
+            return None
+        media_items = event.get("media", [])
+        if isinstance(media_items, list):
+            for item in media_items:
+                if not isinstance(item, dict) or item.get("type") != "image" or not item.get("path"):
+                    continue
+                candidate = self._resolve_session_path(item.get("path"))
+                if candidate is not None and candidate.exists():
+                    region = self._normalize_media_region(item.get("region"))
+                    return candidate, region
+        screenshot = event.get("screenshot")
+        if screenshot:
+            candidate = self._resolve_session_path(screenshot)
+            if candidate is not None and candidate.exists():
+                return candidate, None
+        return None
+
+    def _resolve_session_path(self, raw_path: object) -> Path | None:
+        if not raw_path or not self.session_dir:
+            return None
+        candidate = Path(str(raw_path))
+        if candidate.is_absolute():
+            return candidate
+        return self.session_dir / candidate
+
+    def _format_session_relative_path(self, path: Path) -> str:
+        if self.session_dir:
+            try:
+                return path.resolve().relative_to(self.session_dir.resolve()).as_posix()
+            except ValueError:
+                pass
+        return str(path)
+
+    def _normalize_media_region(self, value: object) -> dict[str, int] | None:
+        if not isinstance(value, dict):
+            return None
+        left = self._coerce_int_value(value.get("left"))
+        top = self._coerce_int_value(value.get("top"))
+        width = self._coerce_int_value(value.get("width"))
+        height = self._coerce_int_value(value.get("height"))
+        if left is None or top is None or width is None or height is None or width <= 0 or height <= 0:
+            return None
+        return {"left": left, "top": top, "width": width, "height": height}
+
+    def _extract_event_rectangle(self, event: dict[str, object]) -> dict[str, int] | None:
+        ui_element = event.get("ui_element")
+        if isinstance(ui_element, dict):
+            rect = self._normalize_rectangle(ui_element.get("rectangle"))
+            if rect is not None:
+                return rect
+        details = event.get("additional_details")
+        if isinstance(details, dict):
+            focus_hint = details.get("visual_focus_hint")
+            if isinstance(focus_hint, dict):
+                return self._normalize_rectangle(focus_hint.get("target_rect"))
+        return None
+
+    def _normalize_rectangle(self, value: object) -> dict[str, int] | None:
+        if isinstance(value, dict):
+            left = self._coerce_int_value(value.get("left"))
+            top = self._coerce_int_value(value.get("top"))
+            right = self._coerce_int_value(value.get("right"))
+            bottom = self._coerce_int_value(value.get("bottom"))
+        elif isinstance(value, (list, tuple)) and len(value) >= 4:
+            left = self._coerce_int_value(value[0])
+            top = self._coerce_int_value(value[1])
+            right = self._coerce_int_value(value[2])
+            bottom = self._coerce_int_value(value[3])
+        else:
+            return None
+        if left is None or top is None or right is None or bottom is None:
+            return None
+        if right <= left or bottom <= top:
+            return None
+        return {"left": left, "top": top, "right": right, "bottom": bottom}
+
+    def _coerce_int_value(self, value: object) -> int | None:
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            return int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+
+    def _infer_event_image_origin(
+        self,
+        image_size: tuple[int, int],
+        event: dict[str, object],
+        media_region: dict[str, int] | None = None,
+        image_path: Path | None = None,
+    ) -> tuple[int, int]:
+        image_width, image_height = image_size
+        if media_region and self._size_matches(image_size, media_region.get("width", 0), media_region.get("height", 0)):
+            return (media_region["left"], media_region["top"])
+
+        if image_path is not None:
+            matched_region = self._find_media_region_for_image_path(event, image_path)
+            if matched_region and self._size_matches(image_size, matched_region.get("width", 0), matched_region.get("height", 0)):
+                return (matched_region["left"], matched_region["top"])
+
+        layout = self._normalize_display_layout_for_rectangle_editor(self._get_session_display_layout())
+        focus_point = self._extract_event_focus_point_for_origin(event)
+        if layout is not None:
+            virtual_screen = layout.get("virtual_screen", {})
+            if self._size_matches(image_size, virtual_screen.get("width", 0), virtual_screen.get("height", 0)):
+                return (int(virtual_screen.get("left", 0)), int(virtual_screen.get("top", 0)))
+            monitors = layout.get("monitors", [])
+            if isinstance(monitors, list):
+                monitor = self._find_monitor_for_point(focus_point, monitors)
+                if monitor and self._size_matches(image_size, monitor.get("width", 0), monitor.get("height", 0)):
+                    return (int(monitor.get("left", 0)), int(monitor.get("top", 0)))
+                matching_monitors = [
+                    monitor_item
+                    for monitor_item in monitors
+                    if isinstance(monitor_item, dict) and self._size_matches(image_size, monitor_item.get("width", 0), monitor_item.get("height", 0))
+                ]
+                if len(matching_monitors) == 1:
+                    monitor_item = matching_monitors[0]
+                    return (int(monitor_item.get("left", 0)), int(monitor_item.get("top", 0)))
+
+        if focus_point is not None:
+            x, y = focus_point
+            if 0 <= x <= image_width and 0 <= y <= image_height:
+                return (0, 0)
+        return (0, 0)
+
+    def _normalize_display_layout_for_rectangle_editor(self, raw_layout: object) -> dict[str, object] | None:
+        if not isinstance(raw_layout, dict):
+            return None
+        virtual_raw = raw_layout.get("virtual_screen")
+        monitors_raw = raw_layout.get("monitors")
+        if not isinstance(virtual_raw, dict) or not isinstance(monitors_raw, list):
+            return None
+        virtual = self._normalize_monitor_like_rect(virtual_raw)
+        monitors = [self._normalize_monitor_like_rect(item) for item in monitors_raw if isinstance(item, dict)]
+        monitors = [item for item in monitors if item is not None]
+        if virtual is None:
+            return None
+        return {"virtual_screen": virtual, "monitors": monitors}
+
+    def _normalize_monitor_like_rect(self, value: dict[str, object]) -> dict[str, int] | None:
+        left = self._coerce_int_value(value.get("left"))
+        top = self._coerce_int_value(value.get("top"))
+        width = self._coerce_int_value(value.get("width"))
+        height = self._coerce_int_value(value.get("height"))
+        if left is None or top is None or width is None or height is None or width <= 0 or height <= 0:
+            return None
+        return {"left": left, "top": top, "width": width, "height": height, "right": left + width, "bottom": top + height}
+
+    def _extract_event_focus_point_for_origin(self, event: dict[str, object]) -> tuple[int, int] | None:
+        mouse = event.get("mouse")
+        if isinstance(mouse, dict):
+            x = self._coerce_int_value(mouse.get("x"))
+            y = self._coerce_int_value(mouse.get("y"))
+            if x is not None and y is not None:
+                return (x, y)
+        x = self._coerce_int_value(event.get("x"))
+        y = self._coerce_int_value(event.get("y"))
+        if x is not None and y is not None:
+            return (x, y)
+        rect = self._extract_event_rectangle(event)
+        if rect is not None:
+            return ((rect["left"] + rect["right"]) // 2, (rect["top"] + rect["bottom"]) // 2)
+        return None
+
+    def _find_monitor_for_point(self, point: tuple[int, int] | None, monitors: list[object]) -> dict[str, object] | None:
+        if point is None:
+            return None
+        x, y = point
+        for monitor in monitors:
+            if not isinstance(monitor, dict):
+                continue
+            left = int(monitor.get("left", 0))
+            top = int(monitor.get("top", 0))
+            right = int(monitor.get("right", left + int(monitor.get("width", 0))))
+            bottom = int(monitor.get("bottom", top + int(monitor.get("height", 0))))
+            if left <= x < right and top <= y < bottom:
+                return monitor
+        return None
+
+    def _size_matches(self, image_size: tuple[int, int], width: object, height: object) -> bool:
+        candidate_width = self._coerce_int_value(width)
+        candidate_height = self._coerce_int_value(height)
+        if candidate_width is None or candidate_height is None:
+            return False
+        return abs(image_size[0] - candidate_width) <= 2 and abs(image_size[1] - candidate_height) <= 2
+
+    def _find_media_region_for_image_path(self, event: dict[str, object], image_path: Path) -> dict[str, int] | None:
+        if not self.session_dir:
+            return None
+        try:
+            target = image_path.resolve()
+        except OSError:
+            target = image_path
+        media_items = event.get("media", [])
+        if not isinstance(media_items, list):
+            return None
+        for item in media_items:
+            if not isinstance(item, dict) or item.get("type") != "image" or not item.get("path"):
+                continue
+            candidate = self._resolve_session_path(item.get("path"))
+            if candidate is None:
+                continue
+            try:
+                candidate_resolved = candidate.resolve()
+            except OSError:
+                candidate_resolved = candidate
+            if candidate_resolved == target:
+                return self._normalize_media_region(item.get("region"))
+        return None
+
+    def _screen_rect_to_image_rect(
+        self,
+        rectangle: dict[str, int],
+        image_origin: tuple[int, int],
+        image_size: tuple[int, int],
+    ) -> tuple[int, int, int, int] | None:
+        left = max(0, min(image_size[0], rectangle["left"] - image_origin[0]))
+        top = max(0, min(image_size[1], rectangle["top"] - image_origin[1]))
+        right = max(0, min(image_size[0], rectangle["right"] - image_origin[0]))
+        bottom = max(0, min(image_size[1], rectangle["bottom"] - image_origin[1]))
+        if right <= left or bottom <= top:
+            return None
+        return (left, top, right, bottom)
+
+    def _image_rect_to_screen_rect(self, image_rect: tuple[int, int, int, int], image_origin: tuple[int, int]) -> dict[str, int]:
+        left, top, right, bottom = image_rect
+        return {
+            "left": int(left + image_origin[0]),
+            "top": int(top + image_origin[1]),
+            "right": int(right + image_origin[0]),
+            "bottom": int(bottom + image_origin[1]),
+        }
+
+    def _scale_image_rect_for_canvas(self, image_rect: tuple[int, int, int, int], scale: float) -> tuple[int, int, int, int]:
+        left, top, right, bottom = image_rect
+        return (
+            int(round(left * scale)),
+            int(round(top * scale)),
+            int(round(right * scale)),
+            int(round(bottom * scale)),
+        )
+
+    def _build_event_rectangle_preview_signature(self, event: dict[str, object] | None) -> str:
+        if not isinstance(event, dict):
+            return ""
+        if not self._event_has_manual_rectangle_edit(event):
+            return ""
+        rect = self._extract_event_rectangle(event)
+        if rect is None:
+            return ""
+        return f"rect={rect['left']},{rect['top']},{rect['right']},{rect['bottom']}"
+
+    def _event_has_manual_rectangle_edit(self, event: dict[str, object]) -> bool:
+        details = event.get("additional_details")
+        return isinstance(details, dict) and isinstance(details.get("rectangle_manual_edit"), dict)
+
+    def _draw_event_rectangle_overlay(
+        self,
+        image: Image.Image,
+        event: dict[str, object],
+        image_path: Path | None = None,
+    ) -> Image.Image:
+        if not self._event_has_manual_rectangle_edit(event):
+            return image
+        rect = self._extract_event_rectangle(event)
+        if rect is None:
+            return image
+        media_region = self._find_media_region_for_image_path(event, image_path) if image_path is not None else None
+        image_origin = self._infer_event_image_origin(image.size, event, media_region, image_path)
+        image_rect = self._screen_rect_to_image_rect(rect, image_origin, image.size)
+        if image_rect is None:
+            return image
+        overlay = image.copy()
+        draw = ImageDraw.Draw(overlay)
+        line_width = max(3, min(8, max(image.size) // 400))
+        draw.rectangle(image_rect, outline="#ff0000", width=line_width)
+        return overlay
+
     def _format_timestamp(self, timestamp: object) -> str:
         if not isinstance(timestamp, str) or not timestamp:
             return ""
@@ -8098,6 +9073,7 @@ class RecorderViewerWindow:
                             suggestion=suggestion,
                             event=event,
                             ai_observation_text=ai_observation,
+                            session_dir=self.session_dir,
                         )
                         if isinstance(getattr(suggestion, "candidate_payload", None), dict):
                             suggestion.candidate_payload.pop("viewer_parameter_summary_override", None)
@@ -8132,6 +9108,10 @@ class RecorderViewerWindow:
             messagebox.showerror("导出失败", "Session 元数据中的 Testcase ID 不能为空。", parent=self.window)
             return
 
+        output_file_name = self._prompt_atframework_yaml_file_name(testcase_id)
+        if output_file_name is None:
+            return
+
         export_root = self._prompt_export_root_directory()
         if export_root is None:
             return
@@ -8143,7 +9123,7 @@ class RecorderViewerWindow:
             messagebox.showerror("导出失败", f"创建导出目录失败:\n{exc}", parent=self.window)
             return
 
-        output_path = export_dir / "atframework_steps.yaml"
+        output_path = export_dir / output_file_name
         self.export_yaml_running = True
         self.export_yaml_button.configure(state=tk.DISABLED)
         self.load_status_var.set(f"正在准备导出 ATFramework YAML: {output_path}")
@@ -8159,6 +9139,40 @@ class RecorderViewerWindow:
             self.window.after(0, lambda output_path=output_path, step_count=step_count: self._on_export_atframework_yaml_success(output_path, step_count))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _prompt_atframework_yaml_file_name(self, testcase_id: str) -> str | None:
+        default_name = self._normalize_atframework_yaml_file_name(testcase_id) or "atframework_steps.yaml"
+        while True:
+            raw_value = simpledialog.askstring(
+                "导出文件名",
+                "请输入 ATFramework YAML 文件名。\n默认使用 Session 元数据中的 Testcase ID。",
+                parent=self.window,
+                initialvalue=default_name,
+            )
+            if raw_value is None:
+                return None
+            file_name = self._normalize_atframework_yaml_file_name(raw_value)
+            if not file_name:
+                messagebox.showerror("导出失败", "导出文件名不能为空。", parent=self.window)
+                continue
+            return file_name
+
+    @staticmethod
+    def _normalize_atframework_yaml_file_name(value: str) -> str:
+        raw_name = str(value or "").strip().strip('"')
+        if not raw_name:
+            return ""
+        raw_name = raw_name.replace("\\", "/").split("/")[-1].strip()
+        if raw_name.lower().endswith((".yaml", ".yml")):
+            stem = raw_name.rsplit(".", 1)[0]
+            suffix = "." + raw_name.rsplit(".", 1)[1]
+        else:
+            stem = raw_name
+            suffix = ".yaml"
+        sanitized_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", stem).strip(" ._")
+        if not sanitized_stem:
+            return ""
+        return sanitized_stem + suffix
 
     def _load_suggestion_result_for_export(self):
         if self.suggestion_result is not None:
@@ -8519,8 +9533,8 @@ class RecorderViewerWindow:
         pilot_scripts = registry_root / "pilot_scripts.yaml"
         full_methods = registry_root / "control_action_methods.yaml"
         full_scripts = registry_root / "scripts.yaml"
-        methods_path = full_methods if self._registry_has_entries(full_methods) else None
-        scripts_path = pilot_scripts if self._registry_has_entries(pilot_scripts) else full_scripts if self._registry_has_entries(full_scripts) else None
+        methods_path = full_methods if full_methods.exists() else None
+        scripts_path = pilot_scripts if pilot_scripts.exists() else full_scripts if full_scripts.exists() else None
         if methods_path and scripts_path:
             return methods_path, scripts_path
         return None
@@ -8529,11 +9543,26 @@ class RecorderViewerWindow:
         if not path.exists():
             return False
         try:
-            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            mtime_ns = path.stat().st_mtime_ns
         except Exception:
             return False
+        cache_key = str(path.resolve()).casefold()
+        cache = getattr(self, "_registry_has_entries_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._registry_has_entries_cache = cache
+        cached = cache.get(cache_key)
+        if isinstance(cached, tuple) and len(cached) == 2 and cached[0] == mtime_ns:
+            return bool(cached[1])
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except Exception:
+            cache[cache_key] = (mtime_ns, False)
+            return False
         entries = payload.get("entries", []) if isinstance(payload, dict) else []
-        return isinstance(entries, list) and bool(entries)
+        has_entries = isinstance(entries, list) and bool(entries)
+        cache[cache_key] = (mtime_ns, has_entries)
+        return has_entries
 
     def run_coverage_check(self) -> None:
         if self.coverage_query_running:

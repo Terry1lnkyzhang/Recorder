@@ -40,6 +40,36 @@ def build_step_observation_prompt() -> str:
     return json.dumps(instruction, ensure_ascii=False, indent=2)
 
 
+def build_select_datagrid_rows_observation_prompt(steps: list[dict[str, object]]) -> str:
+    instruction = {
+        "task": "根据表格截图识别红框选中行，并输出该行所有非空列值",
+        "requirements": [
+            "你会看到一张或多张步骤截图，每张截图对应 steps 数组里的同序步骤。",
+            "截图中的红色框区是用户当前选择/点击的目标行；当前目标应位于表格或 DataGrid 区域。",
+            "请读取表格表头和红框所在行的单元格内容，把红框行里所有能看清且非空的列值都列出来。",
+            "rowValue 必须是对象/dict，key 为表格列名，value 为该行对应单元格文本，例如 {\"series\": \"301\", \"patientID\": \"205\"}。",
+            "不要由你自行筛选哪些列能唯一定位；只要该列有明确表头、红框行单元格值能看清且非空，就应放入 rowValue。",
+            "可以包含 PatientID、Series、Study、Name、ID、Accession 等任意非空列；不要选择按钮文字、图标、状态噪声或坐标。",
+            "列名和值必须来自截图可见内容或明确的表头/单元格文本，不要翻译、猜测、改写或补充截图外信息。",
+            "如果无法可靠识别表头或红框行内容，rowValue 返回空对象，并在 missing_reason 说明原因。",
+            "不要输出 Python 单引号字典，不要输出 Markdown，不要输出分析过程，只输出 JSON。",
+        ],
+        "json_schema_hint": {
+            "step_results": [
+                {
+                    "step_id": 11,
+                    "analysis_mode": "datagrid_row_locator",
+                    "rowValue": {"series": "301", "patientID": "205"},
+                    "missing_reason": "",
+                    "observation": "rowValue={\"series\":\"301\",\"patientID\":\"205\"}",
+                }
+            ]
+        },
+        "steps": steps,
+    }
+    return json.dumps(instruction, ensure_ascii=False, indent=2)
+
+
 def build_step_reasoning_prompt(
     session_id: str,
     current_step_observations: list[dict[str, object]],
