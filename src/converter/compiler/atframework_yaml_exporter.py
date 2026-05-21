@@ -266,7 +266,7 @@ def _rewrite_wait_for_exists_screenshot_paths(payload: dict[str, Any], source_ro
             continue
         for method_key, payload_key in (("Action", "Parameter Value"), ("Check", "Check Parameter Value")):
             method_name = str(step.get(method_key, "") or "").strip().lower()
-            if method_name not in {"waitforexists", "matchingclick"}:
+            if method_name not in {"waitforexists", "matchingclick", "wheel"}:
                 continue
             step[payload_key] = _rewrite_wait_for_exists_parameter_blob(
                 step.get(payload_key),
@@ -326,7 +326,7 @@ def _rewrite_wait_for_exists_parameter_value(
     parent_key: str = "",
 ) -> Any:
     parent_key_lower = parent_key.strip().lower()
-    if parent_key_lower == "sourcepath":
+    if parent_key_lower in {"sourcepath", "targetpath"}:
         return _copy_wait_for_exists_sources(
             value,
             source_root,

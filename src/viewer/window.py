@@ -24,7 +24,7 @@ from src.ai import AISuggestionService
 from src.ai.client import OpenAICompatibleAIClient
 from src.ai.method_mapping import resolve_method_name_for_event, resolve_method_options_for_event
 from src.ai.prompt_builder import build_select_datagrid_rows_observation_prompt, build_step_observation_prompt
-from src.ai.suggestions import MethodParameterSuggestion
+from src.ai.suggestions import MethodParameterSuggestion, MethodSelectionSuggestion, SuggestionGenerationResult
 from src.common.app_logging import get_logger
 from src.common.display_utils import prepare_image_path_for_ai
 from src.common.image_widgets import ZoomableImageView
@@ -1156,6 +1156,9 @@ class RecorderViewerWindow:
         self._event_list_batch_size = 300
         self._session_load_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
+        self._auto_cleaning_check_token = 0
+        self._auto_cleaning_prompted_session_keys: set[str] = set()
+        self._auto_cleaning_check_running = False
         self._synchronizing_tree_selection = False
         self.copied_event_rows: list[dict[str, object]] = []
         self.cleaning_suggestions: list[CleaningSuggestion] = []
@@ -2121,6 +2124,7 @@ class RecorderViewerWindow:
         self.summary_var.set(self._build_session_summary_text())
         self._reload_tree()
         self._reload_event_list_popup()
+        self._schedule_auto_cleaning_check(token, session_dir)
 
     def _build_session_summary_text(self) -> str:
         if not self.session_data:
@@ -2965,25 +2969,13 @@ class RecorderViewerWindow:
         if not self.session_dir:
             return
         self.cleaning_suggestions = build_cleaning_suggestions(self.session_dir, self.event_rows)
-        self.clear_cleaning_highlight()
+        self._refresh_cleaning_preview_from_suggestions()
 
         if not self.cleaning_suggestions:
             self.cleaning_var.set("未发现明显可清洗项")
             self._reload_event_list_popup()
             return
-
-        for suggestion in self.cleaning_suggestions:
-            for row_index in suggestion.row_indexes:
-                if self.tree.exists(str(row_index)):
-                    self.tree.item(str(row_index), tags=self._build_row_tags(row_index))
-
-        delete_count = sum(1 for item in self.cleaning_suggestions if item.kind in {"drop_noop", "drop_noop_scroll"})
-        merge_count = sum(1 for item in self.cleaning_suggestions if item.kind == "merge_keypress")
-        review_count = sum(1 for item in self.cleaning_suggestions if item.kind == "review_revert_pair")
-        self.cleaning_var.set(
-            f"发现 {delete_count} 条可删除项，{merge_count} 组可合并 key_press，{review_count} 组 A→B→A 回退提示项。"
-        )
-        self._reload_event_list_popup()
+        self.cleaning_var.set(self._build_cleaning_suggestion_summary(self.cleaning_suggestions))
 
     def apply_cleaning(self) -> None:
         if not self.cleaning_suggestions:
@@ -3006,6 +2998,12 @@ class RecorderViewerWindow:
             parent=self.window,
         )
         if not confirmed:
+            return
+
+        self._apply_cleaning_confirmed()
+
+    def _apply_cleaning_confirmed(self) -> None:
+        if not self.cleaning_suggestions:
             return
 
         original_events = [copy.deepcopy(event) for event in self.event_rows]
@@ -3035,6 +3033,96 @@ class RecorderViewerWindow:
                 selected_rows=affected_row_indexes,
                 status_message="数据清洗完成，正在为受影响步骤重新生成方法建议...",
             )
+
+    def _schedule_auto_cleaning_check(self, token: int, session_dir: Path) -> None:
+        if token != self._session_load_token:
+            return
+        session_key = self._build_session_path_key(session_dir)
+        if session_key in self._auto_cleaning_prompted_session_keys:
+            return
+        events_snapshot = [copy.deepcopy(event) for event in self.event_rows if isinstance(event, dict)]
+        if not events_snapshot:
+            return
+        self._auto_cleaning_check_token += 1
+        check_token = self._auto_cleaning_check_token
+        self._auto_cleaning_check_running = True
+        self.cleaning_var.set("正在后台检测可清洗事件...")
+
+        def worker() -> None:
+            try:
+                suggestions = build_cleaning_suggestions(session_dir, events_snapshot)
+            except Exception as exc:
+                message = str(exc)
+                self.window.after(0, lambda: self._on_auto_cleaning_check_failed(token, check_token, session_key, message))
+                return
+            self.window.after(0, lambda: self._on_auto_cleaning_check_finished(token, check_token, session_dir, session_key, suggestions))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_auto_cleaning_check_failed(self, token: int, check_token: int, session_key: str, message: str) -> None:
+        if not self._is_current_auto_cleaning_check(token, check_token, session_key):
+            return
+        self._auto_cleaning_check_running = False
+        self.cleaning_var.set(f"后台检测清洗建议失败: {message}")
+
+    def _on_auto_cleaning_check_finished(
+        self,
+        token: int,
+        check_token: int,
+        session_dir: Path,
+        session_key: str,
+        suggestions: list[CleaningSuggestion],
+    ) -> None:
+        if not self._is_current_auto_cleaning_check(token, check_token, session_key):
+            return
+        self._auto_cleaning_check_running = False
+        self._auto_cleaning_prompted_session_keys.add(session_key)
+        self.cleaning_suggestions = suggestions
+        self._refresh_cleaning_preview_from_suggestions()
+        if not suggestions:
+            self.cleaning_var.set("未发现明显可清洗项")
+            return
+
+        summary = self._build_cleaning_suggestion_summary(suggestions)
+        self.cleaning_var.set(summary)
+        if not self._has_actionable_cleaning_suggestions(suggestions):
+            return
+        if not self.window.winfo_exists():
+            return
+        confirmed = messagebox.askyesno(
+            "数据清洗",
+            f"当前事件可以进行数据清洗。\n\n{summary}\n\n是否现在清洗数据？",
+            parent=self.window,
+        )
+        if confirmed and self._is_current_session_path(session_dir) and self.cleaning_suggestions:
+            self._apply_cleaning_confirmed()
+
+    def _is_current_auto_cleaning_check(self, token: int, check_token: int, session_key: str) -> bool:
+        if token != self._session_load_token or check_token != self._auto_cleaning_check_token:
+            return False
+        if not self.session_dir:
+            return False
+        return self._build_session_path_key(self.session_dir) == session_key
+
+    def _build_session_path_key(self, session_dir: Path) -> str:
+        return os.path.normcase(os.path.abspath(os.fspath(session_dir)))
+
+    def _refresh_cleaning_preview_from_suggestions(self) -> None:
+        self.clear_cleaning_highlight()
+        for suggestion in self.cleaning_suggestions:
+            for row_index in suggestion.row_indexes:
+                if self.tree.exists(str(row_index)):
+                    self.tree.item(str(row_index), tags=self._build_row_tags(row_index))
+        self._reload_event_list_popup()
+
+    def _build_cleaning_suggestion_summary(self, suggestions: list[CleaningSuggestion]) -> str:
+        delete_count = sum(1 for item in suggestions if item.kind in {"drop_noop", "drop_noop_scroll"})
+        merge_count = sum(1 for item in suggestions if item.kind == "merge_keypress")
+        review_count = sum(1 for item in suggestions if item.kind == "review_revert_pair")
+        return f"发现 {delete_count} 条可删除项，{merge_count} 组可合并 key_press，{review_count} 组 A→B→A 回退提示项。"
+
+    def _has_actionable_cleaning_suggestions(self, suggestions: list[CleaningSuggestion]) -> bool:
+        return any(item.kind in {"drop_noop", "drop_noop_scroll", "merge_keypress"} for item in suggestions)
 
     def _build_step_id_mapping_after_cleaning(
         self,
@@ -4847,7 +4935,10 @@ class RecorderViewerWindow:
         dialog.grab_set()
 
         result: dict[str, str | None] = {"value": None}
-        choice_var = tk.StringVar(value=current_value if current_value in choices else (choices[0] if choices else current_value))
+        initial_value = current_value if current_value else ""
+        if not initial_value and current_value not in choices and choices and not allow_custom:
+            initial_value = choices[0]
+        choice_var = tk.StringVar(value=initial_value)
 
         container = ttk.Frame(dialog, padding=12)
         container.pack(fill=tk.BOTH, expand=True)
@@ -4895,11 +4986,16 @@ class RecorderViewerWindow:
 
     def _edit_method_or_module_suggestion(self, row_index: int, field_name: str) -> None:
         suggestion = self._find_suggestion_by_row_index(row_index)
+        if field_name == "method_name":
+            if not self.session_dir or not self.session_data:
+                messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+                return
+            if suggestion is None:
+                suggestion = self._build_empty_method_suggestion(row_index)
+            self._edit_method_suggestion(row_index, suggestion)
+            return
         if suggestion is None or not self.session_dir or self.suggestion_result is None:
             messagebox.showinfo("提示", f"步骤 {row_index + 1} 暂无可编辑的建议。", parent=self.window)
-            return
-        if field_name == "method_name":
-            self._edit_method_suggestion(row_index, suggestion)
             return
         title = "方法建议" if field_name == "method_name" else "模块建议"
         current_value = str(getattr(suggestion, field_name, "") or "")
@@ -4913,6 +5009,7 @@ class RecorderViewerWindow:
     def _edit_method_suggestion(self, row_index: int, suggestion) -> None:
         current_value = str(getattr(suggestion, "method_name", "") or "").strip()
         choices = self._build_method_suggestion_candidates(row_index, suggestion, current_value)
+        had_existing_suggestion = self._find_suggestion_by_row_index(row_index) is not None
         edited_value = self._show_choice_dialog(
             f"编辑步骤 {row_index + 1} 方法建议",
             current_value,
@@ -4923,10 +5020,46 @@ class RecorderViewerWindow:
         if edited_value is None:
             return
         selected_method = edited_value.strip()
+        if not selected_method and not had_existing_suggestion:
+            return
         self._apply_selected_method_suggestion(row_index, suggestion, selected_method)
+        self._upsert_method_suggestion(row_index, suggestion)
         self._persist_suggestion_result()
         self._refresh_event_row_display(row_index)
         self._select_row_index(row_index)
+
+    def _build_empty_method_suggestion(self, row_index: int) -> MethodSelectionSuggestion:
+        return MethodSelectionSuggestion(
+            step_id=row_index + 1,
+            method_name="",
+            score=0.0,
+            confidence=0.0,
+            reason="",
+            step_description="",
+            step_conclusion="",
+            method_summary="",
+            script_name="",
+            script_summary="",
+            candidate_payload={},
+            parameters=[],
+        )
+
+    def _upsert_method_suggestion(self, row_index: int, suggestion: MethodSelectionSuggestion) -> None:
+        if self.session_dir is None:
+            return
+        if self.suggestion_result is None:
+            self.suggestion_result = SuggestionGenerationResult(session_id=self.session_dir.name, suggestions=[], notes=[])
+        target_step_id = row_index + 1
+        suggestion.step_id = target_step_id
+        self.suggestion_result.suggestions = [
+            item for item in self.suggestion_result.suggestions
+            if int(getattr(item, "step_id", 0) or 0) != target_step_id
+        ]
+        self.suggestion_result.suggestions.append(suggestion)
+        self.suggestion_result.suggestions = sorted(
+            self.suggestion_result.suggestions,
+            key=lambda item: int(getattr(item, "step_id", 0) or 0),
+        )
 
     def _build_method_suggestion_candidates(self, row_index: int, suggestion, current_value: str = "") -> list[str]:
         candidates: list[str] = []
@@ -4949,9 +5082,17 @@ class RecorderViewerWindow:
         event = self.event_rows[row_index] if 0 <= row_index < len(self.event_rows) and isinstance(self.event_rows[row_index], dict) else {}
         for option in resolve_method_options_for_event(event):
             add_candidate(option.name)
+        for name in self._build_event_type_method_candidates(event):
+            add_candidate(name)
 
         add_candidate(current_value)
         return candidates
+
+    def _build_event_type_method_candidates(self, event: dict[str, object]) -> list[str]:
+        event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")) if isinstance(event, dict) else ""
+        if event_type == "mouseAction":
+            return ["Wheel", "DragDrop"]
+        return []
 
     def _apply_selected_method_suggestion(self, row_index: int, suggestion, selected_method: str) -> None:
         old_method = str(getattr(suggestion, "method_name", "") or "").strip()
@@ -6075,7 +6216,7 @@ class RecorderViewerWindow:
             return
         for parameter in parameters:
             name = str(getattr(parameter, "name", "") or "").strip().lower()
-            if name not in {"sourcepath", "bgimage"}:
+            if name not in {"sourcepath", "targetpath", "bgimage"}:
                 continue
             copied_value = self._copy_parameter_artifact_value_for_current_session(
                 getattr(parameter, "suggested_value", None),
@@ -7787,7 +7928,7 @@ class RecorderViewerWindow:
         max_display_width = max(560, min(1400, screen_width - 160))
         max_display_height = max(360, min(900, screen_height - 240))
         initial_scale = min(max_display_width / image_width, max_display_height / image_height, 1.0)
-        max_scale = max(initial_scale, min(4.0, 6000 / max(image_width, image_height)))
+        max_scale = max(initial_scale, min(3.0, 10000 / max(image_width, image_height)))
         current_scale = initial_scale
         display_width = max(1, int(round(image_width * current_scale)))
         display_height = max(1, int(round(image_height * current_scale)))
@@ -7813,6 +7954,7 @@ class RecorderViewerWindow:
             cursor="crosshair",
             xscrollincrement=1,
             yscrollincrement=1,
+            takefocus=True,
         )
         x_scroll = ttk.Scrollbar(canvas_frame, orient=tk.HORIZONTAL, command=canvas.xview)
         y_scroll = ttk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
@@ -7845,6 +7987,18 @@ class RecorderViewerWindow:
                 max(0, min(image_width, int(round(canvas_x / current_scale)))),
                 max(0, min(image_height, int(round(canvas_y / current_scale)))),
             )
+
+        def event_to_canvas_view_point(event: tk.Event) -> tuple[int, int] | None:
+            root_x = getattr(event, "x_root", None)
+            root_y = getattr(event, "y_root", None)
+            if root_x is None or root_y is None:
+                root_x = canvas.winfo_pointerx()
+                root_y = canvas.winfo_pointery()
+            x = int(root_x - canvas.winfo_rootx())
+            y = int(root_y - canvas.winfo_rooty())
+            if x < 0 or y < 0 or x > viewport_width or y > viewport_height:
+                return None
+            return x, y
 
         def image_rect_to_canvas_rect(image_rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
             return self._scale_image_rect_for_canvas(image_rect, current_scale)
@@ -7926,11 +8080,16 @@ class RecorderViewerWindow:
             return "break"
 
         def on_mouse_wheel(event: tk.Event) -> str:
+            point = event_to_canvas_view_point(event)
+            if point is None:
+                return ""
             delta = int(getattr(event, "delta", 0) or 0)
             wheel_num = int(getattr(event, "num", 0) or 0)
+            if delta == 0 and wheel_num not in {4, 5}:
+                return "break"
             zoom_in = delta > 0 or wheel_num == 4
             zoom_factor = 1.2 if zoom_in else 1 / 1.2
-            update_zoom(current_scale * zoom_factor, int(event.x), int(event.y))
+            update_zoom(current_scale * zoom_factor, point[0], point[1])
             return "break"
 
         def save() -> None:
@@ -7950,18 +8109,26 @@ class RecorderViewerWindow:
 
         actions = ttk.Frame(dialog)
         actions.pack(fill=tk.X, padx=12, pady=(0, 12))
+        ttk.Button(actions, text="放大", command=lambda: update_zoom(current_scale * 1.25)).pack(side=tk.LEFT)
+        ttk.Button(actions, text="缩小", command=lambda: update_zoom(current_scale / 1.25)).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(actions, text="重置缩放", command=lambda: update_zoom(initial_scale)).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(actions, text="保存", command=save).pack(side=tk.RIGHT)
         ttk.Button(actions, text="取消", command=cancel).pack(side=tk.RIGHT, padx=(0, 8))
 
         canvas.bind("<ButtonPress-1>", on_mouse_down)
         canvas.bind("<B1-Motion>", on_mouse_drag)
         canvas.bind("<ButtonRelease-1>", on_mouse_up)
+        canvas.bind("<Enter>", lambda _event: canvas.focus_set())
         canvas.bind("<MouseWheel>", on_mouse_wheel)
         canvas.bind("<Button-4>", on_mouse_wheel)
         canvas.bind("<Button-5>", on_mouse_wheel)
+        dialog.bind("<MouseWheel>", on_mouse_wheel)
+        dialog.bind("<Button-4>", on_mouse_wheel)
+        dialog.bind("<Button-5>", on_mouse_wheel)
         dialog.bind("<Escape>", lambda _event: cancel())
         dialog.bind("<Control-s>", lambda _event: save())
         dialog.geometry(f"{viewport_width + 48}x{viewport_height + 170}")
+        dialog.after(100, canvas.focus_set)
         dialog.focus_set()
 
     def _apply_event_rectangle_edit(

@@ -239,11 +239,13 @@ class RecorderEngine:
         image: Image.Image,
         region: dict[str, int],
         timeout_seconds: int = 120,
+        wait_for_appearance: bool = True,
     ) -> None:
         if not self.is_recording:
             raise RuntimeError("Recorder is not running.")
 
         screenshot = self.store.save_image(image, "wait")
+        wait_condition = "appear" if wait_for_appearance else "disappear"
         event = RecordedEvent(
             event_id=self.store.next_event_id("wait"),
             timestamp=utc_now_iso(),
@@ -255,11 +257,12 @@ class RecorderEngine:
             media=[{"type": "image", "path": screenshot, "region": region}],
             additional_details={
                 "source": "user",
+                "wait_condition": wait_condition,
                 "wait_timeout_seconds": timeout_seconds,
             },
         )
         self.store.append_event(event)
-        self.logger.info("Wait-for-image added | event_id=%s | region=%s | timeout=%s", event.event_id, region, timeout_seconds)
+        self.logger.info("Wait-for-image added | event_id=%s | region=%s | condition=%s | timeout=%s", event.event_id, region, wait_condition, timeout_seconds)
         self.status_callback("Wait step added.")
 
     def add_manual_screenshot_with_media(

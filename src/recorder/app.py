@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import shutil
 import threading
 import time
 import tkinter as tk
+from collections.abc import Callable
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -452,6 +454,8 @@ class RecorderApp:
         self.root.geometry("840x470")
         self.root.minsize(760, 420)
         self.logger = get_logger("app")
+        self._ui_action_queue: queue.Queue[Callable[[], None]] = queue.Queue()
+        self._ui_action_after_id: str | None = None
 
         recordings_dir = resolve_recordings_dir()
         output_dir = recordings_dir.path
@@ -484,6 +488,7 @@ class RecorderApp:
         self.session_metadata_draft = SessionMetadataDraft()
         self._checkpoint_dialog_open = False
         self._shortcut_video_dialog: AICheckpointDialog | None = None
+        self._shortcut_video_request_pending = False
         self._manual_screenshot_in_progress = False
         self.android_recorder_dialog: AndroidRecorderDialog | None = None
         self.current_settings = self.settings_store.load()
@@ -497,6 +502,7 @@ class RecorderApp:
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._handle_root_close)
+        self._schedule_ui_action_poll()
         self._confirm_recordings_output_dir(recordings_dir)
         if self.sync_recordings_to_target:
             self._set_status(self._t(f"录制将先写入本地暂存目录，停止后同步到共享目录: {output_dir}", f"Recordings will be written locally first and synced to the shared folder on stop: {output_dir}"))
@@ -702,15 +708,17 @@ class RecorderApp:
                 if target_lock_handle is not None:
                     target_lock_handle.release()
                 self.logger.exception("Import-and-continue failed | session_dir=%s", session_dir)
-                self.root.after(0, lambda: self._on_import_failed(str(exc)))
+                self._post_ui_action(lambda message=str(exc): self._on_import_failed(message))
                 return
-            self.root.after(0, lambda: self._on_import_success(resume_session_dir, message, target_session_dir=target_session_dir))
+            self._post_ui_action(lambda resume_session_dir=resume_session_dir, message=message, target_session_dir=target_session_dir: self._on_import_success(resume_session_dir, message, target_session_dir=target_session_dir))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def stop_recording(self) -> None:
         if self.stop_in_progress:
             self.logger.info("Stop recording ignored because stop is already in progress")
+            return
+        if not self._discard_active_shortcut_video_for_recording_stop():
             return
 
         self.logger.info("Stop recording requested")
@@ -725,25 +733,25 @@ class RecorderApp:
                 if self.android_recorder_dialog is not None and self.android_recorder_dialog.is_open() and self.android_recorder_dialog.operation_recorder.is_recording:
                     self.android_recorder_dialog.stop_capture_for_main()
                 local_session_dir, local_suggestions_path = self.engine.stop()
-            except RuntimeError as exc:
+            except Exception as exc:
                 self.logger.exception("Stop recording failed")
-                self.root.after(0, lambda: self._on_stop_failed(str(exc)))
+                self._post_ui_action(lambda message=str(exc): self._on_stop_failed(message))
                 return
 
             if self._should_sync_session_to_target(local_session_dir):
-                self.root.after(0, lambda: self._on_local_stop_success(local_session_dir, local_suggestions_path))
+                self._post_ui_action(lambda local_session_dir=local_session_dir, local_suggestions_path=local_suggestions_path: self._on_local_stop_success(local_session_dir, local_suggestions_path))
                 try:
                     session_dir = self._sync_session_to_target(local_session_dir)
                     suggestions_path = session_dir / local_suggestions_path.name
                 except Exception as exc:
                     message = str(exc)
                     self.logger.exception("Failed to sync recording to target | local_session_dir=%s | target_root=%s", local_session_dir, self.recordings_target_root)
-                    self.root.after(0, lambda: self._on_sync_failed(local_session_dir, message))
+                    self._post_ui_action(lambda local_session_dir=local_session_dir, message=message: self._on_sync_failed(local_session_dir, message))
                     return
-                self.root.after(0, lambda: self._on_sync_success(session_dir, suggestions_path, local_session_dir))
+                self._post_ui_action(lambda session_dir=session_dir, suggestions_path=suggestions_path, local_session_dir=local_session_dir: self._on_sync_success(session_dir, suggestions_path, local_session_dir))
                 return
 
-            self.root.after(0, lambda: self._on_stop_success(local_session_dir, local_suggestions_path, local_session_dir=local_session_dir))
+            self._post_ui_action(lambda local_session_dir=local_session_dir, local_suggestions_path=local_suggestions_path: self._on_stop_success(local_session_dir, local_suggestions_path, local_session_dir=local_session_dir))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -760,11 +768,11 @@ class RecorderApp:
         def worker() -> None:
             try:
                 session_dir, suggestions_path = self.engine.save_snapshot()
-            except RuntimeError as exc:
+            except Exception as exc:
                 self.logger.exception("Save snapshot failed")
-                self.root.after(0, lambda: self._on_save_failed(str(exc)))
+                self._post_ui_action(lambda message=str(exc): self._on_save_failed(message))
                 return
-            self.root.after(0, lambda: self._on_save_success(session_dir, suggestions_path))
+            self._post_ui_action(lambda session_dir=session_dir, suggestions_path=suggestions_path: self._on_save_success(session_dir, suggestions_path))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -817,15 +825,9 @@ class RecorderApp:
             except Exception as exc:
                 message = str(exc)
                 self.logger.exception("Recording auto-save failed")
-                try:
-                    self.root.after(0, lambda message=message: self._on_auto_save_failed(message))
-                except Exception:
-                    pass
+                self._post_ui_action(lambda message=message: self._on_auto_save_failed(message))
                 return
-            try:
-                self.root.after(0, lambda session_dir=session_dir, suggestions_path=suggestions_path: self._on_auto_save_success(session_dir, suggestions_path))
-            except Exception:
-                pass
+            self._post_ui_action(lambda session_dir=session_dir, suggestions_path=suggestions_path: self._on_auto_save_success(session_dir, suggestions_path))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -957,6 +959,9 @@ class RecorderApp:
         if not self.engine.is_recording:
             self.logger.info("AI checkpoint video shortcut ignored because recorder is not running")
             return
+        if self.stop_in_progress or self._close_after_stop:
+            self.logger.info("AI checkpoint video shortcut ignored because recording is stopping")
+            return
         active_dialog = self._get_active_shortcut_video_dialog()
         if active_dialog is not None:
             if active_dialog.is_video_stop_in_progress():
@@ -1017,6 +1022,24 @@ class RecorderApp:
                 self._checkpoint_dialog_open = False
             self.logger.info("AI checkpoint video shortcut capture initialized")
 
+    def _discard_active_shortcut_video_for_recording_stop(self) -> bool:
+        active_dialog = self._get_active_shortcut_video_dialog()
+        if active_dialog is None:
+            return True
+        self.logger.info("Discarding active AI checkpoint shortcut video before stopping recorder")
+        self._set_status(self._t("正在停止未完成的 AI Checkpoint 视频录制...", "Stopping unfinished AI checkpoint video recording..."))
+        try:
+            active_dialog.discard_for_recording_stop()
+        except Exception as exc:
+            self.logger.exception("Failed to discard active AI checkpoint shortcut video before recorder stop")
+            messagebox.showerror(
+                self._t("停止录制失败", "Stop recording failed"),
+                self._t(f"无法先停止未完成的 AI Checkpoint 视频录制:\n{exc}", f"Unable to stop the unfinished AI checkpoint video recording first:\n{exc}"),
+                parent=self.root,
+            )
+            return False
+        return True
+
     def _get_active_shortcut_video_dialog(self) -> AICheckpointDialog | None:
         dialog = self._shortcut_video_dialog
         if dialog is None:
@@ -1061,19 +1084,55 @@ class RecorderApp:
             self.logger.info("Manual screenshot capture closed")
 
     def _request_ai_checkpoint_from_shortcut(self) -> None:
-        self.root.after(0, self._add_checkpoint_from_shortcut)
+        self._post_ui_action(self._add_checkpoint_from_shortcut)
 
     def _request_ai_checkpoint_video_from_shortcut(self) -> None:
-        self.root.after(0, self._add_video_checkpoint_from_shortcut)
+        if self._shortcut_video_request_pending:
+            self.logger.info("AI checkpoint video shortcut ignored because a shortcut request is already pending")
+            return
+        self._shortcut_video_request_pending = True
+        self._post_ui_action(self._run_ai_checkpoint_video_shortcut_request)
+
+    def _run_ai_checkpoint_video_shortcut_request(self) -> None:
+        try:
+            self._add_video_checkpoint_from_shortcut()
+        finally:
+            self._shortcut_video_request_pending = False
 
     def _request_manual_screenshot_from_shortcut(self) -> None:
-        self.root.after(0, self.capture_manual_screenshot)
+        self._post_ui_action(self.capture_manual_screenshot)
 
     def _set_status(self, message: str) -> None:
         if threading.current_thread() is threading.main_thread():
             self.status_var.set(message)
             return
-        self.root.after(0, lambda: self.status_var.set(message))
+        self._post_ui_action(lambda message=message: self.status_var.set(message))
+
+    def _post_ui_action(self, action: Callable[[], None]) -> None:
+        if getattr(self, "_root_close_finalized", False):
+            return
+        self._ui_action_queue.put(action)
+
+    def _schedule_ui_action_poll(self) -> None:
+        if self._ui_action_after_id is not None or self._root_close_finalized:
+            return
+        try:
+            self._ui_action_after_id = self.root.after(50, self._drain_ui_action_queue)
+        except tk.TclError:
+            self._ui_action_after_id = None
+
+    def _drain_ui_action_queue(self) -> None:
+        self._ui_action_after_id = None
+        for _ in range(50):
+            try:
+                action = self._ui_action_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                action()
+            except Exception:
+                self.logger.exception("Failed to run queued UI action")
+        self._schedule_ui_action_poll()
 
     def open_viewer(self) -> None:
         initial_dir = self.last_session_dir or self.recordings_target_root
@@ -1414,6 +1473,12 @@ class RecorderApp:
             return
         self._root_close_finalized = True
         self._cancel_auto_save_recording()
+        if self._ui_action_after_id is not None:
+            try:
+                self.root.after_cancel(self._ui_action_after_id)
+            except Exception:
+                pass
+            self._ui_action_after_id = None
         self._destroy_close_wait_dialog()
         self.design_steps_overlay.destroy()
         self.root.destroy()
@@ -1637,10 +1702,7 @@ class RecorderApp:
                 f"Syncing to shared folder: {local_session_dir.name} {percent:.1f}% ({files_copied}/{total_files} files, {self._format_bytes(bytes_copied)}/{self._format_bytes(total_bytes)}){active_suffix}; Recorder will exit when done.",
             )
             self._set_status(message)
-            try:
-                self.root.after(0, lambda message=message: self._show_close_wait_dialog(message))
-            except Exception:
-                pass
+            self._post_ui_action(lambda message=message: self._show_close_wait_dialog(message))
             return
         self._set_status(
             self._t(

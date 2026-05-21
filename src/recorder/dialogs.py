@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
 import time
 import threading
@@ -12,6 +13,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageGrab
 
+from src.common.app_logging import get_logger
 from src.common.prompt_templates import PromptTemplateRecord, load_checkpoint_prompt_templates
 from src.common.runtime_paths import get_settings_path
 from src.database import fetch_distinct_baseline_names, fetch_latest_baseline_design_steps, fetch_latest_testcase_management_record
@@ -1650,6 +1652,10 @@ class WaitForImageDialog:
         self.window.transient(parent)
         self.window.grab_set()
         self.timeout_seconds_var = tk.StringVar(value="120")
+        self.wait_for_appearance_var = tk.BooleanVar(value=True)
+        self._appearance_note_hint = self._t("提示：等待此区域中的目标图片出现", "Hint: Wait until the target image appears in this region")
+        self._disappearance_note_hint = self._t("提示：等待此区域中的目标图片消失", "Hint: Wait until the target image disappears from this region")
+        self._note_placeholder_active = False
 
         self._build_ui()
         self.window.protocol("WM_DELETE_WINDOW", self._close)
@@ -1697,7 +1703,7 @@ class WaitForImageDialog:
         form_frame = ttk.LabelFrame(content, text=self._t("等待配置", "Wait Settings"))
         form_frame.grid(row=0, column=1, sticky="nsew")
         form_frame.columnconfigure(1, weight=1)
-        form_frame.rowconfigure(1, weight=1)
+        form_frame.rowconfigure(2, weight=1)
 
         ttk.Label(form_frame, text=self._t("最大等待时间", "Max Wait Time")).grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 6))
         timeout_input = ttk.Frame(form_frame)
@@ -1705,10 +1711,21 @@ class WaitForImageDialog:
         ttk.Entry(timeout_input, textvariable=self.timeout_seconds_var, width=10).pack(side=tk.LEFT)
         ttk.Label(timeout_input, text=self._t("秒", "s")).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Label(form_frame, text=self._t("等待说明", "Wait Description")).grid(row=1, column=0, sticky=tk.NW, padx=12, pady=(4, 12))
+        ttk.Label(form_frame, text=self._t("等待条件", "Wait Condition")).grid(row=1, column=0, sticky=tk.W, padx=12, pady=(4, 6))
+        ttk.Checkbutton(
+            form_frame,
+            text=self._t("等待目标图片出现（取消勾选则等待消失）", "Wait for target image to appear (uncheck to wait for disappearance)"),
+            variable=self.wait_for_appearance_var,
+            command=self._sync_wait_condition_note,
+        ).grid(row=1, column=1, sticky=tk.W, padx=12, pady=(4, 6))
+
+        ttk.Label(form_frame, text=self._t("等待说明", "Wait Description")).grid(row=2, column=0, sticky=tk.NW, padx=12, pady=(4, 12))
         self.note_text = tk.Text(form_frame, height=5, wrap=tk.WORD, font=("Segoe UI", 11))
-        self.note_text.grid(row=1, column=1, sticky="nsew", padx=(12, 12), pady=(4, 12))
-        self.note_text.insert("1.0", self._t("等待此区域中的目标图片出现", "Wait until the target image appears in this region"))
+        self.note_text.grid(row=2, column=1, sticky="nsew", padx=(12, 12), pady=(4, 12))
+        self.note_text.tag_configure("placeholder", foreground="#888888")
+        self.note_text.bind("<FocusIn>", self._on_note_focus_in, add="+")
+        self.note_text.bind("<FocusOut>", self._on_note_focus_out, add="+")
+        self._set_note_placeholder()
 
         info_frame = ttk.Frame(wrapper)
         info_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
@@ -1741,7 +1758,7 @@ class WaitForImageDialog:
         self.preview_view.set_image(self.selection.image)
 
     def save(self) -> None:
-        note = self.note_text.get("1.0", tk.END).strip()
+        note = self._get_note_text()
         if not self.selection:
             messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请先选择等待区域。", "Select a wait region first."), parent=self.window)
             return
@@ -1757,8 +1774,52 @@ class WaitForImageDialog:
             messagebox.showerror(self._t("保存失败", "Save failed"), self._t("最大等待时间必须大于 0 秒。", "The maximum wait time must be greater than 0 seconds."), parent=self.window)
             return
 
-        self.engine.add_wait_for_image_with_media(note, self.selection.image, self.selection.to_region_dict(), timeout_seconds=timeout_seconds)
+        self.engine.add_wait_for_image_with_media(
+            note,
+            self.selection.image,
+            self.selection.to_region_dict(),
+            timeout_seconds=timeout_seconds,
+            wait_for_appearance=bool(self.wait_for_appearance_var.get()),
+        )
         self._close()
+
+    def _sync_wait_condition_note(self) -> None:
+        if not hasattr(self, "note_text"):
+            return
+        if self._note_placeholder_active:
+            self._set_note_placeholder()
+            return
+        if self.note_text.get("1.0", tk.END).strip():
+            return
+        if self.note_text.focus_get() is self.note_text:
+            return
+        self._set_note_placeholder()
+
+    def _get_note_text(self) -> str:
+        if self._note_placeholder_active:
+            return ""
+        return self.note_text.get("1.0", tk.END).strip()
+
+    def _current_note_placeholder(self) -> str:
+        return self._appearance_note_hint if self.wait_for_appearance_var.get() else self._disappearance_note_hint
+
+    def _set_note_placeholder(self) -> None:
+        self._note_placeholder_active = True
+        self.note_text.delete("1.0", tk.END)
+        self.note_text.insert("1.0", self._current_note_placeholder(), "placeholder")
+
+    def _clear_note_placeholder(self) -> None:
+        if not self._note_placeholder_active:
+            return
+        self.note_text.delete("1.0", tk.END)
+        self._note_placeholder_active = False
+
+    def _on_note_focus_in(self, _event: tk.Event) -> None:
+        self._clear_note_placeholder()
+
+    def _on_note_focus_out(self, _event: tk.Event) -> None:
+        if not self.note_text.get("1.0", tk.END).strip():
+            self._set_note_placeholder()
 
     def _close(self) -> None:
         if not self._parent_was_iconic_on_open:
@@ -1805,6 +1866,9 @@ class AICheckpointDialog:
         self._auto_start_video_selection = auto_start_video_selection
         self._on_close = on_close
         self._start_hidden = start_hidden
+        self._video_preview_queue: queue.Queue[Image.Image] = queue.Queue(maxsize=2)
+        self._video_preview_after_id: str | None = None
+        self.logger = get_logger("dialog")
 
         self.window = tk.Toplevel(parent)
         if self._start_hidden:
@@ -2238,9 +2302,22 @@ class AICheckpointDialog:
             fps=self.settings_store.load().video_fps,
             preview_callback=self._on_video_preview_frame,
         )
-        recorder.start()
         self.video_recorder = recorder
         self.video_path = output_path
+        self._clear_video_preview_queue()
+        self._start_video_preview_polling()
+        try:
+            recorder.start()
+        except Exception as exc:
+            self._cancel_video_preview_polling()
+            self.video_recorder = None
+            self.video_path = None
+            messagebox.showerror(
+                self._t("视频录制失败", "Video recording failed"),
+                str(exc),
+                parent=self.window,
+            )
+            return
         self.video_status_var.set(f"视频录制中: {output_path.name}")
         self._refresh_media_summary()
         self.video_preview_view.set_image(selection.image)
@@ -2252,6 +2329,8 @@ class AICheckpointDialog:
             return
         if not self.video_recorder or not self.video_recorder.is_recording:
             return
+        self.video_recorder.set_preview_callback(None)
+        self._cancel_video_preview_polling()
         output_path = self.video_recorder.stop()
         self.video_status_var.set(
             f"视频已保存: {output_path.name} | 帧数={self.video_recorder.frame_count} | 时长={self.video_recorder.duration_seconds:.1f}s"
@@ -2270,43 +2349,61 @@ class AICheckpointDialog:
         self.video_status_var.set(self._t(f"正在保存视频: {video_path.name}", f"Saving video: {video_path.name}"))
         self.video_preview_view.set_status(self._t("正在保存视频...", "Saving video..."))
         self._sync_video_preview_actions()
+        recorder.set_preview_callback(None)
+        self._cancel_video_preview_polling()
+        result_queue: queue.Queue[tuple[Path, Image.Image | None, str]] = queue.Queue(maxsize=1)
 
         def worker() -> None:
             preview_frame: Image.Image | None = None
             preview_error = ""
-            output_path = recorder.stop()
-            if output_path.exists():
-                preview_frame = load_video_preview_frame(output_path)
-                if preview_frame is None:
-                    preview_error = self._t(
-                        f"视频文件: {output_path.name}\n无法读取预览帧",
-                        f"Video file: {output_path.name}\nUnable to read a preview frame",
-                    )
-            else:
-                preview_error = self._t("视频文件不存在", "The video file does not exist")
-
-            def finish() -> None:
-                self._video_stop_in_progress = False
-                if not self.window.winfo_exists():
-                    return
-                self.video_status_var.set(
-                    f"视频已保存: {output_path.name} | 帧数={recorder.frame_count} | 时长={recorder.duration_seconds:.1f}s"
-                )
-                self._switch_preview_mode("video")
-                if preview_frame is not None:
-                    self.video_preview_view.set_image(preview_frame)
-                else:
-                    self.video_preview_view.clear(preview_error)
-                self._sync_video_preview_actions()
-                if on_complete is not None:
-                    on_complete()
-
+            output_path = video_path
             try:
-                self.window.after(0, finish)
-            except tk.TclError:
+                output_path = recorder.stop()
+                if output_path.exists():
+                    preview_frame = load_video_preview_frame(output_path)
+                    if preview_frame is None:
+                        preview_error = self._t(
+                            f"视频文件: {output_path.name}\n无法读取预览帧",
+                            f"Video file: {output_path.name}\nUnable to read a preview frame",
+                        )
+                else:
+                    preview_error = self._t("视频文件不存在", "The video file does not exist")
+            except Exception as exc:
+                preview_error = self._t(f"视频保存失败: {exc}", f"Video save failed: {exc}")
+                self.logger.exception("Failed to stop AI checkpoint video recorder | video_path=%s", video_path)
+            try:
+                result_queue.put_nowait((output_path, preview_frame, preview_error))
+            except queue.Full:
+                pass
+
+        def poll_result() -> None:
+            try:
+                output_path, preview_frame, preview_error = result_queue.get_nowait()
+            except queue.Empty:
+                if self._window_exists():
+                    try:
+                        self.window.after(100, poll_result)
+                    except tk.TclError:
+                        pass
                 return
 
+            self._video_stop_in_progress = False
+            if not self._window_exists():
+                return
+            self.video_status_var.set(
+                f"视频已保存: {output_path.name} | 帧数={recorder.frame_count} | 时长={recorder.duration_seconds:.1f}s"
+            )
+            self._switch_preview_mode("video")
+            if preview_frame is not None:
+                self.video_preview_view.set_image(preview_frame)
+            else:
+                self.video_preview_view.clear(preview_error)
+            self._sync_video_preview_actions()
+            if on_complete is not None:
+                on_complete()
+
         threading.Thread(target=worker, daemon=True).start()
+        self.window.after(100, poll_result)
         return True
 
     def is_video_recording_active(self) -> bool:
@@ -2408,6 +2505,9 @@ class AICheckpointDialog:
             return
         if self.video_recorder and self.video_recorder.is_recording:
             self.stop_video()
+        self._cancel_video_preview_polling()
+        if self.video_recorder:
+            self.video_recorder.set_preview_callback(None)
         self.video_path = None
         self.video_region = None
         self.video_status_var.set("未录制视频")
@@ -2605,7 +2705,9 @@ class AICheckpointDialog:
                 parent=self.window,
             )
             return
+        self._cancel_video_preview_polling()
         if self.video_recorder and self.video_recorder.is_recording:
+            self.video_recorder.set_preview_callback(None)
             self.video_recorder.stop()
         if not self.saved:
             self.draft.clear()
@@ -2614,9 +2716,42 @@ class AICheckpointDialog:
             self.parent.lift()
             self.parent.focus_force()
         self.window.destroy()
-        if self._on_close is not None:
+        self._notify_closed()
+
+    def discard_for_recording_stop(self) -> None:
+        self.logger.info(
+            "Discarding unfinished AI checkpoint dialog before recorder stop | has_video=%s | recording_active=%s | stop_in_progress=%s",
+            self.video_path is not None,
+            self.is_video_recording_active(),
+            self._video_stop_in_progress,
+        )
+        self._cancel_video_preview_polling()
+        recorder = self.video_recorder
+        self.video_recorder = None
+        if recorder is not None:
+            recorder.set_preview_callback(None)
+            if recorder.is_recording:
+                recorder.stop()
+        self._video_stop_in_progress = False
+        self.saved = False
+        self.draft.clear()
+        try:
+            if self.window.winfo_exists():
+                try:
+                    self.window.grab_release()
+                except Exception:
+                    pass
+                self.window.destroy()
+        except tk.TclError:
+            pass
+        self._notify_closed()
+
+    def _notify_closed(self) -> None:
+        callback = self._on_close
+        self._on_close = None
+        if callback is not None:
             try:
-                self._on_close(self)
+                callback(self)
             except Exception:
                 pass
 
@@ -2655,7 +2790,69 @@ class AICheckpointDialog:
             self.screenshot_preview_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
     def _on_video_preview_frame(self, image: Image.Image) -> None:
-        self.window.after(0, lambda: self.video_preview_view.set_image(image))
+        try:
+            frame = image.copy()
+        except Exception:
+            return
+        try:
+            self._video_preview_queue.put_nowait(frame)
+        except queue.Full:
+            try:
+                self._video_preview_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._video_preview_queue.put_nowait(frame)
+            except queue.Full:
+                pass
+
+    def _start_video_preview_polling(self) -> None:
+        if self._video_preview_after_id is not None or not self._window_exists():
+            return
+        try:
+            self._video_preview_after_id = self.window.after(120, self._drain_video_preview_queue)
+        except tk.TclError:
+            self._video_preview_after_id = None
+
+    def _drain_video_preview_queue(self) -> None:
+        self._video_preview_after_id = None
+        if not self._window_exists():
+            return
+
+        latest_frame: Image.Image | None = None
+        while True:
+            try:
+                latest_frame = self._video_preview_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest_frame is not None and self.is_video_recording_active() and not self._video_stop_in_progress:
+            self.video_preview_view.set_image(latest_frame)
+
+        if self.is_video_recording_active() and not self._video_stop_in_progress:
+            self._start_video_preview_polling()
+
+    def _cancel_video_preview_polling(self) -> None:
+        after_id = self._video_preview_after_id
+        self._video_preview_after_id = None
+        if after_id is not None and self._window_exists():
+            try:
+                self.window.after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._clear_video_preview_queue()
+
+    def _clear_video_preview_queue(self) -> None:
+        while True:
+            try:
+                self._video_preview_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _window_exists(self) -> bool:
+        try:
+            return bool(self.window.winfo_exists())
+        except tk.TclError:
+            return False
 
     def _bind_preview_context_menu(self, preview_view: ZoomableImageView, slot_index: int) -> None:
         menu = tk.Menu(self.window, tearoff=0)

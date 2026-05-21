@@ -573,6 +573,7 @@ def _derive_get_screenshot_values(event: dict[str, Any]) -> tuple[dict[str, Any]
 def _derive_wait_for_exists_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
     media_items = event.get("media", []) if isinstance(event.get("media", []), list) else []
     note_text = str(event.get("note", "")).strip()
+    wait_condition = _extract_wait_condition(event)
     derived_values: dict[str, Any] = {}
     evidence_map: dict[str, list[str]] = {}
     missing_map: dict[str, str] = {}
@@ -597,7 +598,32 @@ def _derive_wait_for_exists_values(event: dict[str, Any]) -> tuple[dict[str, Any
     else:
         missing_map["Description"] = "事件明细.note 为空，无法生成 WaitForExists.Description。"
 
+    if wait_condition == "disappear":
+        derived_values["exist"] = False
+        evidence_map["exist"] = ["事件明细.additional_details.wait_condition=disappear，因此 WaitForExists.exist=false。"]
+
     return derived_values, evidence_map, missing_map
+
+
+def _extract_wait_condition(event: dict[str, Any]) -> str:
+    details = event.get("additional_details", {}) if isinstance(event.get("additional_details", {}), dict) else {}
+    raw_condition = str(details.get("wait_condition", "") or "").strip().lower()
+    if raw_condition in {"disappear", "disappearance", "hidden", "absent", "not_exists", "not_exist", "wait_for_disappearance"}:
+        return "disappear"
+    if raw_condition in {"appear", "appearance", "visible", "present", "exists", "exist", "wait_for_appearance"}:
+        return "appear"
+
+    raw_appearance = details.get("wait_for_appearance")
+    if isinstance(raw_appearance, bool):
+        return "appear" if raw_appearance else "disappear"
+    if isinstance(raw_appearance, str):
+        lowered = raw_appearance.strip().lower()
+        if lowered in {"false", "0", "no", "n", "disappear", "disappearance"}:
+            return "disappear"
+        if lowered in {"true", "1", "yes", "y", "appear", "appearance"}:
+            return "appear"
+
+    return "appear"
 
 
 def _derive_agent_interface_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
@@ -793,6 +819,44 @@ def _derive_wheel_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[st
     return derived_values, evidence_map, missing_map
 
 
+def _derive_wheel_values_for_session(
+    event: dict[str, Any],
+    _ai_observation_text: str,
+    session_dir: Path | None,
+) -> ParameterDerivationResult:
+    derived_values, evidence_map, missing_map = _derive_wheel_values(event)
+    if session_dir is None:
+        return derived_values, evidence_map, missing_map
+
+    source_screenshot = _resolve_matching_click_source_screenshot(event, session_dir)
+    rect = _extract_matching_click_rectangle(event)
+    if source_screenshot is None:
+        missing_map["targetPath"] = "事件明细中没有可用的 screenshot/media 图片，无法裁剪 Wheel.targetPath。"
+        return derived_values, evidence_map, missing_map
+    if rect is None:
+        missing_map["targetPath"] = "事件明细中没有可用的 ui_element.rectangle/target_rect/rect，无法裁剪 Wheel.targetPath。"
+        return derived_values, evidence_map, missing_map
+
+    try:
+        relative_target_path, crop_box = _create_wheel_target_image(source_screenshot, session_dir, event, rect)
+    except Exception as exc:
+        missing_map["targetPath"] = f"根据事件截图和 rect 裁剪 Wheel.targetPath 失败: {exc}"
+        return derived_values, evidence_map, missing_map
+
+    derived_values["targetPath"] = relative_target_path
+    derived_values.pop("wheelTimes", None)
+    evidence_map.pop("wheelTimes", None)
+    missing_map.pop("wheelTimes", None)
+    derived_values["clickBeforeWheel"] = True
+    evidence_map["targetPath"] = [
+        f"事件截图={_format_session_relative_path(source_screenshot, session_dir)}",
+        f"事件 rect={rect}，按 MatchingClick 规则内缩后裁剪 crop_box={list(crop_box)}",
+        f"Wheel 目标图已保存到 {relative_target_path}",
+    ]
+    evidence_map["clickBeforeWheel"] = ["已生成 Wheel.targetPath，因此默认先点击目标图位置再滚轮，clickBeforeWheel=True。"]
+    return derived_values, evidence_map, missing_map
+
+
 def _derive_drag_drop_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
     mouse = event.get("mouse", {}) if isinstance(event.get("mouse", {}), dict) else {}
     derived_values: dict[str, Any] = {}
@@ -882,6 +946,7 @@ METHOD_PARAMETER_DERIVERS: dict[str, ParameterDeriver] = {
 
 SESSION_AWARE_METHOD_PARAMETER_DERIVERS: dict[str, SessionAwareParameterDeriver] = {
     "matchingclick": _derive_matching_click_values,
+    "wheel": _derive_wheel_values_for_session,
 }
 
 
@@ -1019,6 +1084,13 @@ def _reorder_parameter_names_for_method(method_name: str, ordered_names: list[st
         for name in reversed(["sourcePath", "sigleMatch", "rect"]):
             reordered = _move_name_to_front(reordered, name)
         return reordered
+    if normalized_method == "wheel":
+        for name in reversed(["targetPath", "clickBeforeWheel", "isDown", "wheelTimes", "x", "y"]):
+            if name not in reordered:
+                reordered.insert(0, name)
+                continue
+            reordered = _move_name_to_front(reordered, name)
+        return reordered
     if normalized_method == "scandll":
         for name in reversed(["funcName"]):
             reordered = _move_name_to_front(reordered, name)
@@ -1041,6 +1113,8 @@ def _reorder_parameter_suggestions(method_name: str, suggestions: list[MethodPar
         priority_order = {"rowValue": 0, "clickPoint": 1, "rowIndex": 2, "multiSelect": 3, "headerList": 4}
     if normalized_method == "matchingclick":
         priority_order = {"sourcePath": 0, "sigleMatch": 1, "rect": 2}
+    if normalized_method == "wheel":
+        priority_order = {"targetPath": 0, "clickBeforeWheel": 1, "isDown": 2, "wheelTimes": 3, "x": 4, "y": 5}
     if normalized_method == "scandll":
         priority_order = {"funcName": 0}
     if normalized_method == "click":
@@ -1408,7 +1482,9 @@ def _extract_matching_click_rectangle(event: dict[str, Any]) -> list[int] | None
     ui_element = event.get("ui_element", {}) if isinstance(event.get("ui_element", {}), dict) else {}
     candidates: list[object] = [
         ui_element.get("rectangle"),
+        ui_element.get("rect"),
         event.get("rectangle"),
+        event.get("rect"),
         event.get("target_rectangle"),
     ]
     additional_details = event.get("additional_details", {}) if isinstance(event.get("additional_details", {}), dict) else {}
@@ -1417,8 +1493,10 @@ def _extract_matching_click_rectangle(event: dict[str, Any]) -> list[int] | None
         [
             visual_focus_hint.get("target_rect"),
             visual_focus_hint.get("rectangle"),
+            visual_focus_hint.get("rect"),
             additional_details.get("target_rect"),
             additional_details.get("rectangle"),
+            additional_details.get("rect"),
         ]
     )
     media_items = event.get("media", []) if isinstance(event.get("media", []), list) else []
@@ -1487,17 +1565,133 @@ def _create_matching_click_template_image(
     event: dict[str, Any],
     rect: list[int],
 ) -> tuple[str, tuple[int, int, int, int]]:
+    return _create_rect_template_image(source_screenshot, session_dir, event, rect, "matchingclick")
+
+
+def _create_wheel_target_image(
+    source_screenshot: Path,
+    session_dir: Path,
+    event: dict[str, Any],
+    rect: list[int],
+) -> tuple[str, tuple[int, int, int, int]]:
+    return _create_rect_template_image(source_screenshot, session_dir, event, rect, "wheel_target")
+
+
+def _create_rect_template_image(
+    source_screenshot: Path,
+    session_dir: Path,
+    event: dict[str, Any],
+    rect: list[int],
+    template_kind: str,
+) -> tuple[str, tuple[int, int, int, int]]:
     with Image.open(source_screenshot) as image:
-        crop_box = _build_matching_click_crop_box(rect, image.size)
+        crop_box = _build_rect_crop_box_for_source_image(event, source_screenshot, session_dir, rect, image.size)
         if crop_box is None:
-            raise ValueError("事件 rectangle 与截图尺寸不匹配，无法裁剪 MatchingClick 模板图。")
+            raise ValueError("事件 rect 与截图尺寸不匹配，无法裁剪目标模板图。")
         cropped = image.crop(crop_box).convert("RGB")
 
-    relative_path = _build_matching_click_template_relative_path(event, source_screenshot)
+    relative_path = _build_rect_template_relative_path(event, source_screenshot, template_kind)
     output_path = session_dir / relative_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cropped.save(output_path, format="PNG")
     return relative_path.as_posix(), crop_box
+
+
+def _build_rect_crop_box_for_source_image(
+    event: dict[str, Any],
+    source_screenshot: Path,
+    session_dir: Path,
+    rect: list[int],
+    image_size: tuple[int, int],
+) -> tuple[int, int, int, int] | None:
+    for candidate_rect in _build_image_space_rect_candidates(event, source_screenshot, session_dir, rect):
+        crop_box = _build_matching_click_crop_box(candidate_rect, image_size)
+        if crop_box is not None:
+            return crop_box
+    return None
+
+
+def _build_image_space_rect_candidates(
+    event: dict[str, Any],
+    source_screenshot: Path,
+    session_dir: Path,
+    rect: list[int],
+) -> list[list[int]]:
+    candidates: list[list[int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+
+    def add_candidate(candidate: list[int] | tuple[int, int, int, int]) -> None:
+        values = [int(item) for item in candidate[:4]]
+        key = tuple(values)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(values)
+
+    def add_origin_adjusted(origin: tuple[int, int] | None) -> None:
+        if origin is None:
+            return
+        left_offset, top_offset = origin
+        add_candidate([rect[0] - left_offset, rect[1] - top_offset, rect[2] - left_offset, rect[3] - top_offset])
+
+    manual_origin = _extract_manual_rectangle_image_origin(event, source_screenshot, session_dir)
+    add_origin_adjusted(manual_origin)
+    add_origin_adjusted(_extract_matching_media_image_origin(event, source_screenshot, session_dir))
+    add_candidate(rect)
+    return candidates
+
+
+def _extract_manual_rectangle_image_origin(
+    event: dict[str, Any],
+    source_screenshot: Path,
+    session_dir: Path,
+) -> tuple[int, int] | None:
+    details = event.get("additional_details", {}) if isinstance(event.get("additional_details", {}), dict) else {}
+    manual_edit = details.get("rectangle_manual_edit", {}) if isinstance(details.get("rectangle_manual_edit", {}), dict) else {}
+    if not manual_edit:
+        return None
+    raw_image_path = str(manual_edit.get("image_path", "") or "").strip()
+    if raw_image_path and not _session_artifact_path_matches(raw_image_path, source_screenshot, session_dir):
+        return None
+    return _extract_origin_tuple(manual_edit.get("image_origin"))
+
+
+def _extract_matching_media_image_origin(
+    event: dict[str, Any],
+    source_screenshot: Path,
+    session_dir: Path,
+) -> tuple[int, int] | None:
+    media_items = event.get("media", []) if isinstance(event.get("media", []), list) else []
+    for item in media_items:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("path", "") or "").strip()
+        if not raw_path or not _session_artifact_path_matches(raw_path, source_screenshot, session_dir):
+            continue
+        return _extract_origin_tuple(item.get("region"))
+    return None
+
+
+def _session_artifact_path_matches(raw_path: str, target_path: Path, session_dir: Path) -> bool:
+    try:
+        resolved = _resolve_session_artifact_path(raw_path, session_dir).resolve()
+    except Exception:
+        resolved = _resolve_session_artifact_path(raw_path, session_dir)
+    try:
+        target = target_path.resolve()
+    except Exception:
+        target = target_path
+    return resolved == target
+
+
+def _extract_origin_tuple(value: object) -> tuple[int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    left = _coerce_int(value.get("left", value.get("x")))
+    top = _coerce_int(value.get("top", value.get("y")))
+    if left is None or top is None:
+        return None
+    return int(left), int(top)
 
 
 def _build_matching_click_crop_box(rect: list[int], image_size: tuple[int, int]) -> tuple[int, int, int, int] | None:
@@ -1530,12 +1724,17 @@ def _build_matching_click_crop_box(rect: list[int], image_size: tuple[int, int])
 
 
 def _build_matching_click_template_relative_path(event: dict[str, Any], source_screenshot: Path) -> Path:
+    return _build_rect_template_relative_path(event, source_screenshot, "matchingclick")
+
+
+def _build_rect_template_relative_path(event: dict[str, Any], source_screenshot: Path, template_kind: str) -> Path:
     source_stem = _sanitize_matching_click_path_segment(source_screenshot.stem)
     event_id = _sanitize_matching_click_path_segment(str(event.get("event_id", "") or ""))
+    kind = _sanitize_matching_click_path_segment(template_kind)
     name_parts = [source_stem]
     if event_id and event_id.lower() not in source_stem.lower():
         name_parts.append(event_id)
-    name_parts.append("matchingclick")
+    name_parts.append(kind)
     return Path("screenshots", "matching_click", "_".join(name_parts) + ".png")
 
 

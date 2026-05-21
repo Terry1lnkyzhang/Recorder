@@ -12,6 +12,8 @@ import mss
 import numpy as np
 from PIL import Image, ImageGrab, ImageTk
 
+from src.common.app_logging import get_logger
+
 
 @dataclass(slots=True)
 class RegionSelection:
@@ -173,29 +175,58 @@ class RegionVideoRecorder:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._is_recording = False
+        self._callback_lock = threading.Lock()
+        self._record_error: Exception | None = None
         self.frame_count = 0
         self.duration_seconds = 0.0
+        self.logger = get_logger("capture")
 
     @property
     def is_recording(self) -> bool:
         return self._is_recording
 
+    @property
+    def record_error(self) -> Exception | None:
+        return self._record_error
+
+    def set_preview_callback(self, preview_callback) -> None:
+        with self._callback_lock:
+            self.preview_callback = preview_callback
+
     def start(self) -> None:
         if self._is_recording:
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._record_loop, daemon=True)
-        self._thread.start()
+        self._record_error = None
         self._is_recording = True
+        self._thread = threading.Thread(target=self._record_loop, daemon=True)
+        try:
+            self._thread.start()
+        except Exception:
+            self._is_recording = False
+            raise
 
     def stop(self) -> Path:
-        if not self._is_recording:
+        thread = self._thread
+        if not self._is_recording and not (thread and thread.is_alive()):
             return self.output_path
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=10)
+        if thread and threading.current_thread() is not thread:
+            thread.join(timeout=10)
+            if thread.is_alive():
+                self.logger.warning("Region video recorder thread did not stop within timeout | output_path=%s", self.output_path)
         self._is_recording = False
         return self.output_path
+
+    def _emit_preview_frame(self, image: Image.Image) -> None:
+        with self._callback_lock:
+            callback = self.preview_callback
+        if callback is None:
+            return
+        try:
+            callback(image)
+        except Exception:
+            self.logger.exception("Region video preview callback failed | output_path=%s", self.output_path)
 
     def _record_loop(self) -> None:
         started_at = time.perf_counter()
@@ -207,17 +238,22 @@ class RegionVideoRecorder:
         }
         frame_interval = 1.0 / self.fps
 
-        with mss.mss() as sct, imageio.get_writer(self.output_path, fps=self.fps, codec="libx264") as writer:
-            while not self._stop_event.is_set():
-                frame_start = time.perf_counter()
-                shot = sct.grab(monitor)
-                frame = np.asarray(shot)[:, :, :3][:, :, ::-1]
-                writer.append_data(frame)
-                self.frame_count += 1
-                if self.preview_callback and self.frame_count % 2 == 0:
-                    self.preview_callback(Image.fromarray(frame))
-                elapsed = time.perf_counter() - frame_start
-                if elapsed < frame_interval:
-                    time.sleep(frame_interval - elapsed)
-
-        self.duration_seconds = time.perf_counter() - started_at
+        try:
+            with mss.mss() as sct, imageio.get_writer(self.output_path, fps=self.fps, codec="libx264") as writer:
+                while not self._stop_event.is_set():
+                    frame_start = time.perf_counter()
+                    shot = sct.grab(monitor)
+                    frame = np.asarray(shot)[:, :, :3][:, :, ::-1]
+                    writer.append_data(frame)
+                    self.frame_count += 1
+                    if self.frame_count % 2 == 0:
+                        self._emit_preview_frame(Image.fromarray(frame))
+                    elapsed = time.perf_counter() - frame_start
+                    if elapsed < frame_interval:
+                        time.sleep(frame_interval - elapsed)
+        except Exception as exc:
+            self._record_error = exc
+            self.logger.exception("Region video recorder failed | output_path=%s | region=%s", self.output_path, self.region)
+        finally:
+            self.duration_seconds = time.perf_counter() - started_at
+            self._is_recording = False
