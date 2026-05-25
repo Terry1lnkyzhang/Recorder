@@ -4,7 +4,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from src.common.session_summary import normalize_session_review_status
+from src.common.session_summary import normalize_session_priority, normalize_session_review_status
 
 
 _VK_CODE_NAME_MAP = {
@@ -90,6 +90,7 @@ class SessionMetadata:
     name: str = ""
     recorder_person: str = ""
     converter_person: str = ""
+    priority: str = ""
     design_steps: str = ""
     preconditions: str = ""
     configuration_requirements: str = ""
@@ -119,6 +120,7 @@ class SessionMetadata:
             name=name,
             recorder_person=str(data.get("recorder_person", "")),
             converter_person=str(data.get("converter_person", "")),
+            priority=normalize_session_priority(data.get("priority", "")),
             design_steps=str(data.get("design_steps", "")),
             preconditions=str(data.get("preconditions", "")),
             configuration_requirements=str(data.get("configuration_requirements", "")),
@@ -138,6 +140,7 @@ class SessionMetadata:
             "name": "" if self.is_prs_recording else self.name,
             "recorder_person": self.recorder_person,
             "converter_person": self.converter_person,
+            "priority": normalize_session_priority(self.priority),
             "design_steps": self.design_steps,
             "preconditions": self.preconditions,
             "configuration_requirements": self.configuration_requirements,

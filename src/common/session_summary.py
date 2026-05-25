@@ -12,6 +12,11 @@ SESSION_REVIEW_STATUS_EMPTY = ""
 SESSION_REVIEW_STATUS_CHECKPOINT_COMPLETE = "checkpoint_completed"
 SESSION_REVIEW_STATUS_DEBUG_COMPLETE = "debug_completed"
 SESSION_REVIEW_STATUS_RECORDER_PERSON_PENDING = "recorder_person_pending"
+SESSION_PRIORITY_EMPTY = ""
+SESSION_PRIORITY_URGENT = "urgent"
+SESSION_PRIORITY_HIGH = "high"
+SESSION_PRIORITY_MEDIUM = "medium"
+SESSION_PRIORITY_LOW = "low"
 
 
 def get_session_summary_path(session_dir: Path) -> Path:
@@ -42,6 +47,31 @@ def normalize_session_review_status(value: Any) -> str:
     return mapping.get(normalized, SESSION_REVIEW_STATUS_EMPTY)
 
 
+def normalize_session_priority(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "": SESSION_PRIORITY_EMPTY,
+        "empty": SESSION_PRIORITY_EMPTY,
+        "none": SESSION_PRIORITY_EMPTY,
+        "空": SESSION_PRIORITY_EMPTY,
+        "urgent": SESSION_PRIORITY_URGENT,
+        "critical": SESSION_PRIORITY_URGENT,
+        "p0": SESSION_PRIORITY_URGENT,
+        "紧急": SESSION_PRIORITY_URGENT,
+        "high": SESSION_PRIORITY_HIGH,
+        "p1": SESSION_PRIORITY_HIGH,
+        "高": SESSION_PRIORITY_HIGH,
+        "medium": SESSION_PRIORITY_MEDIUM,
+        "normal": SESSION_PRIORITY_MEDIUM,
+        "p2": SESSION_PRIORITY_MEDIUM,
+        "中": SESSION_PRIORITY_MEDIUM,
+        "low": SESSION_PRIORITY_LOW,
+        "p3": SESSION_PRIORITY_LOW,
+        "低": SESSION_PRIORITY_LOW,
+    }
+    return mapping.get(normalized, SESSION_PRIORITY_EMPTY)
+
+
 def read_session_summary(session_dir: Path) -> dict[str, Any] | None:
     summary_path = get_session_summary_path(session_dir)
     try:
@@ -61,6 +91,7 @@ def read_session_summary(session_dir: Path) -> dict[str, Any] | None:
         "project": str(payload.get("project", "") or "").strip(),
         "recorder_person": str(payload.get("recorder_person", "") or "").strip(),
         "converter_person": str(payload.get("converter_person", "") or "").strip(),
+        "priority": normalize_session_priority(payload.get("priority", "")),
         "review_status": normalize_session_review_status(payload.get("review_status", "")),
         "review_comments": str(payload.get("review_comments", "") or "").strip(),
         "event_count": normalized_event_count,
@@ -81,6 +112,7 @@ def write_session_summary(
         "project": str(metadata.get("project", existing.get("project", "")) or "").strip(),
         "recorder_person": str(metadata.get("recorder_person", existing.get("recorder_person", "")) or "").strip(),
         "converter_person": str(metadata.get("converter_person", existing.get("converter_person", "")) or "").strip(),
+        "priority": normalize_session_priority(metadata.get("priority", existing.get("priority", ""))),
         "review_status": normalize_session_review_status(metadata.get("review_status", existing.get("review_status", ""))),
         "review_comments": str(metadata.get("review_comments", existing.get("review_comments", "")) or "").strip(),
     }
@@ -130,6 +162,7 @@ def update_session_review_fields(
     review_status: Any,
     review_comments: Any,
     converter_person: Any | None = None,
+    priority: Any | None = None,
 ) -> dict[str, Any]:
     session_path = Path(session_dir) / "session.json"
     yaml_path = Path(session_dir) / "session.yaml"
@@ -149,6 +182,8 @@ def update_session_review_fields(
     metadata_payload["review_comments"] = str(review_comments or "").strip()
     if converter_person is not None:
         metadata_payload["converter_person"] = str(converter_person or "").strip()
+    if priority is not None:
+        metadata_payload["priority"] = normalize_session_priority(priority)
 
     if session_payload:
         session_payload["metadata"] = metadata_payload

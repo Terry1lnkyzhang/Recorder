@@ -515,36 +515,11 @@ def _derive_matching_click_values(
 
 
 def _derive_scan_dll_values(event: dict[str, Any], _ai_observation_text: str) -> ParameterDerivationResult:
-    comment_text = _extract_event_comment_text(event)
     derived_values: dict[str, Any] = {}
     evidence_map: dict[str, list[str]] = {}
-    missing_map: dict[str, str] = {}
-    parameter_names = ["funcName"]
-
-    if not comment_text:
-        for name in parameter_names:
-            missing_map[name] = f"当前行 Comment 列为空，无法生成 ScanDll.{name}。"
-        return derived_values, evidence_map, missing_map
-
-    parsed_values = _parse_scan_dll_comment_values(comment_text)
-    for name in parameter_names:
-        if name not in parsed_values:
-            continue
-        value = _normalize_scan_dll_parameter_value(name, parsed_values[name])
-        if value is None or value == "":
-            continue
-        derived_values[name] = value
-        evidence_map[name] = [f"Comment列: {name}={parsed_values[name]}"]
-
-    if "funcName" not in derived_values:
-        func_name = _infer_scan_dll_func_name_from_comment(comment_text)
-        if func_name:
-            derived_values["funcName"] = func_name
-            evidence_map["funcName"] = [f"Comment列文本包含 {func_name} 相关关键词。"]
-
-    for name in parameter_names:
-        if name not in derived_values:
-            missing_map[name] = f"Comment列未提供可解析的 ScanDll.{name}。"
+    missing_map: dict[str, str] = {
+        "funcName": "ScanDll.funcName 不再根据表格 Comment 自动生成；请通过“方法注释与AI参数推荐”填写目标后生成，或手动编辑参数。"
+    }
 
     return derived_values, evidence_map, missing_map
 
@@ -605,6 +580,57 @@ def _derive_wait_for_exists_values(event: dict[str, Any]) -> tuple[dict[str, Any
     return derived_values, evidence_map, missing_map
 
 
+def _derive_wait_time_values(event: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[str]], dict[str, str]]:
+    details = event.get("additional_details", {}) if isinstance(event.get("additional_details", {}), dict) else {}
+    derived_values: dict[str, Any] = {}
+    evidence_map: dict[str, list[str]] = {}
+    missing_map: dict[str, str] = {}
+
+    wait_time = _extract_wait_time_seconds(event)
+    if wait_time is not None:
+        derived_values["waitTime"] = wait_time
+        evidence_map["waitTime"] = [f"事件明细.additional_details 中记录的等待时长={wait_time} 秒"]
+    else:
+        available_keys = ", ".join(sorted(str(key) for key in details.keys())) if details else "无"
+        missing_map["waitTime"] = f"事件明细中没有可用的等待时长字段。additional_details keys={available_keys}。"
+
+    return derived_values, evidence_map, missing_map
+
+
+def _extract_wait_time_seconds(event: dict[str, Any]) -> float | None:
+    details = event.get("additional_details", {}) if isinstance(event.get("additional_details", {}), dict) else {}
+    candidate_keys = (
+        "wait_timeout_seconds",
+        "wait_time_seconds",
+        "wait_seconds",
+        "sleep_seconds",
+        "timeout_seconds",
+        "duration_seconds",
+        "waitTime",
+        "wait_time",
+        "sleepTime",
+        "timeout",
+        "duration",
+    )
+    for key in candidate_keys:
+        wait_time = _coerce_positive_float(details.get(key))
+        if wait_time is not None:
+            return wait_time
+    return _coerce_positive_float(event.get("duration_seconds"))
+
+
+def _coerce_positive_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return int(number) if number.is_integer() else number
+
+
 def _extract_wait_condition(event: dict[str, Any]) -> str:
     details = event.get("additional_details", {}) if isinstance(event.get("additional_details", {}), dict) else {}
     raw_condition = str(details.get("wait_condition", "") or "").strip().lower()
@@ -661,10 +687,10 @@ def _derive_agent_interface_values(event: dict[str, Any]) -> tuple[dict[str, Any
         derived_values["rect"] = rect
         evidence_map["rect"] = [f"事件明细.media[0].region={rect}"]
 
-    image_list = _extract_agent_interface_image_list(media_items)
-    if image_list:
-        derived_values["imageList"] = image_list
-        evidence_map["imageList"] = [f"事件明细.media[1:] 路径文件名={image_list}"]
+    image_path_list = _extract_agent_interface_image_path_list(media_items)
+    if image_path_list:
+        derived_values["imagePathList"] = image_path_list
+        evidence_map["imagePathList"] = [f"事件明细.media[1:] 路径列表={image_path_list}"]
 
     screenshot_path = str(event.get("screenshot", "") or "").strip()
     if screenshot_path:
@@ -903,6 +929,10 @@ def _derive_wait_for_exists_values_from_context(event: dict[str, Any], _ai_obser
     return _derive_wait_for_exists_values(event)
 
 
+def _derive_wait_time_values_from_context(event: dict[str, Any], _ai_observation_text: str) -> ParameterDerivationResult:
+    return _derive_wait_time_values(event)
+
+
 def _derive_agent_interface_values_from_context(event: dict[str, Any], _ai_observation_text: str) -> ParameterDerivationResult:
     return _derive_agent_interface_values(event)
 
@@ -935,6 +965,7 @@ METHOD_PARAMETER_DERIVERS: dict[str, ParameterDeriver] = {
     "scandll": _derive_scan_dll_values,
     "getscreenshot": _derive_get_screenshot_values_from_context,
     "waitforexists": _derive_wait_for_exists_values_from_context,
+    "waittime": _derive_wait_time_values_from_context,
     "agentinterface": _derive_agent_interface_values_from_context,
     "manualcheck": _derive_manual_check_values_from_context,
     "sendkeys": _derive_send_keys_values_from_context,
@@ -1095,6 +1126,10 @@ def _reorder_parameter_names_for_method(method_name: str, ordered_names: list[st
         for name in reversed(["funcName"]):
             reordered = _move_name_to_front(reordered, name)
         return reordered
+    if normalized_method == "waittime":
+        for name in reversed(["waitTime"]):
+            reordered = _move_name_to_front(reordered, name)
+        return reordered
     if normalized_method == "findcontrolbyname":
         return reordered
     if normalized_method == "click":
@@ -1117,6 +1152,8 @@ def _reorder_parameter_suggestions(method_name: str, suggestions: list[MethodPar
         priority_order = {"targetPath": 0, "clickBeforeWheel": 1, "isDown": 2, "wheelTimes": 3, "x": 4, "y": 5}
     if normalized_method == "scandll":
         priority_order = {"funcName": 0}
+    if normalized_method == "waittime":
+        priority_order = {"waitTime": 0}
     if normalized_method == "click":
         priority_order = {"button": 0, "x": 1, "y": 2, "absolute": 3}
     indexed = list(enumerate(suggestions))
@@ -1801,19 +1838,19 @@ def _extract_agent_interface_rect(media_items: list[Any]) -> list[int] | None:
     return None
 
 
-def _extract_agent_interface_image_list(media_items: list[Any]) -> list[str]:
+def _extract_agent_interface_image_path_list(media_items: list[Any]) -> list[str]:
     if len(media_items) <= 1:
         return []
 
-    image_names: list[str] = []
+    image_paths: list[str] = []
     for item in media_items[1:]:
         if not isinstance(item, dict):
             continue
         raw_path = str(item.get("path", "")).strip()
         if not raw_path:
             continue
-        image_names.append(Path(raw_path).name)
-    return image_names
+        image_paths.append(raw_path)
+    return image_paths
 
 
 def _extract_first_media_file_name(media_items: list[Any]) -> str:
@@ -1992,6 +2029,8 @@ def _should_skip_missing_parameter(
     if method_name == "sendkeys" and parameter_name in {"text", "key"} and value is None and not missing_reason:
         return True
     if method_name == "waitforexists" and value is None:
+        return True
+    if method_name == "waittime" and parameter_name == "waitUntil" and value is None:
         return True
     return False
 

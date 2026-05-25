@@ -452,6 +452,7 @@ class AndroidRecorderDialog:
             name=str(payload.get("name", "")),
             recorder_person=str(payload.get("recorder_person", "")),
             converter_person=str(payload.get("converter_person", "")),
+            priority=str(payload.get("priority", "")),
             design_steps=str(payload.get("design_steps", "")),
             preconditions=str(payload.get("preconditions", "")),
             configuration_requirements=str(payload.get("configuration_requirements", "")),

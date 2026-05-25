@@ -409,9 +409,11 @@ class ConverterRegistryWindow:
         except Exception as exc:
             messagebox.showerror("预览失败", str(exc), parent=self.window)
             return
-        self.manual_overrides = {}
         self.manual_metadata_overrides = self._build_metadata_overrides_from_loaded_registry()
+        synced_count = self._sync_preview_exposure_from_loaded_registry()
         self.refresh_preview_filters()
+        if synced_count is not None:
+            self.status_var.set(f"已按现有 registry 初始化暴露列：是 {synced_count} 个，否 {len(self.current_previews) - synced_count} 个")
 
     def load_existing_registry(self) -> None:
         registry_path = self._get_existing_path(self.existing_registry_path_var.get().strip(), "现有 methods registry")
@@ -427,9 +429,15 @@ class ConverterRegistryWindow:
         self.manual_metadata_overrides = self._build_metadata_overrides_from_loaded_registry()
         self.output_path_var.set(str(registry_path))
         self.methods_registry_path_var.set(str(registry_path))
+        synced_count = self._sync_preview_exposure_from_loaded_registry()
+        if synced_count is not None:
+            self.refresh_preview_filters()
         if self.selected_registry_entry_var.get().strip():
             self.on_selected_registry_entry_changed(None)
-        self.status_var.set(f"已加载现有 registry: {registry_path.name} | entries {len(registry.entries)}")
+        if synced_count is None:
+            self.status_var.set(f"已加载现有 registry: {registry_path.name} | entries {len(registry.entries)}")
+        else:
+            self.status_var.set(f"已加载现有 registry: {registry_path.name} | entries {len(registry.entries)} | 已同步暴露列：是 {synced_count} 个，否 {len(self.current_previews) - synced_count} 个")
 
     def refresh_preview_filters(self) -> None:
         if not self.current_previews:
@@ -872,6 +880,8 @@ class ConverterRegistryWindow:
             self.preview_tree.see(method_name)
             self.show_selected_method_details(None)
             return
+        if self.preview_tree.selection():
+            self.preview_tree.selection_remove(self.preview_tree.selection())
         self._load_selected_method_metadata(method_name)
         self._show_registry_entry_details(method_name)
 
@@ -885,6 +895,14 @@ class ConverterRegistryWindow:
         source_method_name = self._get_active_method_name() or target_entry_name
         if not source_path or not class_name or not target_entry_name:
             messagebox.showinfo("提示", "请先选择 Python 文件、类名和现有 entry 名称。", parent=self.window)
+            return
+        if not source_method_name or source_method_name not in {preview.name for preview in self.current_previews}:
+            messagebox.showinfo(
+                "提示",
+                f"当前源码预览中没有方法: {source_method_name or target_entry_name}\n"
+                "请先选择 Python 文件、类名，点击“预览方法”，并确认要更新的 entry 在方法预览中存在。",
+                parent=self.window,
+            )
             return
         if source_method_name:
             self.manual_metadata_overrides[source_method_name] = self._collect_metadata_from_editor()
@@ -919,12 +937,17 @@ class ConverterRegistryWindow:
         except Exception as exc:
             messagebox.showerror("更新失败", str(exc), parent=self.window)
             return
+        registry_path = self._get_existing_path(self.existing_registry_path_var.get().strip(), "现有 methods registry")
         self._load_selected_method_metadata(target_entry_name)
         self._show_registry_entry_details(target_entry_name)
         if target_entry_name == source_method_name:
             self.status_var.set(f"已更新现有 registry entry: {target_entry_name}")
+            message = f"已更新并写回 entry: {target_entry_name}"
         else:
             self.status_var.set(f"已更新现有 registry entry: {target_entry_name} <- {source_method_name}")
+            message = f"已更新并写回 entry: {target_entry_name} <- {source_method_name}"
+        if registry_path is not None:
+            messagebox.showinfo("更新完成", f"{message}\n\n写回文件:\n{registry_path}", parent=self.window)
 
     def delete_selected_registry_entry(self) -> None:
         if not self.loaded_methods_registry:
@@ -967,6 +990,37 @@ class ConverterRegistryWindow:
         if not self.loaded_methods_registry:
             return {}
         return {entry.name: self._entry_to_metadata_dict(entry) for entry in self.loaded_methods_registry.entries}
+
+    def _sync_preview_exposure_from_loaded_registry(self) -> int | None:
+        if not self.current_previews:
+            self.manual_overrides = {}
+            return None
+        if not self.loaded_methods_registry:
+            self.manual_overrides = {}
+            return None
+        registry_method_names = self._build_loaded_registry_method_name_set()
+        exposed_count = 0
+        self.manual_overrides = {}
+        for preview in self.current_previews:
+            exposed = preview.name.casefold() in registry_method_names
+            self.manual_overrides[preview.name] = exposed
+            if exposed:
+                exposed_count += 1
+        return exposed_count
+
+    def _build_loaded_registry_method_name_set(self) -> set[str]:
+        if not self.loaded_methods_registry:
+            return set()
+        method_names: set[str] = set()
+        for entry in self.loaded_methods_registry.entries:
+            candidates = [entry.name, entry.exposed_keyword]
+            if isinstance(entry.source, dict):
+                candidates.append(str(entry.source.get("method", "") or ""))
+            for candidate in candidates:
+                normalized = str(candidate or "").strip()
+                if normalized:
+                    method_names.add(normalized.casefold())
+        return method_names
 
     def _entry_to_metadata_dict(self, entry: MethodRegistryEntry) -> dict[str, object]:
         return {

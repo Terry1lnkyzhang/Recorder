@@ -152,12 +152,13 @@ class PythonClassMethodExtractor:
         for arg in filtered_positional_args:
             annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
             parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            declared_type, doc_optional = _normalize_declared_parameter_type(parsed_arg.declared_type)
             schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
             parameters.append(
                 MethodParameter(
                     name=arg.arg,
-                    type=parsed_arg.declared_type or annotation,
-                    required=arg.arg not in default_map,
+                    type=declared_type or annotation,
+                    required=arg.arg not in default_map and not doc_optional,
                     description=parsed_arg.description,
                     default=default_map.get(arg.arg),
                     schema_fields=schema_fields,
@@ -169,12 +170,13 @@ class PythonClassMethodExtractor:
                 continue
             annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
             parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            declared_type, doc_optional = _normalize_declared_parameter_type(parsed_arg.declared_type)
             schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
             parameters.append(
                 MethodParameter(
                     name=arg.arg,
-                    type=parsed_arg.declared_type or annotation,
-                    required=kw_required_map.get(arg.arg, True),
+                    type=declared_type or annotation,
+                    required=kw_required_map.get(arg.arg, True) and not doc_optional,
                     description=parsed_arg.description,
                     default=kw_default_map.get(arg.arg),
                     schema_fields=schema_fields,
@@ -185,11 +187,12 @@ class PythonClassMethodExtractor:
             arg = node.args.vararg
             annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
             parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            declared_type, _doc_optional = _normalize_declared_parameter_type(parsed_arg.declared_type)
             schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
             parameters.append(
                 MethodParameter(
                     name=f"*{arg.arg}",
-                    type=parsed_arg.declared_type or f"*{annotation}",
+                    type=declared_type or f"*{annotation}",
                     required=False,
                     description=parsed_arg.description,
                     schema_fields=schema_fields,
@@ -200,11 +203,12 @@ class PythonClassMethodExtractor:
             arg = node.args.kwarg
             annotation = ast.unparse(arg.annotation) if arg.annotation is not None else "Any"
             parsed_arg = args_doc.get(arg.arg, _ParsedDocArg(name=arg.arg))
+            declared_type, _doc_optional = _normalize_declared_parameter_type(parsed_arg.declared_type)
             schema_fields = _parse_nested_schema_fields(parsed_arg.extra_lines)
             parameters.append(
                 MethodParameter(
                     name=f"**{arg.arg}",
-                    type=parsed_arg.declared_type or f"**{annotation}",
+                    type=declared_type or f"**{annotation}",
                     required=False,
                     description=parsed_arg.description,
                     schema_fields=schema_fields,
@@ -394,6 +398,41 @@ def _parse_field_type(raw_type: str) -> tuple[str, bool]:
     normalized = normalized.replace(", ,", ",")
     normalized = normalized.strip(" ,") or "string"
     return normalized, required
+
+
+def _normalize_declared_parameter_type(raw_type: str) -> tuple[str, bool]:
+    cleaned = raw_type.strip()
+    if not cleaned:
+        return "", False
+
+    optional = False
+    optional_match = re.fullmatch(r"Optional\[(.+)\]", cleaned, flags=re.IGNORECASE)
+    if optional_match:
+        optional = True
+        cleaned = optional_match.group(1).strip()
+
+    union_match = re.fullmatch(r"Union\[(.+)\]", cleaned, flags=re.IGNORECASE)
+    if union_match:
+        cleaned = union_match.group(1).strip()
+
+    parts = re.split(r"\s*\|\s*|\s*,\s*", cleaned)
+    normalized_parts: list[str] = []
+    for part in parts:
+        normalized_part = part.strip()
+        if not normalized_part:
+            continue
+        if normalized_part.lower() in {"optional", "none", "null"}:
+            optional = True
+            continue
+        normalized_parts.append(normalized_part)
+
+    if re.search(r"\boptional\b", cleaned, flags=re.IGNORECASE):
+        optional = True
+
+    normalized = " | ".join(normalized_parts).strip()
+    normalized = re.sub(r"\boptional\b", "", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\s{2,}", " ", normalized).strip(" ,|")
+    return normalized or "Any", optional
 
 
 def _is_decorator_like(node: ast.FunctionDef) -> bool:

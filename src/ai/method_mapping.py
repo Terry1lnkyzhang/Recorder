@@ -79,6 +79,12 @@ EVENT_METHOD_SUGGESTION_OPTIONS: dict[str, tuple[MethodSuggestionOption, ...]] =
             name="WaitForExists",
             reason="默认建议：wait 类型映射到 WaitForExists。",
         ),
+        MethodSuggestionOption(
+            name="WaitTime",
+            reason="备选建议：当该 wait 步骤只需要固定等待时间、不需要等待图片或控件出现/消失时，可改用 WaitTime。",
+            score=86.0,
+            confidence=0.86,
+        ),
     ),
     "comment": (
         MethodSuggestionOption(

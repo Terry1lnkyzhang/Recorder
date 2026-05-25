@@ -384,7 +384,7 @@ entries:
 - name: AgentInterface
   summary: Runs an AI-only Agent flow.
   description: 'When `query` is provided, this method upgrades the step into an AI-assisted
-    vision check. It accepts one or more input images (`image` / `imageList`), or
+    vision check. It accepts one or more input images (`image` / `imagePathList`), or
     captures a screenshot from `rect`. If neither image nor region is provided but
     `uiControl` is available, the control bounding rectangle is captured automatically.
 
@@ -450,7 +450,7 @@ entries:
       required: false
       default: null
       example: null
-    - name: imageList
+    - name: imagePathList
       type: string
       description: One or multiple image paths, or PIL images.
       required: false

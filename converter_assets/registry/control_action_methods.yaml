@@ -1,79 +1,28 @@
 metadata:
-  name: control-action-method-registry
+  name: ControlAction-method-registry
   version: '1.0'
-  description: Extracted public methods from ControlAction for ATFramework exposure.
+  description: Extracted public methods from ControlAction in ControlAction.py
   owner: Recorder Converter
 entries:
-- name: init
-  summary: Initializes the ControlAction singleton.
-  description: This method sets up the necessary configurations and initial state
-    for the ControlAction class, which is responsible for orchestrating UI automation
-    actions. It configures the Tesseract OCR engine path, initializes various state-holding
-    attributes, and connects to event listeners. It also attempts to load a hardware
-    simulation DLL for scanner interactions.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: init
-    line: '140'
-  aliases: []
-  parameters: []
-  returns: ''
-  examples: []
-  exposed_keyword: init
-- name: 'Null'
-  summary: A no-operation action.
-  description: This method does nothing. It serves as a placeholder or a default action
-    in scenarios where an action is required but no operation should be performed.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: 'Null'
-    line: '218'
-  aliases: []
-  parameters:
-  - name: Self
-    type: Any
-    required: true
-    description: The instance of the class.
-    default: null
-    example: null
-    schema_fields: []
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The UI control, which is ignored.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters, which is ignored.
-    default: null
-    example: null
-    schema_fields: []
-  returns: ''
-  examples: []
-  exposed_keyword: 'Null'
 - name: Click
   summary: Performs a click on a UI control or at an absolute screen position.
-  description: 'This method simulates a single left-click. It can operate in two modes:
+  description: 'This method simulates a mouse click. It can operate in two modes:
     clicking on a specific UI control or clicking at absolute (x, y) coordinates on
     the screen. It supports various options like waiting for the control to be enabled,
-    pressing modifier keys, and handling checkboxes intelligently.'
+    pressing modifier keys, choosing left/right/middle mouse button, and handling
+    checkboxes intelligently.'
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: Click
-    line: '231'
+    line: '370'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The UI control to click. If 'absolute' is True in paramDict, this
-      may be ignored.
+      may be ignored. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -84,149 +33,152 @@ entries:
     default: null
     example: null
     schema_fields:
+    - name: button
+      type: str
+      description: 'Mouse button to use. Supported values: ''left'', ''right'', ''middle'',
+        ''mid''. Defaults to ''left''.'
+      required: false
+      default: null
+      example: null
     - name: absolute
       type: bool
-      description: If True, click at absolute screen coordinates specified by 'x'
-        and 'y'.
-      required: true
+      description: If True, click at absolute screen coordinates specified by `x`
+        and `y`. Defaults to False.
+      required: false
       default: null
       example: null
     - name: x
       type: int
-      description: The absolute x-coordinate for the click.
-      required: true
+      description: X coordinate. In absolute mode, it is the screen x-coordinate;
+        if omitted, uses current cursor x. In control mode, it is passed to the control
+        click API as the inner x offset.
+      required: false
       default: null
       example: null
     - name: y
       type: int
-      description: The absolute y-coordinate for the click.
-      required: true
+      description: Y coordinate. In absolute mode, it is the screen y-coordinate;
+        if omitted, uses current cursor y. In control mode, it is passed to the control
+        click API as the inner y offset.
+      required: false
+      default: null
+      example: null
+    - name: ratioX
+      type: float
+      description: Relative horizontal position inside the control when `x` is omitted
+        in control mode. Defaults to 0.5 in the underlying control click API.
+      required: false
+      default: null
+      example: null
+    - name: ratioY
+      type: float
+      description: Relative vertical position inside the control when `y` is omitted
+        in control mode. Defaults to 0.5 in the underlying control click API.
+      required: false
+      default: null
+      example: null
+    - name: simulateMove
+      type: bool
+      description: If True, move cursor smoothly before a control click. Defaults
+        to False for normal left click.
+      required: false
       default: null
       example: null
     - name: isChecked
       type: bool
-      description: For checkboxes, the desired state. The click is skipped if the
-        checkbox is already in this state.
-      required: true
+      description: For checkboxes, the desired checked state. The click is skipped
+        if the checkbox is already in this state. Defaults to True.
+      required: false
       default: null
       example: null
     - name: isEnabled
       type: bool
-      description: If True, wait for the control to be enabled before clicking.
-      required: true
+      description: If True, wait for the control to be enabled before clicking. Defaults
+        to False.
+      required: false
       default: null
       example: null
     - name: pressKey
       type: str
       description: The name of a modifier key (e.g., "VK_LSHIFT") to hold down during
-        the click.
-      required: true
+        the click. Defaults to None.
+      required: false
       default: null
       example: null
     - name: waitTime
       type: float
-      description: Seconds to wait after the click completes.
-      required: true
+      description: Seconds to wait after the click completes. Defaults to 0.
+      required: false
+      default: null
+      example: null
+    - name: duration
+      type: float
+      description: Seconds to hold the mouse button down. When greater than 0, performs
+        a long click and ignores `doubleClick`. Defaults to 0.
+      required: false
+      default: null
+      example: null
+    - name: doubleClick
+      type: bool
+      description: If True, performs two continuous clicks instead of a single click.
+        Defaults to False.
+      required: false
       default: null
       example: null
     - name: isRecordTime
       type: bool
-      description: If True, records the execution start time.
-      required: true
+      description: If True, records the execution start time. Defaults to False.
+      required: false
       default: null
       example: null
     - name: getClickStatus
       type: bool
-      description: If True, records the button status and save the results in an Excel
-        file.
-      required: true
+      description: If True, records the button status and saves the results in an
+        Excel file. Defaults to False.
+      required: false
       default: null
       example: null
     - name: switchCount
       type: int
-      description: This parameter represents the number of rounds of value changes
-        to be recorded.
-      required: true
+      description: Number of rounds of value changes to be recorded when button status
+        checking is enabled. Defaults to None.
+      required: false
       default: null
       example: null
     - name: CheckWaitTime
       type: float
-      description: Seconds to wait for the completion of check.
-      required: true
+      description: Seconds to wait for the completion of check when button status
+        checking is enabled. Defaults to None.
+      required: false
       default: null
       example: null
   returns: ''
   examples: []
   exposed_keyword: Click
-- name: LongClick
-  summary: Performs a long mouse click on the target UI control.
-  description: This action simulates pressing and holding the mouse button for a specified
-    duration. It can be customized with parameters for position and timing.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: LongClick
-    line: '352'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The UI control to be long-clicked.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters to customize the long click.
-    default: null
-    example: null
-    schema_fields:
-    - name: duration
-      type: float
-      description: The duration to hold the mouse button down.
-      required: true
-      default: null
-      example: null
-    - name: ratioX
-      type: float
-      description: Relative X position within the control (0.0 to 1.0).
-      required: true
-      default: null
-      example: null
-    - name: ratioY
-      type: float
-      description: Relative Y position within the control (0.0 to 1.0).
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: LongClick
 - name: MoveTo
   summary: Moves the mouse cursor to a specified location. This can be an absolute
     position on the screen or a position relative to a UI control.
   description: "Moves the mouse cursor to a specified location. This can be an absolute\
     \ position on the screen or a position relative to a UI control.\n\nArgs:\n  \
-    \  uiControl: The UI control to move the cursor to.\n    paramDict: A dictionary\
-    \ of parameters to customize the move.\n        - absolute (bool): If True, move\
-    \ to absolute screen coordinates.\n        - x (int): The absolute X-coordinate.\n\
-    \        - y (int): The absolute Y-coordinate.\n        - ratioX (float): The\
-    \ relative X position within the control (0.0 to 1.0).\n        - ratioY (float):\
-    \ The relative Y position within the control (0.0 to 1.0).\n        - waitTime\
-    \ (float): Time to wait after the move."
+    \  uiControl (auto.Control | optional): The UI control to move the cursor to.\
+    \ Defaults to \"Null\".\n    paramDict: A dictionary of parameters to customize\
+    \ the move.\n        - absolute (bool): If True, move to absolute screen coordinates.\n\
+    \        - x (int): The absolute X-coordinate.\n        - y (int): The absolute\
+    \ Y-coordinate.\n        - ratioX (float): The relative X position within the\
+    \ control (0.0 to 1.0).\n        - ratioY (float): The relative Y position within\
+    \ the control (0.0 to 1.0).\n        - waitTime (float): Time to wait after the\
+    \ move."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: MoveTo
-    line: '371'
+    line: '597'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The UI control to move the cursor to.
+    required: false
+    description: The UI control to move the cursor to. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -284,13 +236,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GroupExpand
-    line: '392'
+    line: '618'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The UI control that supports the ExpandCollapsePattern.
+    required: false
+    description: The UI control that supports the ExpandCollapsePattern. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
@@ -314,25 +267,26 @@ entries:
 - name: DoubleClick
   summary: Performs a double-click on a UI control or at an absolute coordinate.
   description: "Performs a double-click on a UI control or at an absolute coordinate.\n\
-    \nArgs:\n    uiControl: The UI control to double-click. If a string is provided,\
-    \ the click is performed at absolute coordinates.\n    paramDict: A dictionary\
-    \ of parameters to customize the double-click.\n        - x (int): The absolute\
-    \ X-coordinate (if uiControl is a string).\n        - y (int): The absolute Y-coordinate\
-    \ (if uiControl is a string).\n        - ratioX (float): The relative X position\
-    \ within the control.\n        - ratioY (float): The relative Y position within\
-    \ the control.\n        - waitTime (float): An optional delay after the click."
+    \nArgs:\n    uiControl (auto.Control | optional): The UI control to double-click.\
+    \ If a string is provided, the click is performed at absolute coordinates. Defaults\
+    \ to \"Null\".\n    paramDict: A dictionary of parameters to customize the double-click.\n\
+    \        - x (int): The absolute X-coordinate (if uiControl is a string).\n  \
+    \      - y (int): The absolute Y-coordinate (if uiControl is a string).\n    \
+    \    - ratioX (float): The relative X position within the control.\n        -\
+    \ ratioY (float): The relative Y position within the control.\n        - waitTime\
+    \ (float): An optional delay after the click."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: DoubleClick
-    line: '409'
+    line: '673'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The UI control to double-click. If a string is provided, the click
-      is performed at absolute coordinates.
+      is performed at absolute coordinates. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -382,22 +336,23 @@ entries:
     timestamp is reached.'
   description: "Pauses execution for a specified duration or until a specific time.\
     \ This method provides two ways to wait: for a fixed interval or until a given\
-    \ epoch timestamp is reached.\n\nArgs:\n    uiControl: The UI control (not directly\
-    \ used, for consistency).\n    paramDict: A dictionary of parameters.\n      \
-    \  - waitTime (float): The number of seconds to sleep.\n        - waitUntil (float):\
-    \ An epoch timestamp. The method will loop until the current time is greater than\
-    \ or equal to this value."
+    \ epoch timestamp is reached.\n\nArgs:\n    uiControl (auto.Control | optional):\
+    \ The UI control (not directly used, for consistency). Defaults to \"Null\".\n\
+    \    paramDict: A dictionary of parameters.\n        - waitTime (float): The number\
+    \ of seconds to sleep.\n        - waitUntil (float): An epoch timestamp. The method\
+    \ will loop until the current time is greater than or equal to this value."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: WaitTime
-    line: '426'
+    line: '690'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The UI control (not directly used, for consistency).
+    required: false
+    description: The UI control (not directly used, for consistency). Defaults to
+      "Null".
     default: null
     example: null
     schema_fields: []
@@ -433,14 +388,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RightClick
-    line: '442'
+    line: '725'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The UI control to right-click. If a string is provided, the click
-      is performed at absolute coordinates.
+      is performed at absolute coordinates. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -501,13 +456,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: CheckBoxClick
-    line: '480'
+    line: '763'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The checkbox control or a child of the checkbox control.
+    required: false
+    description: The checkbox control or a child of the checkbox control. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
@@ -537,13 +493,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: Edit
-    line: '511'
+    line: '794'
   aliases: []
   parameters:
   - name: uiControl
-    type: auto.EditControl
-    required: true
-    description: The edit control to modify.
+    type: auto.Control
+    required: false
+    description: The edit control to modify. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -573,13 +529,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ToolBarClick
-    line: '528'
+    line: '811'
   aliases: []
   parameters:
   - name: uiControl
-    type: auto.ToolBarControl
-    required: true
-    description: The toolbar control that contains the button to be clicked.
+    type: auto.Control
+    required: false
+    description: The toolbar control that contains the button to be clicked. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
@@ -609,14 +566,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ATSnoopConnect
-    line: '548'
+    line: '831'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The UI control that triggered this action. This parameter is present
-      for consistency but is not used.
+      for consistency but is not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -641,14 +598,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ExistExec
-    line: '562'
+    line: '845'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The target UI control. Can be a control object or a string key to
-      be looked up via `ControlManager`.
+      be looked up via `ControlManager`. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -703,14 +660,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: SendKeys
-    line: '622'
+    line: '907'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The target control for the key presses. Used to determine coordinates
-      for an initial click if x and y are not provided.
+      for an initial click if x and y are not provided. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -787,13 +744,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ScanDll
-    line: '663'
+    line: '948'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The UI control, used for polling properties when enabling the scanner.
+      Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -850,312 +808,10 @@ entries:
       required: true
       default: null
       example: null
-  returns: None. The method may exit early when `funcName` is unsupported.
+  returns: False when action execution is interrupted during Enable polling; otherwise
+    None.
   examples: []
   exposed_keyword: ScanDll
-- name: CUS_ImageEvaluationDrawCircle
-  summary: Finds concentric circles in an image and draws a debug rectangle.
-  description: This custom method is designed for image evaluation tasks. It takes
-    a screenshot, finds a small circle within a larger one based on area parameters,
-    and then draws a scaled rectangle around the found inner circle for debugging
-    and visualization purposes.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: CUS_ImageEvaluationDrawCircle
-    line: '785'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The UI control (not directly used, for consistency).
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for circle detection.
-    default: null
-    example: null
-    schema_fields:
-    - name: bigCircleAreaUpper
-      type: int
-      description: The maximum area for the outer circle.
-      required: true
-      default: null
-      example: null
-    - name: bigCircleAreaLowwer
-      type: int
-      description: The minimum area for the outer circle.
-      required: true
-      default: null
-      example: null
-    - name: smallCircleAreaUpper
-      type: int
-      description: The maximum area for the inner circle.
-      required: true
-      default: null
-      example: null
-    - name: smallCircleAreaLower
-      type: int
-      description: The minimum area for the inner circle.
-      required: true
-      default: null
-      example: null
-    - name: scale
-      type: int
-      description: The scaling factor for the debug drawing.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: CUS_ImageEvaluationDrawCircle
-- name: CUS_ReviewDrawCircle
-  summary: Finds shapes in an image and performs drawing or deletion actions.
-  description: This is a complex, custom function for the review page. It finds circles
-    or ellipses based on numerous filtering criteria (size, color, position). Based
-    on the `operatorName`, it can then perform various actions like drawing a new
-    circle or rectangle relative to the found shape, selecting a tool from a combobox
-    before drawing, or deleting a shape by right-clicking it.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: CUS_ReviewDrawCircle
-    line: '813'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: A UI control, often a combobox for selecting drawing tools.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary with extensive parameters for finding and acting on
-      shapes.
-    default: null
-    example: null
-    schema_fields:
-    - name: operatorName
-      type: str
-      description: 'The action to perform: "drawCircle", "drawRect", "ReviewDrawCircle",
-        "find", "delete". - diameterUpper/Lower (int): Size filters for shape detection.
-        - circleCenterLeft/Right/Top/Bottom (int): ROI for the search.'
-      required: true
-      default: null
-      example: null
-    - name: circleColor
-      type: str
-      description: Color filter (e.g., "white", "darkGray").
-      required: true
-      default: null
-      example: null
-    - name: gaussianBlur
-      type: int
-      description: Preprocessing blur kernel size.
-      required: true
-      default: null
-      example: null
-    - name: drawRadiusScale
-      type: float
-      description: Scaling factor for drawing new shapes.
-      required: true
-      default: null
-      example: null
-    - name: expectShapeCount
-      type: int
-      description: Validates that a specific number of shapes are found before proceeding.
-        - ...and many others for fine-tuning detection and drawing.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: CUS_ReviewDrawCircle
-- name: CUS_BrightestIndex
-  summary: Scrolls image slices and returns a brightest-image index range for the
-    WI160 flow.
-  description: This method runs only when `isSnoop` is True and `propertyNameList`
-    contains exactly one item; in that branch it repeatedly records slice position,
-    measures candidate circle area, tracks the brightest image index, and stops when
-    slice position repeats.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: CUS_BrightestIndex
-    line: '908'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The control used for wheel and click operations.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of runtime parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: isSnoop
-      type: bool
-      description: Enables the implemented branch. Defaults to False.
-      required: false
-      default: null
-      example: null
-    - name: propertyNameList
-      type: list[str] | str
-      description: Property list used by `RecordProperty`.
-      required: false
-      default: null
-      example: null
-    - name: timeout
-      type: float
-      description: Parsed but currently unused by the loop body.
-      required: false
-      default: null
-      example: null
-    - name: regexList
-      type: list[str] | str
-      description: Parsed but currently unused by the loop body.
-      required: false
-      default: null
-      example: null
-    - name: rvnBrightestImage
-      type: str
-      description: Parsed but currently not written to temp storage.
-      required: false
-      default: null
-      example: null
-    - name: rvnBrightRangeList
-      type: str
-      description: Parsed but currently not written to temp storage.
-      required: false
-      default: null
-      example: null
-  returns: A list `[brightRangeMin, brighestImage, brightRangeMax]` when a repeat
-    slice position is detected, `False` when interrupted by `ThreadEventManager`,
-    or `None` when prerequisites (`isSnoop` and single property) are not satisfied.
-  examples: []
-  exposed_keyword: CUS_BrightestIndex
-- name: InnerGetHSVByPoint
-  summary: Gets the HSV color value of a pixel at specified screen coordinates.
-  description: This method takes a screenshot, converts it to the HSV color space,
-    and returns the HSV value of the pixel at the given (x, y) coordinates.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: InnerGetHSVByPoint
-    line: '1002'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The UI control (not directly used, for consistency).
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the coordinates.
-    default: null
-    example: null
-    schema_fields:
-    - name: x
-      type: int
-      description: The x-coordinate of the pixel.
-      required: true
-      default: null
-      example: null
-    - name: y
-      type: int
-      description: The y-coordinate of the pixel.
-      required: true
-      default: null
-      example: null
-  returns: A tuple representing the HSV value (Hue, Saturation, Value), or None if
-    coordinates are not provided.
-  examples: []
-  exposed_keyword: InnerGetHSVByPoint
-- name: InnerGetCircleCenterRadius
-  summary: Attempts to detect one ellipse-like circle and return its center and radius.
-  description: This method captures the screen, runs `ImageIdentification().FindCircle`,
-    and then computes center/radius in the `len(ellipseList) == 1` branch.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: InnerGetCircleCenterRadius
-    line: '1026'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of detection parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: diameterUpper
-      type: int
-      description: Upper diameter limit. Defaults to 900.
-      required: false
-      default: null
-      example: null
-    - name: diameterLower
-      type: int
-      description: 'Lower diameter limit. Defaults to 600. - circleCenterLeft/circleCenterRight/circleCenterTop/circleCenterBottom
-        (int, optional): Search area bounds.'
-      required: false
-      default: null
-      example: null
-    - name: circleColor
-      type: str
-      description: Target color. Defaults to "darkGray".
-      required: false
-      default: null
-      example: null
-    - name: gaussianBlur
-      type: int
-      description: Gaussian blur kernel size. Defaults to 31.
-      required: false
-      default: null
-      example: null
-    - name: contourSize
-      type: int
-      description: Minimum contour size. Defaults to 10.
-      required: false
-      default: null
-      example: null
-    - name: isEllipse
-      type: bool
-      description: Whether to detect ellipse shapes. Defaults to True.
-      required: false
-      default: null
-      example: null
-  returns: '`(baseCircleCenter, baseCircleRadius)` when computation succeeds, or `None`
-    when no valid candidate branch is taken. Notes: The current implementation reads
-    diameter from `ellipseList[1]` inside the `len(ellipseList) == 1` branch, which
-    can raise `IndexError`.'
-  examples: []
-  exposed_keyword: InnerGetCircleCenterRadius
 - name: FindChildControl
   summary: Finds a descendant control by recursively searching the UI tree.
   description: This method performs a depth-first search for a descendant control
@@ -1166,13 +822,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: FindChildControl
-    line: '1118'
+    line: '1406'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The root control from which to start the search.
+    required: false
+    description: The root control from which to start the search. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1258,13 +914,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: BFSearch
-    line: '1261'
+    line: '1576'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The root control object or control key string.
+    required: false
+    description: The root control object or control key string. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1289,13 +945,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: DFSearch
-    line: '1276'
+    line: '1591'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The root control object or control key string.
+    required: false
+    description: The root control object or control key string. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1311,118 +967,207 @@ entries:
     `findAll` is True, or an empty list when no match is found.
   examples: []
   exposed_keyword: DFSearch
-- name: ScrollFindChildControls
-  summary: (Deprecated) Finds all matching child controls within a scrollable parent.
-  description: This method is deprecated and will be removed in a future version.
-    Please use `ScrollFindChildControl` with the parameter `findAll=True` instead.
+- name: ScrollFindChildControl
+  summary: Finds child controls within a scrollable parent, auto-scrolling.
+  description: This is an enhanced version of `FindChildControl` that works with scrollable
+    containers. It iterates through the scrollable area of the parent control, performing
+    a search at each position until a matching child control is found. If a single
+    control is found (and `findAll` is False), it attempts to scroll the container
+    to bring the found control to the center of the viewport, which can help stabilize
+    subsequent actions like clicks.
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
-    method: ScrollFindChildControls
-    line: '1501'
+    method: ScrollFindChildControl
+    line: '1720'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The scrollable parent container.
+    required: false
+    description: The parent container control to scroll and search within. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
   - name: paramDict
     type: Dict
     required: true
-    description: A dictionary of search criteria.
+    description: 'A dictionary of search criteria, same as for `FindChildControl`.
+      Set `findAll=True` to collect all matches. Example: `{"Name": "OK", "funcName":
+      "Click"}`'
     default: null
     example: null
     schema_fields: []
-  returns: A list of all found child controls.
-  examples: []
-  exposed_keyword: ScrollFindChildControls
-- name: SaveAsVariable
-  summary: Passes through the incoming control object.
-  description: This method is a lightweight wrapper that returns `uiControl` when
-    it is an `auto.Control` instance.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: SaveAsVariable
-    line: '1521'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The control object to pass through.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: controlChildList
+  - name: foundControls
     type: Any
     required: false
-    description: Not used.
+    description: An optional list to accumulate found controls. This is primarily
+      for internal use.
     default: null
     example: null
     schema_fields: []
-  returns: The same `uiControl` object when it is a control instance; otherwise None.
+  returns: A single control when one is found and `findAll` is False, a list of controls
+    when `findAll` is True, `None` when no match is found in scroll mode, or delegated
+    `FindChildControl` return values in non-scrollable mode.
   examples: []
-  exposed_keyword: SaveAsVariable
-- name: SelectListItme
-  summary: Selects or toggles a list item by value or index.
-  description: This method locates list-item controls, picks a target by `rowValue`
-    or `rowIndex`, and clicks only when `setChecked` requires a state change (or when
-    `setChecked` is `None`).
+  exposed_keyword: ScrollFindChildControl
+- name: SelectComboxItem
+  summary: Selects an item in a ComboBox by index or by property value.
+  description: This method supports index-based and value-based selection; for value
+    mode it first tries direct child lookup and falls back to matching normalized
+    text from ComboBox item list. When `propertyName` is not specified it will try
+    both `Name` and `HelpText` so custom ComboBox items can still be selected by visible
+    metadata.
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
-    method: SelectListItme
-    line: '1611'
+    method: SelectComboxItem
+    line: '1956'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
+    required: false
+    description: The ComboBox control or a control within the ComboBox. Defaults to
+      "Null".
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Any
     required: true
-    description: The list control containing candidate items.
+    description: A dictionary of parameters for the selection.
+    default: null
+    example: null
+    schema_fields:
+    - name: itemIndex
+      type: int
+      description: 1-based index used by `SelectByFoundIndex`; negative values are
+        converted from tail index.
+      required: false
+      default: null
+      example: null
+    - name: value
+      type: str
+      description: Value to match when selecting by property.
+      required: false
+      default: null
+      example: null
+    - name: Name
+      type: str
+      description: Alternate field used as target text before `value`.
+      required: false
+      default: null
+      example: null
+    - name: propertyName
+      type: str
+      description: Property name used for child lookup in value mode. Defaults to
+        "Name".
+      required: false
+      default: null
+      example: null
+    - name: simulateMove
+      type: bool
+      description: Mouse simulation flag passed to underlying selection call. Defaults
+        to False.
+      required: false
+      default: null
+      example: null
+    - name: funcName
+      type: str
+      description: Action name used when `FindChildControl` is invoked. Defaults to
+        "Click".
+      required: false
+      default: null
+      example: null
+  returns: False when target item cannot be found; otherwise None.
+  examples: []
+  exposed_keyword: SelectComboxItem
+- name: SelectDataGridItem
+  summary: Selects DataGrid rows by index, percentage, or column-value matching.
+  description: This method normalizes row-selection input, delegates row selection
+    to `SelectDataGridRows`, then optionally dispatches an extra action by `operationName`
+    and waits `waitTime`.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: SelectDataGridItem
+    line: '2154'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: false
+    description: The DataGrid control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
   - name: paramDict
     type: Dict
     required: true
-    description: A dictionary of selection parameters.
+    description: A dictionary of selection/action parameters.
     default: null
     example: null
     schema_fields:
     - name: rowIndex
+      type: int | list[int]
+      description: Zero-based row index or index list.
+      required: false
+      default: null
+      example: null
+    - name: percentage
       type: int
-      description: Zero-based index used when selecting by position.
+      description: Row percentage converted to zero-based index.
+      required: false
+      default: null
+      example: null
+    - name: itemIndex
+      type: int
+      description: One-based row index; positive values are converted to zero-based.
       required: false
       default: null
       example: null
     - name: rowValue
+      type: any
+      description: Value matched in a target column.
+      required: false
+      default: null
+      example: null
+    - name: colName
       type: str
-      description: Item name/value used when selecting by text.
+      description: Column name used with `rowValue`.
       required: false
       default: null
       example: null
-    - name: setChecked
+    - name: colIndex
+      type: int
+      description: Column index used with `rowValue`.
+      required: false
+      default: null
+      example: null
+    - name: multiSelect
       type: bool
-      description: Desired selection state; when omitted, performs a direct click
-        toggle.
+      description: Multi-row selection flag for value-matching path. Defaults to True.
       required: false
       default: null
       example: null
-  returns: 'None. Notes: Current implementation may raise runtime errors if no matching
-    item is found before selection-state access.'
+    - name: operationName
+      type: str
+      description: Follow-up action method name.
+      required: false
+      default: null
+      example: null
+    - name: waitTime
+      type: float
+      description: Sleep duration after action. Defaults to 2.
+      required: false
+      default: null
+      example: null
+  returns: 'None. Notes: If no row selector is provided, delegated logic in `SelectDataGridRows`
+    selects first and last row with Shift to cover a full range.'
   examples: []
-  exposed_keyword: SelectListItme
+  exposed_keyword: SelectDataGridItem
 - name: GetDataGridHeaderList
   summary: Gets column header names from a DataGrid.
   description: This method reads column header controls from `TablePattern`, prefers
@@ -1431,13 +1176,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetDataGridHeaderList
-    line: '1719'
+    line: '2220'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The DataGrid control.
+    required: false
+    description: The DataGrid control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1466,13 +1211,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetDataGridRowIndex
-    line: '1755'
+    line: '2256'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The DataGrid control.
+    required: false
+    description: The DataGrid control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1510,20 +1255,20 @@ entries:
 - name: GetDataGridRowColumnCount
   summary: Gets the total number of rows and columns in a DataGrid.
   description: "Gets the total number of rows and columns in a DataGrid.\n\nArgs:\n\
-    \    uiControl: The DataGrid control.\n    paramDict: Not used.\n\nReturns:\n\
-    \    A dictionary containing the row and column counts, for example: `{'row':\
-    \ 10, 'column': 5}`."
+    \    uiControl (auto.Control | optional): The DataGrid control. Defaults to \"\
+    Null\".\n    paramDict: Not used.\n\nReturns:\n    A dictionary containing the\
+    \ row and column counts, for example: `{'row': 10, 'column': 5}`."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetDataGridRowColumnCount
-    line: '1786'
+    line: '2287'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The DataGrid control.
+    required: false
+    description: The DataGrid control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1542,17 +1287,19 @@ entries:
   summary: Selects DataGrid rows by index list or by matched column values.
   description: This method scrolls to top first, resolves row indices directly or
     via `__FindDataGridRows`, and performs selection with Ctrl for additional rows.
+    When `clickpoint` is provided, it first resolves the Table/DataGrid ancestor from
+    that screen point and uses it as the selection target.
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: SelectDataGridRows
-    line: '1802'
+    line: '2303'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The DataGrid control.
+    required: false
+    description: The DataGrid control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1588,6 +1335,34 @@ entries:
       required: false
       default: null
       example: null
+    - name: clickpoint
+      type: list[int] | dict
+      description: Absolute point used to locate a child control, then walk upward
+        to its Table/DataGrid ancestor before row matching.
+      required: false
+      default: null
+      example: null
+    - name: clickPoint
+      type: list[int] | dict
+      description: Absolute point used to locate a child control, then walk upward
+        to its Table/DataGrid ancestor before row matching.
+      required: false
+      default: null
+      example: null
+    - name: actionPoint
+      type: list[int] | dict
+      description: Absolute point used to locate a child control, then walk upward
+        to its Table/DataGrid ancestor before row matching.
+      required: false
+      default: null
+      example: null
+    - name: point
+      type: list[int] | dict
+      description: Absolute point used to locate a child control, then walk upward
+        to its Table/DataGrid ancestor before row matching.
+      required: false
+      default: null
+      example: null
   returns: 'None. Notes: When both `rowIndex` and `rowValue` are omitted, the implementation
     selects first row and last row with Shift, effectively selecting a contiguous
     range.'
@@ -1602,13 +1377,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetDataGridCells
-    line: '1843'
+    line: '2327'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The DataGrid control.
+    required: false
+    description: The DataGrid control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1688,13 +1463,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetControl
-    line: '2082'
+    line: '2625'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The UI control object to retrieve.
+    required: false
+    description: The UI control object to retrieve. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1717,13 +1492,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: BrowserControl
-    line: '2097'
+    line: '2640'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The starting UI control for the navigation.
+    required: false
+    description: The starting UI control for the navigation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1752,13 +1527,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: Scroll
-    line: '2114'
+    line: '2657'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The scrollable UI control.
+    required: false
+    description: The scrollable UI control. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1803,20 +1578,21 @@ entries:
   exposed_keyword: Scroll
 - name: Slider
   summary: Moves a slider control to a specific value.
-  description: "Moves a slider control to a specific value.\n\nArgs:\n    uiControl:\
-    \ The slider control to manipulate.\n    paramDict: A dictionary containing the\
-    \ target value.\n        - rangeValue (int): The value to set the slider to."
+  description: "Moves a slider control to a specific value.\n\nArgs:\n    uiControl\
+    \ (auto.Control | optional): The slider control to manipulate. Defaults to \"\
+    Null\".\n    paramDict: A dictionary containing the target value.\n        - rangeValue\
+    \ (int): The value to set the slider to."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: Slider
-    line: '2146'
+    line: '2689'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The slider control to manipulate.
+    required: false
+    description: The slider control to manipulate. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -1836,118 +1612,6 @@ entries:
   returns: ''
   examples: []
   exposed_keyword: Slider
-- name: KillProcess
-  summary: Terminates one or more running processes by name.
-  description: "Terminates one or more running processes by name.\n\nArgs:\n    uiControl:\
-    \ Not used.\n    paramDict: A dictionary containing the process name.\n      \
-    \  - processName (str): The name of the process to kill (e.g., \"ChMonitor.exe\"\
-    )."
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: KillProcess
-    line: '2169'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the process name.
-    default: null
-    example: null
-    schema_fields:
-    - name: processName
-      type: str
-      description: The name of the process to kill (e.g., "ChMonitor.exe").
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: KillProcess
-- name: RestartConsole
-  summary: Kills and then restarts the console application.
-  description: This method first terminates the console process and then restarts
-    it, either by launching it from a desktop icon or by running a command.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: RestartConsole
-    line: '2189'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for the restart operation.
-    default: null
-    example: null
-    schema_fields:
-    - name: strConsoleConfigPath
-      type: str
-      description: The path to the console executable or configuration.
-      required: true
-      default: null
-      example: null
-    - name: startCondition
-      type: str
-      description: 'The method to use for starting: ''icon'' (default) or ''cmd''.'
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: RestartConsole
-- name: StartExe
-  summary: Starts an executable by finding and double-clicking its desktop icon.
-  description: This method shows the desktop, finds an application icon using image
-    recognition, and then double-clicks the center of the found icon(s) to launch
-    the application.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: StartExe
-    line: '2245'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for the operation.
-    default: null
-    example: null
-    schema_fields:
-    - name: sourcePath
-      type: str or list[str]
-      description: The path(s) to the image file(s) of the icon to be found on the
-        desktop.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: StartExe
 - name: WaitForBoolProperty
   summary: Polls a control property until it matches an expected value or timeout
     occurs.
@@ -1958,13 +1622,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: WaitForBoolProperty
-    line: '2276'
+    line: '2819'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The target control object or a control key string.
+    required: false
+    description: The target control object or a control key string. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2031,13 +1695,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: WaitForPropertyListEqual
-    line: '2348'
+    line: '2904'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The UI control to monitor.
+    required: false
+    description: The UI control to monitor. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2095,35 +1759,6 @@ entries:
     success or timeout path.'
   examples: []
   exposed_keyword: WaitForPropertyListEqual
-- name: ClearFilm
-  summary: Clears film entries by iterating items and confirming delete actions.
-  description: This method clicks the incoming control, estimates item count from
-    child controls, repeatedly selects list entries via `SelectComboxItem`, and triggers
-    the `DeleteAllImages` flow with optional confirmation on `PART_YesOKButton`.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: ClearFilm
-    line: '2441'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The control used to activate and enumerate film entries.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary forwarded to `SelectComboxItem` while iterating entries.
-    default: null
-    example: null
-    schema_fields: []
-  returns: ''
-  examples: []
-  exposed_keyword: ClearFilm
 - name: PerformScan
   summary: Perform an interactive scan sequence by watching UI prompt text and issuing
     Enable / Scan key events.
@@ -2145,14 +1780,15 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: PerformScan
-    line: '2474'
+    line: '3032'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: The live prompt label control whose ``Name`` reflects current scan
-      state.
+      state. When it is ``None`` or ``"Null"``, the method falls back to control key
+      ``EnableScanLabel``. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2172,21 +1808,27 @@ entries:
   exposed_keyword: PerformScan
 - name: Wheel
   summary: Scrolls wheel up or down using control or global wheel APIs.
-  description: This method dispatches directly to `WheelDown` or `WheelUp` on `uiControl`
+  description: 'This method dispatches directly to `WheelDown` or `WheelUp` on `uiControl`
     (or on `auto` when `uiControl` is a string) and forwards only supported parameters
     through `__FilterParamDict`.
+
+    When `targetPath` is provided, it scrolls one wheel step at a time and stops when
+    the target image is matched inside `rect`.
+
+    If the target area does not respond to wheel after cursor movement, set `clickBeforeWheel=True`
+    to click once and activate focus before scrolling.'
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: Wheel
-    line: '2563'
+    line: '3130'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: Target control; when it is a string, global `auto` wheel APIs are
-      used.
+      used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2199,16 +1841,40 @@ entries:
     schema_fields:
     - name: isDown
       type: bool
-      description: 'If True calls `WheelDown`, otherwise calls `WheelUp`. Defaults
-        to True. - x, y (int, optional): Coordinates accepted by the underlying wheel
-        API. - ratioX, ratioY (float, optional): Relative position accepted by the
-        underlying wheel API.'
+      description: If True calls `WheelDown`, otherwise calls `WheelUp`. Defaults
+        to True.
+      required: false
+      default: null
+      example: null
+    - name: x
+      type: int
+      description: X coordinate accepted by the underlying wheel API.
+      required: false
+      default: null
+      example: null
+    - name: y
+      type: int
+      description: Y coordinate accepted by the underlying wheel API.
+      required: false
+      default: null
+      example: null
+    - name: ratioX
+      type: float
+      description: Relative X position accepted by the underlying wheel API. Defaults
+        to 0.5.
+      required: false
+      default: null
+      example: null
+    - name: ratioY
+      type: float
+      description: Relative Y position accepted by the underlying wheel API. Defaults
+        to 0.5.
       required: false
       default: null
       example: null
     - name: wheelTimes
       type: int
-      description: Number of wheel steps.
+      description: Number of wheel steps. Ignored when `targetPath` is provided.
       required: false
       default: null
       example: null
@@ -2224,7 +1890,41 @@ entries:
       required: false
       default: null
       example: null
-  returns: None.
+    - name: targetPath
+      type: str | list[str]
+      description: Target image path(s). When provided, wheel stops after this image
+        is matched.
+      required: false
+      default: null
+      example: null
+    - name: rect
+      type: list[int]
+      description: Search area `[left, top, right, bottom]` for `targetPath` matching.
+      required: false
+      default: null
+      example: null
+    - name: timeout
+      type: float
+      description: Maximum time in seconds for target-image wheel mode. Defaults to
+        30.0.
+      required: false
+      default: null
+      example: null
+    - name: clickBeforeWheel
+      type: bool
+      description: If True, clicks the wheel position once before scrolling to activate
+        focus. Defaults to False.
+      required: false
+      default: null
+      example: null
+    - name: focusWaitTime
+      type: float
+      description: Wait time after the focus click. Defaults to 0.1.
+      required: false
+      default: null
+      example: null
+  returns: True when `targetPath` is matched, False when interrupted or timed out
+    in target-image wheel mode; otherwise None.
   examples: []
   exposed_keyword: Wheel
 - name: DragDrop
@@ -2237,14 +1937,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: DragDrop
-    line: '2591'
+    line: '3219'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: Reference control used for relative drag-drop and for cursor probing
-      via `MoveTo`.
+      via `MoveTo`. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2255,9 +1955,40 @@ entries:
     default: null
     example: null
     schema_fields:
+    - name: x1
+      type: int
+      description: Start coordinates.
+      required: true
+      default: null
+      example: null
+    - name: y1
+      type: int
+      description: Start coordinates.
+      required: true
+      default: null
+      example: null
+    - name: x2
+      type: int
+      description: End coordinates.
+      required: true
+      default: null
+      example: null
+    - name: y2
+      type: int
+      description: End coordinates.
+      required: true
+      default: null
+      example: null
     - name: moveSpeed
       type: float
       description: Drag move speed passed to underlying DragDrop API.
+      required: false
+      default: null
+      example: null
+    - name: pressWaitTime
+      type: float
+      description: Wait time after pressing mouse button before moving to the end
+        point. Defaults to 0.2.
       required: false
       default: null
       example: null
@@ -2271,6 +2002,13 @@ entries:
       type: bool
       description: If True, calls `auto.DragDrop`; otherwise calls `uiControl.DragDrop`.
         Defaults to False.
+      required: false
+      default: null
+      example: null
+    - name: button
+      type: str
+      description: Drag button. Supports `left`, `right`, and `middle`. Defaults to
+        `left`.
       required: false
       default: null
       example: null
@@ -2298,13 +2036,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: MoveMouseInArea
-    line: '2636'
+    line: '3280'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2314,31 +2052,56 @@ entries:
     description: A dictionary of path coordinates.
     default: null
     example: null
-    schema_fields: []
+    schema_fields:
+    - name: x1
+      type: int
+      description: Start corner.
+      required: true
+      default: null
+      example: null
+    - name: y1
+      type: int
+      description: Start corner.
+      required: true
+      default: null
+      example: null
+    - name: x2
+      type: int
+      description: Opposite corner.
+      required: true
+      default: null
+      example: null
+    - name: y2
+      type: int
+      description: Opposite corner.
+      required: true
+      default: null
+      example: null
   returns: None.
   examples: []
   exposed_keyword: MoveMouseInArea
 - name: WaitForExists
-  summary: Waits for a target control or image to appear, while interacting with other
-    controls.
+  summary: Waits for a target control to appear or image to appear/disappear, while
+    interacting with other controls.
   description: 'This complex method waits for a primary target (`waitControlKey` or
 
-    `sourcePath`) to exist. While waiting, it can repeatedly click a list
+    `sourcePath`) to appear. When `sourcePath` is provided, `exist=False` can wait
 
-    of secondary controls (`keyList`), which is useful for dismissing pop-ups
+    for image disappearance. While waiting, it can repeatedly click a list of secondary
 
-    or keeping a session alive.'
+    controls (`keyList`), which is useful for dismissing pop-ups or keeping a session
+    alive.'
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: WaitForExists
-    line: '2660'
+    line: '3304'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The primary UI control context.
+    required: false
+    description: The primary UI control context. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2352,114 +2115,46 @@ entries:
     - name: keyList
       type: list[str]
       description: A list of control keys or image paths to click repeatedly during
-        the wait.
-      required: true
+        the wait. Defaults to [].
+      required: false
       default: null
       example: null
     - name: waitControlKey
       type: str
-      description: The key of the primary control to wait for.
-      required: true
+      description: The key of the primary control to wait for. Defaults to ''.
+      required: false
       default: null
       example: null
     - name: sourcePath
       type: str or list
       description: An image path (or list of paths) to wait for using pattern matching.
-      required: true
+        Defaults to None.
+      required: false
       default: null
       example: null
     - name: exist
       type: bool
-      description: If True (default), waits for the target to appear. If False, waits
-        for it to disappear.
-      required: true
+      description: Only used when `sourcePath` is provided. If True, waits for the
+        image to appear. If False, waits for the image to disappear. Defaults to True.
+      required: false
       default: null
       example: null
     - name: timeout
       type: float
-      description: The maximum time in seconds to wait.
-      required: true
+      description: The maximum time in seconds to wait. Defaults to 600.0.
+      required: false
       default: null
       example: null
     - name: interval
       type: float
-      description: The delay between checks.
-      required: true
+      description: The delay between checks. Defaults to 2.
+      required: false
       default: null
       example: null
-  returns: True if the target is found (or disappears, if `exist=False`) within the
-    timeout, otherwise False.
+  returns: True if the control is found or the image condition is satisfied within
+    the timeout, otherwise False.
   examples: []
   exposed_keyword: WaitForExists
-- name: continueWorking
-  summary: (Deprecated) Prevents idle timeout by repeatedly editing patient info.
-  description: 'This method runs a loop that continuously modifies patient ID and
-    last
-
-    name fields to prevent the application from timing out due to
-
-    inactivity.'
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: continueWorking
-    line: '2745'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: timeout
-      type: float
-      description: The duration in seconds to continue this activity. Defaults to
-        600.0.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: continueWorking
-- name: SetVarFromFuncReturnValue
-  summary: Resolves `uiControl` when needed and delegates dynamic function execution.
-  description: This method is a compatibility wrapper around `__runFunc`. If `uiControl`
-    is a string, it tries to resolve it to a control object first; then it calls `__runFunc(uiControl,
-    paramDict)` and returns the delegated result.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: SetVarFromFuncReturnValue
-    line: '2778'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: A control object or a control key string to resolve.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary used by `__runFunc`, typically containing `funcName`
-      and `funcParam`.
-    default: null
-    example: null
-    schema_fields: []
-  returns: The return value from `__runFunc`.
-  examples: []
-  exposed_keyword: SetVarFromFuncReturnValue
 - name: GetVariable
   summary: Retrieves a previously stored temporary variable from the global manager.
   description: This method accesses the `GlobalManager` to get a value that was stored
@@ -2468,13 +2163,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetVariable
-    line: '2808'
+    line: '3457'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2494,297 +2189,6 @@ entries:
   returns: The value of the stored variable, or None if the key is not found.
   examples: []
   exposed_keyword: GetVariable
-- name: IniFileOperate
-  summary: Gets or sets a key in an INI configuration file.
-  description: This method provides a way to read from or write to a standard INI
-    file. It can retrieve a value from a specific section and key, or it can search
-    all sections for a key-value pair. It can also set a value for a given section
-    and key.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: IniFileOperate
-    line: '2823'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for the INI file operation.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The path to the INI file.
-      required: true
-      default: null
-      example: null
-    - name: operate
-      type: str
-      description: 'The operation to perform: ''get'' or ''set''.'
-      required: true
-      default: null
-      example: null
-    - name: section
-      type: str
-      description: The section name. For 'get', if this is omitted, all sections are
-        searched.
-      required: true
-      default: null
-      example: null
-    - name: key
-      type: str
-      description: The key to read or write.
-      required: true
-      default: null
-      example: null
-    - name: value
-      type: str
-      description: The value to set (for 'set' operation) or the value to match when
-        searching across sections (for 'get' operation).
-      required: true
-      default: null
-      example: null
-  returns: 'For `operate=''get''` with empty `section`, returns the first matched
-    section name whose `key` value equals `value`; for `operate=''get''` with non-empty
-    `section`, returns `cf.get(section, key)`; returns an empty string when `key`
-    is empty; otherwise returns `None` on non-return branches. Notes: In `operate=''get''`
-    with non-empty `section`, missing section/key can raise `configparser` exceptions
-    from `cf.get`.'
-  examples: []
-  exposed_keyword: IniFileOperate
-- name: XmlFileOperate
-  summary: Queries or modifies a node in an XML file.
-  description: 'This method allows for reading data from or writing data to a specified
-
-    node within an XML document. It can locate nodes based on a tag path,
-
-    attribute values, or by searching the entire tree.'
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: XmlFileOperate
-    line: '2869'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for the operation.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The absolute path to the XML file.
-      required: true
-      default: null
-      example: null
-    - name: operate
-      type: str
-      description: The operation to perform ('get' or 'set').
-      required: true
-      default: null
-      example: null
-    - name: tags
-      type: list[str]
-      description: A list of strings representing the path of tags to the desired
-        node. If None, a global search is performed.
-      required: false
-      default: null
-      example: null
-    - name: attribute
-      type: str
-      description: The name of an attribute to use for matching a node.
-      required: false
-      default: null
-      example: null
-    - name: property
-      type: str
-      description: The value of the attribute specified by 'attribute' to match.
-      required: false
-      default: null
-      example: null
-    - name: data
-      type: str
-      description: The new text value for the node when 'operate' is 'set'. Can also
-        be used in 'get' for specific lookups. Defaults to an empty string.
-      required: false
-      default: null
-      example: null
-    - name: browser
-      type: list[str]
-      description: A list of relative tag paths to traverse from a found node to extract
-        text from sibling or child nodes.
-      required: false
-      default: null
-      example: null
-  returns: The result of the operation, which can be a string (node text), a dictionary
-    (node attributes), a list of strings (from 'browser'), or a list of XML Element
-    objects. Returns None if the file does not exist or if the operation is not specified.
-  examples: []
-  exposed_keyword: XmlFileOperate
-- name: XpsFileOperate
-  summary: Extracts text from an XPS or PDF file following a keyword.
-  description: 'This method opens an XPS or PDF document, reads the text from the
-
-    first page, finds a specified keyword, and returns a specified number
-
-    of lines that follow the keyword.'
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: XpsFileOperate
-    line: '2972'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The path to the XPS or PDF file.
-      required: true
-      default: null
-      example: null
-    - name: keyWord
-      type: str
-      description: The line of text to find in the document.
-      required: true
-      default: null
-      example: null
-    - name: rowCount
-      type: int
-      description: The number of lines to extract after the 'keyWord'.
-      required: true
-      default: null
-      example: null
-  returns: A string containing the extracted lines, separated by newline characters.
-  examples: []
-  exposed_keyword: XpsFileOperate
-- name: HtmlToDataframeOrDict
-  summary: Parses all tables from an HTML file into DataFrames or dictionaries.
-  description: This method reads an HTML file and uses pandas to extract all tabular
-    data. It can return the data either as a list of pandas DataFrames or as a list
-    of dictionaries.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: HtmlToDataframeOrDict
-    line: '3006'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The path to the HTML file.
-      required: true
-      default: null
-      example: null
-    - name: returnType
-      type: str
-      description: The desired return type. Can be 'dataFrame' (default) or 'dict'.
-      required: false
-      default: null
-      example: null
-  returns: A list of pandas DataFrames or a list of dictionaries, depending on the
-    'returnType' parameter.
-  examples: []
-  exposed_keyword: HtmlToDataframeOrDict
-- name: GetRecentFileNameInFloder
-  summary: Gets the most recent file or directory from a folder.
-  description: This method sorts candidate paths by creation time descending and returns
-    one or more entries based on `indexList`.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: GetRecentFileNameInFloder
-    line: '3031'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: folderPath
-      type: str
-      description: The path to the folder to search. Required if 'pathList' is not
-        provided.
-      required: false
-      default: null
-      example: null
-    - name: pathList
-      type: list[str]
-      description: A predefined list of paths to sort instead of listing a directory.
-      required: false
-      default: null
-      example: null
-    - name: isDir
-      type: bool
-      description: If True, only considers directories. Defaults to False.
-      required: false
-      default: null
-      example: null
-    - name: indexList
-      type: list[int] | list[str]
-      description: Selection list for sorted paths; use `["all"]` to return all paths,
-        use index list such as `[0, 2]` for partial selection, or omit to return only
-        the newest item.
-      required: false
-      default: null
-      example: null
-  returns: A single path string when `indexList` is None, otherwise a list of paths.
-  examples: []
-  exposed_keyword: GetRecentFileNameInFloder
 - name: CombineStr
   summary: Concatenates property values from one or more UI controls.
   description: This method constructs a string by combining specified properties from
@@ -2794,13 +2198,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: CombineStr
-    line: '3075'
+    line: '3724'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: The primary UI control, used if 'controlNameList' is empty.
+    required: false
+    description: The primary UI control, used if 'controlNameList' is empty. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2838,13 +2243,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: DeleteFile
-    line: '3106'
+    line: '3755'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2886,13 +2291,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetDiskFreeSpace
-    line: '3134'
+    line: '3783'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2934,13 +2339,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetScreenResolution
-    line: '3171'
+    line: '3820'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -2976,13 +2381,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RunTestcase
-    line: '3240'
+    line: '3918'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3025,13 +2430,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: WhileLoop
-    line: '3307'
+    line: '3992'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3079,13 +2484,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ForLoop
-    line: '3357'
+    line: '4042'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3121,13 +2526,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: IfElse
-    line: '3395'
+    line: '4080'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3187,12 +2592,12 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: Condition
-    line: '3430'
+    line: '4115'
   aliases: []
   parameters:
   - name: uiControl
-    type: auto.Control | str
-    required: true
+    type: auto.Control
+    required: false
     description: Current control object or a string
     default: null
     example: null
@@ -3263,13 +2668,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RunCMD
-    line: '3558'
+    line: '4243'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3299,13 +2704,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RunPyScriptFunc
-    line: '3628'
+    line: '4313'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3328,36 +2733,6 @@ entries:
     use it with trusted inputs and for internal automation helpers.'
   examples: []
   exposed_keyword: RunPyScriptFunc
-- name: RestartComputer
-  summary: Saves the current test context to allow for continuation after a restart.
-  description: This method is intended to be the last action in a sequence before
-    a system reboot. It saves essential information, such as the log file name, report
-    path, and current test case details, so that the test run can be resumed after
-    the computer restarts. It does not perform the actual reboot.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: RestartComputer
-    line: '3657'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  returns: ''
-  examples: []
-  exposed_keyword: RestartComputer
 - name: PatternMatching
   summary: Finds template image matches in a background image or screenshot.
   description: This method iterates through one or more source templates, runs template
@@ -3367,13 +2742,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: PatternMatching
-    line: '3691'
+    line: '4376'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3442,13 +2817,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: PatternMatchingDurationg
-    line: '3775'
+    line: '4460'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3491,13 +2866,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: IsMatching
-    line: '3809'
+    line: '4494'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3512,51 +2887,6 @@ entries:
   returns: True if at least one match is found, False otherwise.
   examples: []
   exposed_keyword: IsMatching
-- name: MatchingClick
-  summary: Finds an image pattern and clicks the matched position.
-  description: This method calls `PatternMatching` with `returnType='center'` and
-    clicks the first matched point using absolute coordinates. When a search `rect`
-    is provided, the matched point is offset by `rect[0]` and `rect[1]` so the click
-    is translated from local-region space to screen space.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: MatchingClick
-    line: '3824'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used for matching. Passed through to `Click`.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of matching and click parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: sigleMatch
-      type: bool
-      description: If True, clicks only when exactly one match is found. If False,
-        clicks the first match when one or more matches exist.
-      required: false
-      default: null
-      example: null
-    - name: rect
-      type: list[int] | tuple
-      description: Search rectangle in the form `[left, top, right, bottom]`. - Other
-        parameters are passed to `PatternMatching`.
-      required: false
-      default: null
-      example: null
-  returns: True if a click is executed. False if no match is found, or if `sigleMatch`
-    is True and multiple matches are found.
-  examples: []
-  exposed_keyword: MatchingClick
 - name: GetScreenShot
   summary: Captures a screenshot of the entire screen or a specified region.
   description: This method saves a screenshot as a PNG file. The screenshot can be
@@ -3565,14 +2895,14 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: GetScreenShot
-    line: '3863'
+    line: '4567'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
+    required: false
     description: A UI control object. If 'rect' is not provided, this control's bounding
-      rectangle will be used as the capture area.
+      rectangle will be used as the capture area. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3585,7 +2915,8 @@ entries:
     schema_fields:
     - name: filePath
       type: str
-      description: The full path where the screenshot will be saved.
+      description: Target save path. When only a file name is provided, the image
+        is saved under the current report run folder inside `ConfigManager().resultDirectory`.
       required: true
       default: null
       example: null
@@ -3609,13 +2940,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RecordCurrentTime
-    line: '3906'
+    line: '4615'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: Not used in this operation. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3636,223 +2967,152 @@ entries:
   returns: The current epoch time as a float, or None if `varName` is missing.
   examples: []
   exposed_keyword: RecordCurrentTime
-- name: RecordPerfInfo
-  summary: Configures phase tag/process list and triggers performance logging.
-  description: This method waits until the previous logging cycle flag is cleared,
-    sets tag and process filters on `LogSystemInfoThread`, and raises the `logSysInfo`
-    event.
+- name: FindTextByOCRWindows
+  summary: Finds text by Windows OCR and returns matched coordinates.
+  description: This method wraps ``Main.tools.OCRWindows.find_text_boxes`` into Action
+    style input/output so it can be called by testcase steps through ``uiControl``
+    and ``paramDict``.
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
-    method: RecordPerfInfo
-    line: '3930'
+    method: FindTextByOCRWindows
+    line: '4800'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used in this operation.
+    required: false
+    description: UI control used to infer screenshot area when ``image`` and ``area``/``rect``
+      are not provided. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
   - name: paramDict
     type: Dict
     required: true
-    description: A dictionary of logging parameters.
+    description: OCR and search parameters.
     default: null
     example: null
     schema_fields:
-    - name: tag
+    - name: query
       type: str
-      description: Label for current phase.
+      description: Target text to search (required).
       required: true
       default: null
       example: null
-    - name: process
-      type: list[str]
-      description: Process names to monitor.
-      required: true
-      default: null
-      example: null
-  returns: None.
-  examples: []
-  exposed_keyword: RecordPerfInfo
-- name: RecordPerfInfoUntilCaseEnd
-  summary: Starts performance logging in "until case end" mode.
-  description: This method waits for previous logging cycle completion, enables case-end
-    mode on `LogSystemInfoThread`, applies interval/process settings, and raises the
-    `logSysInfo` event.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: RecordPerfInfoUntilCaseEnd
-    line: '3955'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used in this operation.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of logging parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: interval
-      type: float
-      description: Sampling interval.
-      required: false
-      default: null
-      example: null
-    - name: process
-      type: list[str]
-      description: Process names to monitor.
-      required: true
-      default: null
-      example: null
-  returns: None.
-  examples: []
-  exposed_keyword: RecordPerfInfoUntilCaseEnd
-- name: ExtractColoredText
-  summary: Extracts OCR text from a screen region with optional color filtering and
-    post-processing.
-  description: This method captures an area from screen (or crops a provided background
-    image), optionally filters by named color or RGB range, optionally rotates the
-    image for vertical text, runs Tesseract OCR, and applies optional interference
-    cleanup.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: ExtractColoredText
-    line: '3981'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Control used to derive capture area when `area` is not provided.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of OCR parameters.
-    default: null
-    example: null
-    schema_fields:
     - name: image
-      type: str | PIL.Image.Image
-      description: OCR input image. When empty, uses current screen screenshot.
+      type: str | Path | PIL.Image.Image
+      description: Input image. When missing, this method captures screen image.
       required: false
       default: null
       example: null
     - name: area
       type: list[int]
-      description: Capture region `[left, top, right, bottom]`; when omitted, area
-        is derived from `uiControl` or its grid item.
+      description: Capture area ``[left, top, right, bottom]``.
       required: false
       default: null
       example: null
-    - name: itemIndex
+    - name: rect
       type: list[int]
-      description: Grid index `[row, col]` used with `uiControl` when deriving area
-        from a grid cell.
+      description: Alias of ``area``. Used when ``area`` is not provided.
       required: false
       default: null
       example: null
-    - name: bgImage
-      type: PIL.Image.Image
-      description: Background image to crop instead of live screenshot.
-      required: false
-      default: null
-      example: null
-    - name: vertical
-      type: bool
-      description: If True, rotates image 90 degrees clockwise before OCR. Defaults
-        to False.
-      required: false
-      default: null
-      example: null
-    - name: color
+    - name: matchMode
       type: str
-      description: Named color key from `ImageIdentification().colorDist` used for
-        HSV masking.
+      description: Match strategy. Default ``auto`` when omitted or empty.
       required: false
       default: null
       example: null
-    - name: rgb
-      type: list[int]
-      description: Target RGB triple used for direct RGB range masking.
+    - name: Values
+      type: string
+      description: '``auto``, ``exact``, ``contains``, ``regex``. - ``auto`` runs
+        OCR once, tries ``exact`` first, and falls back to ``contains`` only when
+        exact returns no matches. - ``exact`` requires full equality between query
+        and candidate text after optional ``ignoreSpace`` comparison. - ``contains``
+        checks whether query is a substring of candidate text after optional ``ignoreSpace``
+        comparison. - ``regex`` uses Python regular expression matching on raw OCR
+        text.'
       required: false
       default: null
       example: null
-    - name: rgbRgb
-      type: int
-      description: RGB tolerance when `rgb` is used. Defaults to 20.
+    - name: level
+      type: str
+      description: OCR granularity, ``line`` / ``word``. Default ``line``.
+      required: false
+      default: null
+      example: null
+    - name: level usage
+      type: string
+      description: '``line`` for full-line matching, ``word`` for short keywords.'
+      required: false
+      default: null
+      example: null
+    - name: ignoreSpace
+      type: bool
+      description: If True, exact/contains matching ignores spaces inserted by OCR.
+        Default True. Raw OCR text is not changed.
       required: false
       default: null
       example: null
     - name: lang
       type: str
-      description: OCR language; `'English'` maps to `'eng'`, `'Chinese'` maps to
-        `'chi_sim'`, otherwise passed directly.
+      description: OCR language tag. Default ``en-US``.
       required: false
       default: null
       example: null
-    - name: psm
-      type: int
-      description: Tesseract page segmentation mode. Defaults to 6.
-      required: false
-      default: null
-      example: null
-    - name: oem
-      type: int
-      description: Tesseract OCR engine mode.
-      required: false
-      default: null
-      example: null
-    - name: interference
+    - name: returnAll
       type: bool
-      description: If True, applies regex cleanup and underscore normalization to
-        OCR output. Defaults to False.
+      description: Return all matches or first match only. Default True.
       required: false
       default: null
       example: null
-  returns: The extracted text string after optional cleanup.
+    - name: absolute
+      type: bool
+      description: If True and screenshot is cropped from screen, returned coordinates
+        are translated to absolute screen space. Default True.
+      required: false
+      default: null
+      example: null
+    - name: returnType
+      type: str
+      description: '``detail`` (default) or ``center``.'
+      required: false
+      default: null
+      example: null
+  returns: list[dict] when ``returnType='detail'``. Each item includes ``text``, ``score``,
+    ``box`` ([left, top, right, bottom]) and center coordinates. list[list[int, int]]
+    when ``returnType='center'``.
   examples: []
-  exposed_keyword: ExtractColoredText
+  exposed_keyword: FindTextByOCRWindows
 - name: ClickByOCRWindows
   summary: Finds text by Windows OCR and clicks one matched coordinate.
   description: "Finds text by Windows OCR and clicks one matched coordinate.\n\nArgs:\n\
-    \    uiControl: Optional UI control context for screenshot area inference.\n \
-    \   paramDict: OCR query and click options.\n        - query (str): Target text\
-    \ to search (required).\n        - singleMatch (bool, optional): Require exactly\
-    \ one match.\n        - sigleMatch (bool, optional): Compatibility alias of `singleMatch`.\n\
-    \        - matchIndex (int, optional): Target index in match list. Supports negative\
-    \ index. Defaults to 0.\n        - returnMatch (bool, optional): If True, returns\
-    \ matched detail dict instead of bool.\n        - Other OCR parameters are forwarded\
-    \ to `FindTextByOCRWindows`. Forwarded defaults: ``matchMode='exact'``, ``lang='en-US'``,\
-    \ ``preprocess='ui'``, ``postCorrectUI=True``, ``returnAll=True``.\n        -\
-    \ Other click parameters (such as `pressKey`, `waitTime`) are forwarded to `Click`.\n\
-    \nReturns:\n    bool on normal mode, or matched detail dict when `returnMatch=True`.\n\
-    \    Returns False when no valid match is found."
+    \    uiControl (auto.Control | optional): Optional UI control context for screenshot\
+    \ area inference. Defaults to \"Null\".\n    paramDict: OCR query and click options.\n\
+    \        - query (str): Target text to search (required).\n        - singleMatch\
+    \ (bool, optional): Require exactly one match.\n        - sigleMatch (bool, optional):\
+    \ Compatibility alias of `singleMatch`.\n        - matchIndex (int, optional):\
+    \ Target index in match list. Supports negative index. Defaults to 0.\n      \
+    \  - returnMatch (bool, optional): If True, returns matched detail dict instead\
+    \ of bool.\n        - Other OCR parameters are forwarded to `FindTextByOCRWindows`.\
+    \ Forwarded defaults: ``matchMode='auto'``, ``lang='en-US'``, ``returnAll=True``,\
+    \ ``ignoreSpace=True``.\n        - Other click parameters (such as `pressKey`,\
+    \ `waitTime`) are forwarded to `Click`.\n\nReturns:\n    bool on normal mode,\
+    \ or matched detail dict when `returnMatch=True`.\n    Returns False when no valid\
+    \ match is found."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ClickByOCRWindows
-    line: '4341'
+    line: '4988'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Optional UI control context for screenshot area inference.
+    required: false
+    description: Optional UI control context for screenshot area inference. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3890,10 +3150,15 @@ entries:
       example: null
     - name: returnMatch
       type: bool
-      description: 'If True, returns matched detail dict instead of bool. - Other
-        OCR parameters are forwarded to `FindTextByOCRWindows`. Forwarded defaults:
-        ``matchMode=''exact''``, ``lang=''en-US''``, ``preprocess=''ui''``, ``postCorrectUI=True``,
-        ``returnAll=True``. - Other click parameters (such as `pressKey`, `waitTime`)
+      description: If True, returns matched detail dict instead of bool.
+      required: false
+      default: null
+      example: null
+    - name: Other OCR parameters are forwarded to FindTextByOCRWindows . Forwarded
+        defaults
+      type: string
+      description: '``matchMode=''auto''``, ``lang=''en-US''``, ``returnAll=True``,
+        ``ignoreSpace=True``. - Other click parameters (such as `pressKey`, `waitTime`)
         are forwarded to `Click`.'
       required: false
       default: null
@@ -3905,33 +3170,34 @@ entries:
 - name: WaitByOCRWindows
   summary: Waits until OCR text appears/disappears with timeout polling.
   description: "Waits until OCR text appears/disappears with timeout polling.\n\n\
-    Args:\n    uiControl: Optional UI control context for screenshot area inference.\n\
-    \    paramDict: Wait and OCR parameters.\n        - query (str): Target text to\
-    \ search (required).\n        - exist (bool, optional): If True, wait until text\
-    \ appears; if False, wait until text disappears. Defaults to True.\n        -\
-    \ timeout (float, optional): Max wait time in seconds. Defaults to 30.\n     \
-    \   - interval (float, optional): Polling interval in seconds. Defaults to 0.5.\n\
-    \        - stableCount (int, optional): Number of consecutive successful polls\
-    \ required to pass. Defaults to 1.\n        - returnMatch (bool, optional): When\
-    \ waiting for appearance and matched, return matched detail instead of bool.\n\
-    \        - returnAllMatch (bool, optional): When used with `returnMatch=True`,\
-    \ returns whole match list.\n        - matchIndex (int, optional): Target index\
-    \ when returning a single match.\n        - Other OCR parameters are forwarded\
-    \ to `FindTextByOCRWindows`. Forwarded defaults: ``matchMode='exact'``, ``lang='en-US'``,\
-    \ ``preprocess='ui'``, ``postCorrectUI=True``, ``returnAll=True``.\n\nReturns:\n\
-    \    bool by default. Returns matched detail/list when `returnMatch=True` and\n\
-    \    waiting condition is `exist=True`."
+    Args:\n    uiControl (auto.Control | optional): Optional UI control context for\
+    \ screenshot area inference. Defaults to \"Null\".\n    paramDict: Wait and OCR\
+    \ parameters.\n        - query (str): Target text to search (required).\n    \
+    \    - exist (bool, optional): If True, wait until text appears; if False, wait\
+    \ until text disappears. Defaults to True.\n        - timeout (float, optional):\
+    \ Max wait time in seconds. Defaults to 30.\n        - interval (float, optional):\
+    \ Polling interval in seconds. Defaults to 0.5.\n        - stableCount (int, optional):\
+    \ Number of consecutive successful polls required to pass. Defaults to 1.\n  \
+    \      - returnMatch (bool, optional): When waiting for appearance and matched,\
+    \ return matched detail instead of bool.\n        - returnAllMatch (bool, optional):\
+    \ When used with `returnMatch=True`, returns whole match list.\n        - matchIndex\
+    \ (int, optional): Target index when returning a single match.\n        - Other\
+    \ OCR parameters are forwarded to `FindTextByOCRWindows`. Forwarded defaults:\
+    \ ``matchMode='auto'``, ``lang='en-US'``, ``returnAll=True``, ``ignoreSpace=True``.\n\
+    \nReturns:\n    bool by default. Returns matched detail/list when `returnMatch=True`\
+    \ and\n    waiting condition is `exist=True`."
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: WaitByOCRWindows
-    line: '4398'
+    line: '5045'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Optional UI control context for screenshot area inference.
+    required: false
+    description: Optional UI control context for screenshot area inference. Defaults
+      to "Null".
     default: null
     example: null
     schema_fields: []
@@ -3989,9 +3255,15 @@ entries:
       example: null
     - name: matchIndex
       type: int
-      description: 'Target index when returning a single match. - Other OCR parameters
-        are forwarded to `FindTextByOCRWindows`. Forwarded defaults: ``matchMode=''exact''``,
-        ``lang=''en-US''``, ``preprocess=''ui''``, ``postCorrectUI=True``, ``returnAll=True``.'
+      description: Target index when returning a single match.
+      required: false
+      default: null
+      example: null
+    - name: Other OCR parameters are forwarded to FindTextByOCRWindows . Forwarded
+        defaults
+      type: string
+      description: '``matchMode=''auto''``, ``lang=''en-US''``, ``returnAll=True``,
+        ``ignoreSpace=True``.'
       required: false
       default: null
       example: null
@@ -4007,13 +3279,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: ControlsApply
-    line: '4477'
+    line: '5124'
   aliases: []
   parameters:
   - name: uiControl
-    type: Any
-    required: true
-    description: An iterable (e.g., a list) of UI control objects.
+    type: auto.Control
+    required: false
+    description: An iterable (e.g., a list) of UI control objects. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4040,55 +3312,6 @@ entries:
   returns: A list containing the return values from each executed action.
   examples: []
   exposed_keyword: ControlsApply
-- name: PressMouseUntilCondition
-  summary: Presses and holds the mouse button until a condition is met or a timeout
-    occurs.
-  description: This method simulates a mouse press and hold action. It continuously
-    polls the properties of a specified UI control until they match the expected values
-    or until the timeout is reached.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: PressMouseUntilCondition
-    line: '4496'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: The UI control whose properties are to be monitored.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for the condition and timing.
-    default: null
-    example: null
-    schema_fields:
-    - name: propertyNameList
-      type: list[str]
-      description: A list of property names to check.
-      required: true
-      default: null
-      example: null
-    - name: propertyValueList
-      type: list[Any]
-      description: A list of expected values for the corresponding properties.
-      required: true
-      default: null
-      example: null
-    - name: timeout
-      type: float
-      description: The maximum time in seconds to hold the mouse button. Defaults
-        to 30.
-      required: false
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: PressMouseUntilCondition
 - name: FindExtendedDevice
   summary: Finds and returns the first removable storage device path.
   description: This method iterates over `psutil.disk_partitions()` and returns `disk.device`
@@ -4097,13 +3320,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: FindExtendedDevice
-    line: '4619'
+    line: '5270'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4127,13 +3350,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RunIstation
-    line: '4636'
+    line: '5287'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4176,13 +3399,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RunWeb
-    line: '4658'
+    line: '5309'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4229,13 +3452,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: RunRemote
-    line: '4685'
+    line: '5336'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4268,49 +3491,6 @@ entries:
   returns: None.
   examples: []
   exposed_keyword: RunRemote
-- name: ExecutePythonStatement
-  summary: Executes a single-line Python statement or expression.
-  description: 'This method provides a way to run arbitrary Python code within the
-    context of the automation script. It uses `ParamStrParse` to evaluate the given
-    formula, which allows for variable substitution before execution.
-
-    .. warning::
-
-    This method directly evaluates a string as Python code, which is a significant
-    security risk if the input is not from a trusted source. It should only be used
-    with hardcoded or controlled test data.'
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: ExecutePythonStatement
-    line: '4715'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the code to execute.
-    default: null
-    example: null
-    schema_fields:
-    - name: formula
-      type: str
-      description: A string containing a valid Python expression or statement to be
-        evaluated.
-      required: true
-      default: null
-      example: null
-  returns: The result of the evaluated expression. This can be of any type, or None
-    for statements that do not return a value.
-  examples: []
-  exposed_keyword: ExecutePythonStatement
 - name: PopupMessagebox
   summary: Emits a popup-message signal with optional input and timeout parameters.
   description: This method forwards popup payload to `SignalManager().SignalEmit("popupMessagebox",
@@ -4319,13 +3499,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: PopupMessagebox
-    line: '4735'
+    line: '5386'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4371,106 +3551,6 @@ entries:
   returns: ''
   examples: []
   exposed_keyword: PopupMessagebox
-- name: CloseMessageBox
-  summary: Closes one or more popup message boxes based on specified criteria.
-  description: This method is intended to find and close system message boxes. It
-    can identify target windows by their message text, title, or an icon image. This
-    is currently a placeholder and does not contain implementation.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: CloseMessageBox
-    line: '4760'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of criteria to identify the message box(es).
-    default: null
-    example: null
-    schema_fields:
-    - name: msgList
-      type: list
-      description: A list of strings to match against the message box's content.
-      required: true
-      default: null
-      example: null
-    - name: msgExcludeList
-      type: list
-      description: A list of strings to exclude matches.
-      required: true
-      default: null
-      example: null
-    - name: titleList
-      type: list
-      description: A list of strings to match against the window title.
-      required: true
-      default: null
-      example: null
-    - name: titleExcludeList
-      type: list
-      description: A list of strings to exclude titles.
-      required: true
-      default: null
-      example: null
-    - name: closeIcon
-      type: str
-      description: Path to an image of an icon to match.
-      required: true
-      default: null
-      example: null
-    - name: count
-      type: int
-      description: The maximum number of message boxes to close.
-      required: true
-      default: null
-      example: null
-    - name: timeout
-      type: int
-      description: The time to wait for the message box.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: CloseMessageBox
-- name: TestFindControl
-  summary: A debug method to test control retrieval for all known elements.
-  description: This method iterates through all element keys defined in the `ElementsParse`
-    manager. For each key, it attempts to retrieve the corresponding UI control and
-    prints the key, effectively testing if each defined element can be found at runtime.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: TestFindControl
-    line: '4779'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  returns: ''
-  examples: []
-  exposed_keyword: TestFindControl
 - name: SetIntervalBetweenSteps
   summary: Sets the global delay between automation steps.
   description: This method updates a configuration setting that introduces a pause
@@ -4479,13 +3559,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: SetIntervalBetweenSteps
-    line: '4812'
+    line: '5445'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4505,399 +3585,50 @@ entries:
   returns: ''
   examples: []
   exposed_keyword: SetIntervalBetweenSteps
-- name: GetDicomInfo
-  summary: Retrieves information from a DICOM file.
-  description: This method reads a specified DICOM file and extracts the value of
-    a given DICOM tag. It can also access nested values within a sequence.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: GetDicomInfo
-    line: '4825'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of parameters for the DICOM operation.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The full path to the DICOM file.
-      required: true
-      default: null
-      example: null
-    - name: tags
-      type: str
-      description: The DICOM tag to retrieve. For nested tags, use "->" as a separator
-        (e.g., "0x00100010->0x00100020").
-      required: true
-      default: null
-      example: null
-  returns: The value of the requested DICOM tag.
-  examples: []
-  exposed_keyword: GetDicomInfo
-- name: ImportVariables
-  summary: Imports variables from a file into the application's memory.
-  description: This method signals the system to load variables from a specified file.
-    The actual import logic is handled by a connected slot to the 'importVariables'
-    signal.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: ImportVariables
-    line: '4850'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the file path.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The path to the file from which to import variables.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: ImportVariables
-- name: ExportVariables
-  summary: Exports variables from the application's memory to a file.
-  description: This method signals the system to save current variables to a specified
-    file. The actual export logic is handled by a connected slot to the 'exportVariables'
-    signal.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: ExportVariables
-    line: '4863'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the file path.
-    default: null
-    example: null
-    schema_fields:
-    - name: filePath
-      type: str
-      description: The path to the file where variables will be saved.
-      required: true
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: ExportVariables
-- name: GetNetworkInfo
-  summary: Retrieves detailed network interface information.
-  description: This method gathers information about all network interfaces on the
-    system, including IP addresses, MAC addresses, and gateways. It uses the `netifaces`
-    library to accomplish this. The results are returned as a dictionary where keys
-    are the network interface names and values are dictionaries of their addressing
-    information.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: GetNetworkInfo
-    line: '4894'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  returns: 'A dictionary containing detailed information for each network interface.
-    For example: { ''Ethernet'': { ''IPV4'': [{''addr'': ''192.168.1.100'', ''netmask'':
-    ''255.255.255.0'', ''gateway'': ''192.168.1.1''}], ''IPV6'': [...], ''MAC'': [...]
-    }, ... }'
-  examples:
-  - 'To get the IPv4 address of the ''Gantry'' network, you can use a VarOperator
-    expression like: `$(res)[''Gantry''][''IPV4''][0][''addr'']`'
-  exposed_keyword: GetNetworkInfo
-- name: InnerGetNetworkNameFromGuid
-  summary: Retrieves the friendly name of a network interface from its GUID.
-  description: 'This method queries the Windows Registry to find the human-readable
-    name
-
-    for a network interface, given its globally unique identifier (GUID).'
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: InnerGetNetworkNameFromGuid
-    line: '4930'
-  aliases: []
-  parameters:
-  - name: iface_guid
-    type: str
-    required: true
-    description: The GUID of the network interface.
-    default: null
-    example: null
-    schema_fields: []
-  returns: The friendly name of the interface (e.g., "Ethernet", "Wi-Fi"), or "(unknown)"
-    if the name cannot be found.
-  examples: []
-  exposed_keyword: InnerGetNetworkNameFromGuid
-- name: GetSysInfo
-  summary: Dispatches to predefined system-information helper functions.
-  description: 'This method reads `paramDict[''Name'']` and calls one of the supported
-    helpers: `GetCpuConstants`, `GetSystemVersion`, `GetMemInfo`, or `GetDiskInfo`.'
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: GetSysInfo
-    line: '4953'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing dispatch parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: Name
-      type: str
-      description: Dispatch key for the target helper function.
-      required: true
-      default: null
-      example: null
-  returns: The value returned by the selected helper function, or None when `Name`
-    is missing or unsupported.
-  examples: []
-  exposed_keyword: GetSysInfo
-- name: RunPowerShell
-  summary: Executes a PowerShell command and returns its standard output.
-  description: This method runs `Powershell.exe` with the command text from `cmdStr`
-    and decodes the process output to a Python string.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: RunPowerShell
-    line: '4976'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the command to execute.
-    default: null
-    example: null
-    schema_fields:
-    - name: cmdStr
-      type: str
-      description: 'The PowerShell command string to run. Example: "Get-WmiObject
-        -Class CIM_PCVideoController | Select-Object -Property Name".'
-      required: true
-      default: null
-      example: null
-  returns: The decoded stdout string, or None if `cmdStr` is not provided.
-  examples: []
-  exposed_keyword: RunPowerShell
-- name: GetCpuPercent
-  summary: Samples CPU usage percentages for a fixed duration.
-  description: This method repeatedly calls `psutil.cpu_percent(interval=interval)`
-    until `duration` seconds have elapsed and returns all sampled values.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: GetCpuPercent
-    line: '4995'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary of sampling parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: interval
-      type: float
-      description: Sampling interval passed to `psutil.cpu_percent`. Defaults to 0.1.
-      required: false
-      default: null
-      example: null
-    - name: duration
-      type: float
-      description: Total sampling time in seconds. Defaults to 10.
-      required: false
-      default: null
-      example: null
-  returns: A list of CPU usage percentages in sampling order.
-  examples: []
-  exposed_keyword: GetCpuPercent
-- name: AutoTouch
-  summary: Sends a numeric command to a device via a serial port.
-  description: This method simulates pressing a number on a TR keypad by sending a
-    specific byte sequence over a serial connection.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: AutoTouch
-    line: '5020'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing the command parameters.
-    default: null
-    example: null
-    schema_fields:
-    - name: number
-      type: int
-      description: The number to be sent to the keypad.
-      required: true
-      default: null
-      example: null
-    - name: port
-      type: str
-      description: The serial port to use (e.g., "COM4"). Defaults to "COM4".
-      required: false
-      default: null
-      example: null
-    - name: waitTime
-      type: int
-      description: The time in seconds to wait after sending the command. Defaults
-        to 3.
-      required: false
-      default: null
-      example: null
-  returns: ''
-  examples: []
-  exposed_keyword: AutoTouch
-- name: RecordToCsv
-  summary: Writes one logical row into a CSV file with duplicate-row collapsing.
-  description: This method creates/loads a CSV file, concatenates the incoming `row`
-    as a one-row DataFrame, applies `drop_duplicates()`, and writes back the full
-    table.
-  source:
-    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
-    class: ControlAction
-    method: RecordToCsv
-    line: '5043'
-  aliases: []
-  parameters:
-  - name: uiControl
-    type: auto.Control
-    required: true
-    description: Not used.
-    default: null
-    example: null
-    schema_fields: []
-  - name: paramDict
-    type: Dict
-    required: true
-    description: A dictionary containing output/data fields.
-    default: null
-    example: null
-    schema_fields:
-    - name: fileName
-      type: str
-      description: Target CSV base name. Defaults to current log file name.
-      required: false
-      default: null
-      example: null
-    - name: filePath
-      type: str
-      description: Target folder path. Defaults to framework result path.
-      required: false
-      default: null
-      example: null
-    - name: row
-      type: dict
-      description: Row data mapped by column name.
-      required: true
-      default: null
-      example: null
-  returns: None.
-  examples: []
-  exposed_keyword: RecordToCsv
 - name: FindControlByName
-  summary: Finds a nearby actionable control and optionally performs an action on
-    it.
-  description: This method searches candidate label controls, expands search to nearby
-    child/sibling/parent controls, and then applies action by control type (`Click`,
-    `Edit`, `CheckBoxClick`, `SelectComboxItem`) or returns control directly in `search`
-    mode.
+  summary: Find a control by property conditions and optionally operate on a nearby
+    target control.
+  description: 'This method uses property/value pairs in ``paramDict`` to find a starting
+    control,
+
+    then searches nearby child, sibling, or parent controls for an actionable target.
+
+    It is mainly used for "label + control" layouts, for example locating a label
+    by
+
+    ``Name=''Patient ID''`` or ``HelpText=''Zoom In''`` and then operating the nearby
+    target.
+
+    Root selection order:
+
+    1. Explicit ``uiControl`` object.
+
+    2. Explicit ``parentKeyName``.
+
+    3. Explicit ``uiControl`` string key when it is not ``Null`` or ``MainWindow``.
+
+    4. Current foreground top-level window.
+
+    5. Other currently visible top-level windows on the desktop.
+
+    6. Fallback ``MainWindow``.
+
+    Failure fallback order:
+
+    1. For click actions, try ``ClickByOCRWindows`` with label text as OCR query.
+
+    2. If OCR click also fails and a point is available, fall back to coordinate action.'
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: FindControlByName
-    line: '5076'
+    line: '5709'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Parent control or control key used as search root.
+    required: false
+    description: Parent control or control key used as search root. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
@@ -4908,76 +3639,472 @@ entries:
     default: null
     example: null
     schema_fields:
+    - name: Name
+      type: str
+      description: Find the starting control by Name, for example ``Name='Patient
+        ID'``.
+      required: false
+      default: null
+      example: null
+    - name: HelpText
+      type: str
+      description: Find the starting control by HelpText. This is useful for icon-only
+        controls that expose tooltip/help text.
+      required: false
+      default: null
+      example: null
     - name: cellValue
       type: str
-      description: Action/value input; use `search` to return control without action.
+      description: Action or value to apply, such as ``click``, input text, ``on``,
+        ``off``, or ``search``.
       required: true
+      default: null
+      example: null
+    - name: direction
+      type: str
+      description: 'Enable rectangle-based nearby search. Supported values: ``right``,
+        ``left``, ``below``, ``above``, ``any``.'
+      required: false
       default: null
       example: null
     - name: controlTypeList
       type: List[str]
-      description: Allowed target types. Defaults to `['RadioButtonControl', 'ButtonControl',
-        'EditControl', 'CheckBoxControl', 'ComboBoxControl']`.
+      description: Allowed nearby target control types.
       required: false
       default: null
       example: null
     - name: parentKeyName
       type: str
-      description: Root key name when `uiControl` is a string. Defaults to `MainWindow`.
+      description: Explicit root key name.
       required: false
       default: null
       example: null
-    - name: IsOffscreen
-      type: bool
-      description: Whether off-screen label candidates are allowed. Defaults to False.
+    - name: scrollable
+      type: bool | str
+      description: If enabled, infer a scrollable container from ``clickPoint`` and
+        search it first. String values such as ``scroll``, ``true``, ``yes`` and ``on``
+        are also supported.
       required: false
       default: null
       example: null
-    - name: notFoundOutputReport
-      type: bool
-      description: If True, writes not-found/exception report attachment. - Other
-        key-value pairs are used as property filters for initial search.
+    - name: clickPoint
+      type: list[int] | dict
+      description: Absolute point used for scrollable-container inference. - Other
+        key-value pairs are treated as property filters, such as ``AutomationId``,
+        ``ClassName``, ``ControlTypeName``, or ``HelpText``.
       required: false
       default: null
       example: null
-  returns: The matched control object on successful search/action path, or `None`
+  returns: The matched control object on successful search/action path, or ``None``
     when no valid target is found or an exception occurs.
-  examples: []
+  examples:
+  - 'Find by Name and edit nearby input:'
+  - '``{"Name": "Patient ID", "cellValue": "12345"}``'
+  - 'Find by HelpText and click an icon control:'
+  - '``{"HelpText": "Zoom In", "cellValue": "click"}``'
+  - 'Turn on a checkbox near a located row:'
+  - '``{"Name": "Enable Feature", "cellValue": "on", "controlTypeList": ["CheckBoxControl"]}``'
   exposed_keyword: FindControlByName
-- name: ShowVariable
-  summary: Displays the value of a variable in the integrated Qt Console.
-  description: This method opens a Qt Console window and prints the value of a specified
-    variable for debugging purposes.
+- name: FindRectangles
+  summary: Finds rectangular contours in an image source.
+  description: 'This method resolves image input via `_DealWithImage` and then calls
+
+    `ImageIdentification().FindRectangles` with threshold, contour approximation,
+
+    optional color filtering, optional hierarchy filtering, and optional deduplication.'
   source:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
-    method: ShowVariable
-    line: '6300'
+    method: FindRectangles
+    line: '6232'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Control used to derive capture area when `paramDict['image']` is
+      not provided. Defaults to "Null".
     default: null
     example: null
     schema_fields: []
   - name: paramDict
     type: Dict
     required: true
-    description: A dictionary containing the name of the variable to display.
+    description: A dictionary of detection parameters.
     default: null
     example: null
     schema_fields:
-    - name: var
-      type: str
-      description: The name of the variable to be displayed in the console.
-      required: true
+    - name: image
+      type: string
+      description: Either a capture region list `[left, top, right, bottom]` or a
+        direct image input accepted by the detector.
+      required: false
       default: null
       example: null
-  returns: ''
+    - name: rect
+      type: list[int]
+      description: Search area `[left, top, right, bottom]`.When provided, rectangle
+        detection runs only inside this area.
+      required: false
+      default: null
+      example: null
+    - name: thresh
+      type: int
+      description: Binary threshold used by rectangle detection. Defaults to 115.
+      required: false
+      default: null
+      example: null
+    - name: epsilon
+      type: float
+      description: Polygon approximation coefficient. Defaults to 0.1.
+      required: false
+      default: null
+      example: null
+    - name: color
+      type: str | dict
+      description: 'Color filter name or HSV range dict `{''Lower'': [...], ''Upper'':
+        [...]}`.'
+      required: false
+      default: null
+      example: null
+    - name: minArea
+      type: int | float
+      description: Minimum contour area. Defaults to 400.
+      required: false
+      default: null
+      example: null
+    - name: hierarchyMode
+      type: str
+      description: '`all`/`outer`/`inner`/`leaf`. Defaults to `outer`.'
+      required: false
+      default: null
+      example: null
+    - name: deduplicate
+      type: bool
+      description: Whether to merge highly overlapped rectangles by IoU. Defaults
+        to True.
+      required: false
+      default: null
+      example: null
+    - name: iouThreshold
+      type: float
+      description: IoU threshold for deduplication. Defaults to 0.95.
+      required: false
+      default: null
+      example: null
+    - name: absolute
+      type: bool
+      description: If True and a capture area is used, convert local coordinates to
+        screen coordinates. Defaults to False. When a valid `rect` is provided, absolute
+        output is enabled automatically.
+      required: false
+      default: null
+      example: null
+    - name: sortBy
+      type: str
+      description: '`none`/`x`/`y`/`centerX`/`centerY`/`area`. Defaults to `none`.'
+      required: false
+      default: null
+      example: null
+    - name: reverse
+      type: bool
+      description: Sort order when `sortBy` is set. Defaults to False.
+      required: false
+      default: null
+      example: null
+  returns: A list of detected rectangles. Coordinates are local to the processed image
+    unless absolute output is enabled.
   examples: []
-  exposed_keyword: ShowVariable
+  exposed_keyword: FindRectangles
+- name: FindLines
+  summary: Finds colored straight lines and returns de-duplicated line segments.
+  description: This method resolves image input via `_DealWithImage`, runs`ImageIdentification().FindLines`,
+    optionally offsets coordinates back to screen space, and removes near-duplicate
+    line segments.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: FindLines
+    line: '6342'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: false
+    description: Control used to derive capture area when `paramDict['image']` is
+      not provided. Defaults to "Null".
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of line-detection parameters.
+    default: null
+    example: null
+    schema_fields:
+    - name: image
+      type: string
+      description: Either a capture region list `[left, top, right, bottom]` or a
+        direct image input accepted by the detector.
+      required: false
+      default: null
+      example: null
+    - name: rect
+      type: list[int]
+      description: Search area `[left, top, right, bottom]`.When provided, line detection
+        runs only inside this area.
+      required: false
+      default: null
+      example: null
+    - name: color
+      type: str
+      description: Target line color used by detector.
+      required: false
+      default: null
+      example: null
+    - name: minLineLength
+      type: int
+      description: Minimum line length. Defaults to 160.
+      required: false
+      default: null
+      example: null
+    - name: maxLineLength
+      type: int | float
+      description: Maximum accepted line length after detection. Defaults to None
+        (no upper limit).
+      required: false
+      default: null
+      example: null
+    - name: maxLineGap
+      type: int
+      description: Maximum point gap allowed for line linking. Defaults to 100.
+      required: false
+      default: null
+      example: null
+    - name: threshold
+      type: int
+      description: Hough transform vote threshold. Defaults to 100.
+      required: false
+      default: null
+      example: null
+    - name: lineDirection
+      type: str
+      description: '`all`/`horizontal`/`vertical`. Supports aliases: `h`/`v`/`x`/`y`
+        and Chinese `横`/`横线`/`竖`/`竖线`. Defaults to `all`.'
+      required: false
+      default: null
+      example: null
+    - name: directionTolerance
+      type: int | float
+      description: Allowed angle deviation for horizontal/vertical filtering. Defaults
+        to 15.
+      required: false
+      default: null
+      example: null
+    - name: lineWidthRange
+      type: list[min, max]
+      description: Width range filter in pixels. Can be used with or replaced by `minLineWidth`/`maxLineWidth`.
+      required: false
+      default: null
+      example: null
+    - name: minLineWidth
+      type: int | float
+      description: Minimum accepted line width.
+      required: false
+      default: null
+      example: null
+    - name: maxLineWidth
+      type: int | float
+      description: Maximum accepted line width.
+      required: false
+      default: null
+      example: null
+    - name: lineWidthProbe
+      type: int
+      description: Half scan range used for width estimation. Defaults to 25.
+      required: false
+      default: null
+      example: null
+    - name: deduplicate
+      type: bool
+      description: Whether to suppress near-duplicate line segments. Defaults to True.
+      required: false
+      default: null
+      example: null
+    - name: lineTolerance
+      type: int | float
+      description: Tolerance used for line deduplication. Defaults to 5.
+      required: false
+      default: null
+      example: null
+    - name: absolute
+      type: bool
+      description: If True and a capture area is used, convert local coordinates to
+        screen coordinates. Defaults to False. When a valid `rect` is provided, absolute
+        output is enabled automatically.
+      required: false
+      default: null
+      example: null
+    - name: sortBy
+      type: str
+      description: '`none`/`x`/`y`/`centerX`/`centerY`/`length`. Defaults to `none`.'
+      required: false
+      default: null
+      example: null
+    - name: reverse
+      type: bool
+      description: Sort order when `sortBy` is set. Defaults to False.
+      required: false
+      default: null
+      example: null
+  returns: A list of lines where each entry is `[[x1, y1, x2, y2]]`.
+  examples: []
+  exposed_keyword: FindLines
+- name: FindCircles
+  summary: Finds circles or ellipses on screen by color and size constraints.
+  description: This method captures the current screen, detects circle or ellipse
+    candidates for one or more colors, removes duplicate or concentric detections
+    by geometric similarity, optionally converts ellipse size to axis-aligned bounding
+    rectangle size, and returns either centers or full ellipse descriptors.
+  source:
+    path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
+    class: ControlAction
+    method: FindCircles
+    line: '6673'
+  aliases: []
+  parameters:
+  - name: uiControl
+    type: auto.Control
+    required: false
+    description: Not used for image capture in this method. Defaults to "Null".
+    default: null
+    example: null
+    schema_fields: []
+  - name: paramDict
+    type: Dict
+    required: true
+    description: A dictionary of detection parameters.
+    default: null
+    example: null
+    schema_fields:
+    - name: diameterUpper
+      type: int
+      description: Upper diameter limit passed to `ImageIdentification().FindCircle`.
+        Defaults to 900.
+      required: false
+      default: null
+      example: null
+    - name: diameterLower
+      type: int
+      description: Lower diameter limit passed to `ImageIdentification().FindCircle`.
+        Defaults to 600.
+      required: false
+      default: null
+      example: null
+    - name: circleCenterLeft
+      type: int
+      description: Default left boundary used when `rect` is not provided. Defaults
+        to 2249.
+      required: false
+      default: null
+      example: null
+    - name: circleCenterRight
+      type: int
+      description: Default right boundary used when `rect` is not provided. Defaults
+        to 3838.
+      required: false
+      default: null
+      example: null
+    - name: circleCenterTop
+      type: int
+      description: Default top boundary used when `rect` is not provided. Defaults
+        to 90.
+      required: false
+      default: null
+      example: null
+    - name: circleCenterBottom
+      type: int
+      description: Default bottom boundary used when `rect` is not provided. Defaults
+        to 1079.
+      required: false
+      default: null
+      example: null
+    - name: rect
+      type: list[int]
+      description: Input area in `[left, top, right, bottom]`; it is internally reordered
+        to `[left, right, top, bottom]` before search.
+      required: false
+      default: null
+      example: null
+    - name: circleColor
+      type: str | list[str]
+      description: Target color or color list. Defaults to `'white'`.
+      required: false
+      default: null
+      example: null
+    - name: gaussianBlur
+      type: int
+      description: Gaussian blur kernel size for preprocessing. Defaults to 11.
+      required: false
+      default: null
+      example: null
+    - name: contourSize
+      type: int
+      description: Minimum contour size used by circle detection. Defaults to 10.
+      required: false
+      default: null
+      example: null
+    - name: imShow
+      type: bool
+      description: Whether to display intermediate detection images. Defaults to False.
+      required: false
+      default: null
+      example: null
+    - name: circular
+      type: str
+      description: Circular mode passed to detector (for example `'out'`). Defaults
+        to `'out'`.
+      required: false
+      default: null
+      example: null
+    - name: onlyCircle
+      type: bool
+      description: If True, enforces circle mode in detector. Defaults to True.
+      required: false
+      default: null
+      example: null
+    - name: solid
+      type: bool
+      description: If True, prefers solid shapes. Defaults to False.
+      required: false
+      default: null
+      example: null
+    - name: sortTopToBot
+      type: bool
+      description: If True, sorts by center Y; otherwise sorts by center X. Defaults
+        to True.
+      required: false
+      default: null
+      example: null
+    - name: returnBoundingRectSize
+      type: bool
+      description: If True, converts each ellipse size to axis-aligned `(width, height)`
+        and sets returned angle to `0.0`. Defaults to False.
+      required: false
+      default: null
+      example: null
+    - name: onlyCoordinates
+      type: bool
+      description: If True, returns only center points. Defaults to False.
+      required: false
+      default: null
+      example: null
+  returns: A list sorted by position. Returns `[(x, y), ...]` when `onlyCoordinates`
+    is True; otherwise returns `[((center_x, center_y), (axis_x, axis_y), angle),
+    ...]`.
+  examples: []
+  exposed_keyword: FindCircles
 - name: CloseWindowByTitle
   summary: Closes, minimizes, or restores top-level windows based on their title.
   description: This method finds all open windows whose titles contain the specified
@@ -4986,13 +4113,13 @@ entries:
     path: Y:\ATFramework\CT_SV_SW\ATFramework\Main\Operation\ControlAction.py
     class: ControlAction
     method: CloseWindowByTitle
-    line: '6375'
+    line: '6947'
   aliases: []
   parameters:
   - name: uiControl
     type: auto.Control
-    required: true
-    description: Not used.
+    required: false
+    description: Not used. Defaults to "Null".
     default: null
     example: null
     schema_fields: []

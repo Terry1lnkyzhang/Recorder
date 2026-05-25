@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Iterator
 
 from src.common.session_lock import build_session_lock_status_text, get_session_lock_path, inspect_session_lock
-from src.common.session_summary import count_session_events, get_session_summary_path, read_session_summary
+from src.common.session_summary import count_session_events, get_session_summary_path, normalize_session_priority, read_session_summary
 
 
 SessionCandidateCache = dict[str, dict[str, object]]
@@ -119,6 +119,7 @@ def scan_session_candidates(
             project = str(cached.get("project", "") or "")
             recorder_person = str(cached.get("recorder_person", "") or "")
             converter_person = str(cached.get("converter_person", "") or "")
+            priority = normalize_session_priority(cached.get("priority", ""))
             review_status = str(cached.get("review_status", "") or "")
             review_comments = str(cached.get("review_comments", "") or "")
             lock_status = str(cached.get("lock_status", "") or "")
@@ -151,6 +152,7 @@ def scan_session_candidates(
                 project = metadata["project"]
                 recorder_person = metadata["recorder_person"]
                 converter_person = metadata["converter_person"]
+                priority = normalize_session_priority(metadata.get("priority", ""))
                 review_status = str(summary_payload.get("review_status", "") or "")
                 review_comments = str(summary_payload.get("review_comments", "") or "")
             else:
@@ -158,6 +160,7 @@ def scan_session_candidates(
                 project = ""
                 recorder_person = ""
                 converter_person = ""
+                priority = ""
                 review_status = ""
                 review_comments = ""
             lock_started_at = time.perf_counter()
@@ -193,6 +196,7 @@ def scan_session_candidates(
                 "project": project,
                 "recorder_person": recorder_person,
                 "converter_person": converter_person,
+                "priority": priority,
                 "review_status": review_status,
                 "review_comments": review_comments,
                 "lock_status": lock_status,
@@ -215,6 +219,7 @@ def scan_session_candidates(
                 "project": project,
                 "recorder_person": recorder_person,
                 "converter_person": converter_person,
+                "priority": priority,
                 "review_status": review_status,
                 "review_comments": review_comments,
                 "lock_status": lock_status,
@@ -350,11 +355,16 @@ def _extract_session_candidate_metadata(
     if not converter_person:
         converter_person = _try_extract_metadata_field_from_session_json(session_json, "converter_person")
 
+    priority = normalize_session_priority(summary_payload.get("priority", "")) if isinstance(summary_payload, dict) else ""
+    if not priority:
+        priority = normalize_session_priority(_try_extract_metadata_field_from_session_json(session_json, "priority"))
+
     return {
         "testcase_id": testcase_id,
         "project": project,
         "recorder_person": recorder_person,
         "converter_person": converter_person,
+        "priority": priority,
     }
 
 
@@ -364,6 +374,7 @@ def load_session_candidate_metadata(base_dir: Path, session_dir: Path) -> dict[s
     metadata = _extract_session_candidate_metadata(base_dir, session_dir, session_json, summary_payload)
     return {
         **metadata,
+        "priority": normalize_session_priority(summary_payload.get("priority", metadata.get("priority", ""))),
         "review_status": str(summary_payload.get("review_status", "") or ""),
         "review_comments": str(summary_payload.get("review_comments", "") or ""),
     }

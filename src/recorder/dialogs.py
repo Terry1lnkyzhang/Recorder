@@ -294,6 +294,7 @@ class SessionMetadataDraft:
     name: str = ""
     recorder_person: str = ""
     converter_person: str = ""
+    priority: str = ""
     design_steps: str = ""
     preconditions: str = ""
     configuration_requirements: str = ""
@@ -311,6 +312,7 @@ class SessionMetadataDraft:
             "name": "" if self.is_prs_recording else self.name.strip(),
             "recorder_person": self.recorder_person.strip(),
             "converter_person": self.converter_person.strip(),
+            "priority": self.priority.strip(),
             "design_steps": self.design_steps.strip(),
             "preconditions": self.preconditions.strip(),
             "configuration_requirements": self.configuration_requirements.strip(),
@@ -1677,7 +1679,7 @@ class WaitForImageDialog:
         ttk.Label(header, text=self._t("添加等待事件", "Add Wait Event"), font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky=tk.W)
         ttk.Label(
             header,
-            text=self._t("框选等待区域后，可填写等待说明和最大等待时间，再保存为新的等待事件。", "After selecting a wait region, enter a description and maximum wait time, then save it as a wait event."),
+            text=self._t("框选等待区域后，可选填写等待说明，并设置最大等待时间，再保存为新的等待事件。", "After selecting a wait region, optionally enter a description, set the maximum wait time, then save it as a wait event."),
             justify=tk.LEFT,
             wraplength=820,
         ).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
@@ -1761,9 +1763,6 @@ class WaitForImageDialog:
         note = self._get_note_text()
         if not self.selection:
             messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请先选择等待区域。", "Select a wait region first."), parent=self.window)
-            return
-        if not note:
-            messagebox.showerror(self._t("保存失败", "Save failed"), self._t("请输入等待说明。", "Enter a wait description first."), parent=self.window)
             return
         try:
             timeout_seconds = int(self.timeout_seconds_var.get().strip())
