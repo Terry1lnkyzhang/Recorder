@@ -331,6 +331,7 @@ class RecorderEngine:
         step_description: str = "",
         step_comment: str = "",
         enable_thinking: bool = True,
+        video_sampling_settings: dict[str, object] | None = None,
     ) -> None:
         if not self.is_recording:
             raise RuntimeError("Recorder is not running.")
@@ -354,6 +355,11 @@ class RecorderEngine:
             "media_count": len(media),
             "created_at": utc_now_iso(),
         }
+        if video_sampling_settings:
+            checkpoint["video_sampling_settings"] = dict(video_sampling_settings)
+        additional_details = {"source": "user", "analysis_ready": True}
+        if video_sampling_settings:
+            additional_details["video_sampling_settings"] = dict(video_sampling_settings)
         event = RecordedEvent(
             event_id=self.store.next_event_id("checkpoint"),
             timestamp=utc_now_iso(),
@@ -369,9 +375,10 @@ class RecorderEngine:
                 "step_description": step_description or step_comment,
                 "step_comment": step_comment,
                 "enableThinking": bool(enable_thinking),
+                **({"video_sampling_settings": dict(video_sampling_settings)} if video_sampling_settings else {}),
             },
             window=get_active_window_info(),
-            additional_details={"source": "user", "analysis_ready": True},
+            additional_details=additional_details,
         )
         self.store.append_event(event)
         self.store.add_checkpoint(event.to_dict())

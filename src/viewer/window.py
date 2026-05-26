@@ -52,6 +52,7 @@ from src.converter.registry.loader import load_method_registry
 from src.recorder.i18n import pick_text
 from src.recorder.models import format_recorded_action, normalize_event_type, normalize_keyboard_key_name
 from src.recorder.dialogs import (
+    AICheckpointDialog,
     AICheckpointDraft,
     capture_manual_screenshot,
     open_ai_checkpoint_dialog,
@@ -59,6 +60,7 @@ from src.recorder.dialogs import (
     open_comment_dialog,
     open_wait_for_image_dialog,
 )
+from src.recorder.capture import select_region
 from src.recorder.recorder import RecorderEngine
 from src.recorder.session import SessionStore
 from src.recorder.settings import SettingsStore
@@ -6419,6 +6421,14 @@ class RecorderViewerWindow:
     def _build_ai_checkpoint_draft_from_event(self, event: dict[str, object]) -> AICheckpointDraft:
         checkpoint = event.get("checkpoint", {}) if isinstance(event.get("checkpoint"), dict) else {}
         ai_result = event.get("ai_result", {}) if isinstance(event.get("ai_result"), dict) else {}
+        additional_details = event.get("additional_details", {}) if isinstance(event.get("additional_details"), dict) else {}
+        video_sampling_settings = checkpoint.get("video_sampling_settings")
+        if not isinstance(video_sampling_settings, dict):
+            video_sampling_settings = additional_details.get("video_sampling_settings")
+        if not isinstance(video_sampling_settings, dict):
+            video_sampling_settings = ai_result.get("video_sampling_settings")
+        if not isinstance(video_sampling_settings, dict):
+            video_sampling_settings = {}
         image_selections: list[tuple[Path, dict[str, int]]] = []
         video_path: Path | None = None
         video_region: dict[str, int] | None = None
@@ -6462,8 +6472,29 @@ class RecorderViewerWindow:
             video_path=video_path,
             video_region=video_region,
             video_status=f"已加载视频: {video_path.name}" if video_path else "未录制视频",
+            video_sampling_mode=str(video_sampling_settings.get("video_sampling_mode", "")),
+            video_frame_count=self._parse_optional_int(video_sampling_settings.get("video_frame_count")),
+            video_frame_interval_seconds=self._parse_optional_float(video_sampling_settings.get("video_frame_interval_seconds")),
             query_result=ai_result or None,
         )
+
+    @staticmethod
+    def _parse_optional_int(value: object) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_optional_float(value: object) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
 
     def _build_checkpoint_event_from_payload(self, original_event: dict[str, object], payload: dict[str, object]) -> dict[str, object]:
         existing_checkpoint = original_event.get("checkpoint", {}) if isinstance(original_event.get("checkpoint"), dict) else {}
@@ -6477,6 +6508,7 @@ class RecorderViewerWindow:
         if not isinstance(enable_thinking, bool):
             enable_thinking = str(raw_enable_thinking).strip().lower() not in {"", "0", "false", "no", "off"}
         query_payload = payload.get("query_payload", {}) if isinstance(payload.get("query_payload"), dict) else {"response": str(payload.get("response_text", ""))}
+        video_sampling_settings = payload.get("video_sampling_settings") if isinstance(payload.get("video_sampling_settings"), dict) else None
         query_payload = {
             **query_payload,
             "design_steps": design_steps,
@@ -6484,6 +6516,8 @@ class RecorderViewerWindow:
             "step_comment": step_comment,
             "enableThinking": enable_thinking,
         }
+        if video_sampling_settings:
+            query_payload["video_sampling_settings"] = dict(video_sampling_settings)
         checkpoint_payload = {
             "title": str(payload.get("title", "AI Checkpoint")),
             "query": str(payload.get("query", "")),
@@ -6497,6 +6531,12 @@ class RecorderViewerWindow:
             "media_count": len(media),
             "created_at": str(existing_checkpoint.get("created_at", "") or original_event.get("timestamp", "") or datetime.now().isoformat(timespec="seconds")),
         }
+        if video_sampling_settings:
+            checkpoint_payload["video_sampling_settings"] = dict(video_sampling_settings)
+
+        additional_details = dict(original_event.get("additional_details", {}) if isinstance(original_event.get("additional_details"), dict) else {})
+        if video_sampling_settings:
+            additional_details["video_sampling_settings"] = dict(video_sampling_settings)
 
         updated_event = dict(original_event)
         updated_event.update(
@@ -6508,6 +6548,7 @@ class RecorderViewerWindow:
                 "checkpoint": checkpoint_payload,
                 "media": media,
                 "ai_result": query_payload,
+                "additional_details": additional_details,
             }
         )
         return updated_event
@@ -6563,7 +6604,7 @@ class RecorderViewerWindow:
         dialog_parent = self.window.master if self.window.state() == "withdrawn" else self.window
         dialog = tk.Toplevel(dialog_parent)
         dialog.title("插入录制步骤")
-        dialog.geometry("520x230")
+        dialog.geometry("580x280")
         dialog.resizable(False, False)
         dialog.attributes("-topmost", True)
         dialog.protocol("WM_DELETE_WINDOW", lambda: on_cancel())
@@ -6572,9 +6613,9 @@ class RecorderViewerWindow:
         container.pack(fill=tk.BOTH, expand=True)
         ttk.Label(
             container,
-            text="临时录制已开始。\n可直接执行真实操作，也可以在这里补充 Comment / 等待事件 / 记录截图 / AI Checkpoint。\n完成后点击“停止并插入”；若放弃本次录制，点击“取消”。",
+            text="临时录制已开始。\n可直接执行真实操作，也可以在这里补充 Comment / 等待事件 / 记录截图 / AI Checkpoint。\nCtrl+F5 可快速截图并打开 AI Checkpoint；Ctrl+F6 可快速录制视频 AI Checkpoint。\n完成后点击“停止并插入”；若放弃本次录制，点击“取消”。",
             justify=tk.LEFT,
-            wraplength=480,
+            wraplength=540,
         ).pack(anchor=tk.W)
         status_var = tk.StringVar(value="录制中...")
         ttk.Label(container, textvariable=status_var).pack(anchor=tk.W, pady=(12, 0))
@@ -6601,6 +6642,197 @@ class RecorderViewerWindow:
                 temp_engine.resume()
                 dialog.lift()
                 dialog.focus_force()
+
+        shortcut_video_dialog: AICheckpointDialog | None = None
+        shortcut_checkpoint_request_pending = False
+        shortcut_video_request_pending = False
+
+        def release_controller_grab() -> None:
+            try:
+                if dialog.grab_current() is dialog:
+                    dialog.grab_release()
+            except Exception:
+                pass
+
+        def restore_controller_grab() -> None:
+            if not dialog.winfo_exists():
+                return
+            try:
+                dialog.grab_set()
+            except Exception:
+                pass
+            try:
+                dialog.deiconify()
+                dialog.lift()
+                dialog.focus_force()
+            except Exception:
+                pass
+
+        def get_active_shortcut_video_dialog() -> AICheckpointDialog | None:
+            nonlocal shortcut_video_dialog
+            active_dialog = shortcut_video_dialog
+            if active_dialog is None:
+                return None
+            try:
+                if active_dialog.window.winfo_exists():
+                    return active_dialog
+            except tk.TclError:
+                pass
+            shortcut_video_dialog = None
+            return None
+
+        def handle_shortcut_video_dialog_closed(active_dialog: AICheckpointDialog) -> None:
+            nonlocal shortcut_video_dialog
+            if shortcut_video_dialog is not active_dialog:
+                return
+            shortcut_video_dialog = None
+            if temp_engine.is_recording:
+                temp_engine.resume()
+                status_var.set("录制中...")
+            restore_controller_grab()
+
+        def discard_active_shortcut_video() -> None:
+            nonlocal shortcut_video_dialog
+            active_dialog = get_active_shortcut_video_dialog()
+            if active_dialog is None:
+                return
+            try:
+                active_dialog.discard_for_recording_stop()
+            except Exception:
+                logger.exception("Failed to discard temporary AI checkpoint shortcut video")
+            shortcut_video_dialog = None
+
+        def request_ai_checkpoint_from_shortcut() -> None:
+            try:
+                if dialog.winfo_exists():
+                    dialog.after(0, run_ai_checkpoint_shortcut_request)
+            except tk.TclError:
+                pass
+
+        def run_ai_checkpoint_shortcut_request() -> None:
+            nonlocal shortcut_checkpoint_request_pending
+            if shortcut_checkpoint_request_pending:
+                return
+            shortcut_checkpoint_request_pending = True
+            should_resume_engine = False
+            should_restore_controller = False
+            try:
+                active_dialog = get_active_shortcut_video_dialog()
+                if active_dialog is not None:
+                    release_controller_grab()
+                    active_dialog.restore_after_shortcut_recording()
+                    status_var.set("请先完成当前视频 AI Checkpoint。")
+                    return
+                if not temp_engine.is_recording:
+                    return
+
+                temp_engine.suspend()
+                should_resume_engine = True
+                should_restore_controller = True
+                release_controller_grab()
+                selection = select_region(dialog, "选择 AI Checkpoint 截图区域")
+                if not selection:
+                    status_var.set("已取消 AI Checkpoint 快捷截图。")
+                    return
+
+                relative_path = temp_engine.save_manual_image(selection.image, "checkpoint")
+                if not relative_path:
+                    messagebox.showerror("保存失败", "AI Checkpoint 截图保存失败。", parent=dialog)
+                    return
+                session_dir = temp_engine.store.session_dir
+                if session_dir is None:
+                    messagebox.showerror("保存失败", "当前没有可用的临时 session 目录。", parent=dialog)
+                    return
+
+                draft = AICheckpointDraft()
+                draft.image_selections.append(((session_dir / relative_path).resolve(), selection.to_region_dict()))
+                status_var.set("AI Checkpoint 截图已捕获，请填写并保存。")
+                open_ai_checkpoint_dialog(
+                    dialog,
+                    temp_engine,
+                    self.settings_store,
+                    draft,
+                    historical_screenshots_dir=(self.session_dir / "screenshots") if self.session_dir else None,
+                )
+                status_var.set("录制中...")
+            finally:
+                shortcut_checkpoint_request_pending = False
+                if should_resume_engine and temp_engine.is_recording:
+                    temp_engine.resume()
+                if should_restore_controller:
+                    restore_controller_grab()
+
+        def request_ai_checkpoint_video_from_shortcut() -> None:
+            try:
+                if dialog.winfo_exists():
+                    dialog.after(0, run_ai_checkpoint_video_shortcut_request)
+            except tk.TclError:
+                pass
+
+        def run_ai_checkpoint_video_shortcut_request() -> None:
+            nonlocal shortcut_video_dialog, shortcut_video_request_pending
+            if shortcut_video_request_pending:
+                return
+            shortcut_video_request_pending = True
+            should_resume_engine = False
+            should_restore_controller = False
+            try:
+                active_dialog = get_active_shortcut_video_dialog()
+                if active_dialog is not None:
+                    if active_dialog.is_video_stop_in_progress():
+                        release_controller_grab()
+                        active_dialog.restore_after_shortcut_recording()
+                        status_var.set("AI Checkpoint 视频仍在保存中，请稍候。")
+                        return
+                    if active_dialog.is_video_recording_active():
+                        temp_engine.suspend()
+                        release_controller_grab()
+                        active_dialog.restore_after_shortcut_recording()
+                        if active_dialog.stop_video_async(on_complete=lambda: status_var.set("AI Checkpoint 视频已保存，请填写并保存 Checkpoint。")):
+                            status_var.set("AI Checkpoint 视频录制已停止，正在保存，请继续填写。")
+                            return
+                        should_resume_engine = True
+                        should_restore_controller = True
+                        return
+                    temp_engine.suspend()
+                    release_controller_grab()
+                    active_dialog.restore_after_shortcut_recording()
+                    status_var.set("请继续填写并保存 AI Checkpoint。")
+                    return
+
+                if not temp_engine.is_recording:
+                    return
+
+                temp_engine.suspend()
+                should_resume_engine = True
+                should_restore_controller = True
+                release_controller_grab()
+                selection = select_region(dialog, "选择 AI Checkpoint 视频区域")
+                if not selection:
+                    status_var.set("已取消 AI Checkpoint 快捷视频录制。")
+                    return
+
+                draft = AICheckpointDraft()
+                shortcut_video_dialog = AICheckpointDialog(
+                    dialog,
+                    temp_engine,
+                    self.settings_store,
+                    draft,
+                    historical_screenshots_dir=(self.session_dir / "screenshots") if self.session_dir else None,
+                    auto_start_video_selection=selection,
+                    on_close=handle_shortcut_video_dialog_closed,
+                    start_hidden=True,
+                )
+                status_var.set("AI Checkpoint 视频录制中，再按 Ctrl+F6 停止并打开窗口。")
+            finally:
+                shortcut_video_request_pending = False
+                if should_resume_engine and temp_engine.is_recording:
+                    temp_engine.resume()
+                if should_restore_controller and get_active_shortcut_video_dialog() is None:
+                    restore_controller_grab()
+
+        temp_engine.ai_checkpoint_request_callback = request_ai_checkpoint_from_shortcut
+        temp_engine.ai_checkpoint_video_request_callback = request_ai_checkpoint_video_from_shortcut
 
         ttk.Button(
             action_bar,
@@ -6637,6 +6869,8 @@ class RecorderViewerWindow:
         button_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(16, 0))
 
         def finalize(status: str, session_dir: Path | None = None) -> None:
+            temp_engine.ai_checkpoint_request_callback = None
+            temp_engine.ai_checkpoint_video_request_callback = None
             result["status"] = status
             result["session_dir"] = session_dir
             if dialog.winfo_exists():
@@ -6644,6 +6878,7 @@ class RecorderViewerWindow:
 
         def on_stop() -> None:
             try:
+                discard_active_shortcut_video()
                 status_var.set("正在停止并整理录制结果...")
                 dialog.update_idletasks()
                 session_dir, _ = temp_engine.stop()
@@ -6654,6 +6889,7 @@ class RecorderViewerWindow:
 
         def on_cancel() -> None:
             try:
+                discard_active_shortcut_video()
                 if temp_engine.is_recording:
                     temp_engine.stop()
             except Exception:

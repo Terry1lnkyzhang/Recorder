@@ -52,52 +52,13 @@ class OpenAICompatibleAIClient:
                     "has_video": bool(video_path),
                 },
             )
-        for image_path in image_paths or []:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": self._build_data_url(image_path)},
-                }
-            )
-        for image in inline_images or []:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": self._build_image_data_url(image)},
-                }
-            )
+        self._append_image_attachments(content, image_paths=image_paths, inline_images=inline_images)
 
         sampled_frames = []
         if video_path:
-            if self.settings.send_video_directly:
-                content.append(
-                    {
-                        "type": "text",
-                        "text": f"附带 1 段原始视频，文件名: {video_path.name}",
-                    }
-                )
-                content.append(
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": self._build_data_url(video_path)},
-                    }
-                )
-            else:
-                sampled_frames = self._sample_video_frames(video_path, max_frames=self.settings.video_frame_count)
+            sampled_frames = self._sample_video_frames(video_path, max_frames=self.settings.video_frame_count)
             if sampled_frames:
-                content.append(
-                    {
-                        "type": "text",
-                        "text": f"附带 1 段视频，已抽取 {len(sampled_frames)} 帧供分析，原视频文件名: {video_path.name}",
-                    }
-                )
-                for frame in sampled_frames:
-                    content.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": self._build_image_data_url(frame)},
-                        }
-                    )
+                self._append_sampled_video_frames(content, video_path, sampled_frames)
 
         body = self._build_request_body(
             content=content,
@@ -117,7 +78,6 @@ class OpenAICompatibleAIClient:
                     "image_count": len(image_paths or []),
                     "inline_image_count": len(inline_images or []),
                     "sampled_video_frames": len(sampled_frames),
-                    "direct_video_upload": bool(video_path and self.settings.send_video_directly),
                     "timeout_seconds": self.settings.timeout_seconds,
                 },
             )
@@ -127,23 +87,27 @@ class OpenAICompatibleAIClient:
         session = requests.Session()
         with self._session_lock:
             self._active_session = session
+        response: requests.Response | None = None
         try:
             response = self._post_with_fallback(session, headers, body)
         except requests.HTTPError as exc:
             if cancel_callback and cancel_callback():
                 raise AIClientError("AI 分析已取消。") from exc
-            response = exc.response
-            status_code = response.status_code if response is not None else "?"
-            preview = ""
-            if response is not None:
-                try:
-                    preview = response.text[:600].replace("\n", " ").strip()
-                except Exception:
-                    preview = ""
-            message = f"AI 请求失败: HTTP {status_code}"
-            if preview:
-                message = f"{message} | {preview}"
-            raise AIClientError(message) from exc
+            if response is None:
+                if cancel_callback and cancel_callback():
+                    raise AIClientError("AI 分析已取消。") from exc
+                response = exc.response
+                status_code = response.status_code if response is not None else "?"
+                preview = ""
+                if response is not None:
+                    try:
+                        preview = response.text[:600].replace("\n", " ").strip()
+                    except Exception:
+                        preview = ""
+                message = f"AI 请求失败: HTTP {status_code}"
+                if preview:
+                    message = f"{message} | {preview}"
+                raise AIClientError(message) from exc
         except requests.RequestException as exc:
             if cancel_callback and cancel_callback():
                 raise AIClientError("AI 分析已取消。") from exc
@@ -153,6 +117,8 @@ class OpenAICompatibleAIClient:
                 if self._active_session is session:
                     self._active_session = None
             session.close()
+        if response is None:
+            raise AIClientError("AI 请求失败: 未获得有效响应。")
         if progress_callback:
             progress_callback(
                 "response_received",
@@ -174,7 +140,7 @@ class OpenAICompatibleAIClient:
             "response_text": content_text,
             "raw_response": payload,
             "sampled_video_frames": len(sampled_frames),
-            "direct_video_upload": bool(video_path and self.settings.send_video_directly),
+            "video_delivery_mode": "sampled_frames" if sampled_frames else "none",
         }
 
     def _build_request_body(
@@ -249,6 +215,42 @@ class OpenAICompatibleAIClient:
             preview = ""
         return "param null" in preview or "null" in preview or "internal server error" in preview
 
+    def _append_image_attachments(
+        self,
+        content: list[dict[str, object]],
+        image_paths: list[Path] | None,
+        inline_images: list[Image.Image] | None,
+    ) -> None:
+        for image_path in image_paths or []:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self._build_data_url(image_path)},
+                }
+            )
+        for image in inline_images or []:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self._build_image_data_url(image)},
+                }
+            )
+
+    def _append_sampled_video_frames(self, content: list[dict[str, object]], video_path: Path, sampled_frames: list[Image.Image]) -> None:
+        content.append(
+            {
+                "type": "text",
+                "text": self._build_sampled_video_attachment_text(video_path, len(sampled_frames)),
+            }
+        )
+        for frame in sampled_frames:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": self._build_image_data_url(frame)},
+                }
+            )
+
     def cancel(self) -> None:
         with self._session_lock:
             session = self._active_session
@@ -308,7 +310,68 @@ class OpenAICompatibleAIClient:
         encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
         return f"data:image/png;base64,{encoded}"
 
+    def _build_sampled_video_attachment_text(self, video_path: Path, frame_count: int) -> str:
+        mode = self._normalized_video_sampling_mode()
+        frame_limit = int(self.settings.video_frame_count)
+        limit_text = "不设上限" if frame_limit == 0 else f"最多 {frame_limit} 帧"
+        if mode == "fixed_interval":
+            interval = self._video_frame_interval_seconds()
+            return f"附带 1 段视频，已按每 {interval:g} 秒 1 帧抽取 {frame_count} 帧供分析（{limit_text}），原视频文件名: {video_path.name}"
+        return f"附带 1 段视频，已按固定帧数均匀抽取 {frame_count} 帧供分析，原视频文件名: {video_path.name}"
+
     def _sample_video_frames(self, path: Path, max_frames: int) -> list[Image.Image]:
+        mode = self._normalized_video_sampling_mode()
+        if mode == "fixed_interval":
+            return self._sample_video_frames_by_interval(path, self._video_frame_interval_seconds(), max_frames)
+        return self._sample_video_frames_evenly(path, max_frames)
+
+    def _normalized_video_sampling_mode(self) -> str:
+        mode = str(getattr(self.settings, "video_sampling_mode", "fixed_interval") or "fixed_interval").strip().lower()
+        if mode in {"fixed_interval", "fixed_count"}:
+            return mode
+        return "fixed_interval"
+
+    def _video_frame_interval_seconds(self) -> float:
+        try:
+            interval = float(getattr(self.settings, "video_frame_interval_seconds", 0.5))
+        except Exception:
+            interval = 0.5
+        return max(0.1, interval)
+
+    def _sample_video_frames_by_interval(self, path: Path, interval_seconds: float, max_frames: int) -> list[Image.Image]:
+        reader = imageio.get_reader(str(path))
+        try:
+            try:
+                metadata = reader.get_meta_data()
+                fps = float(metadata.get("fps") or 0)
+            except Exception:
+                fps = 0.0
+            frame_step = max(1, int(round(fps * interval_seconds))) if fps > 0 else 1
+            sampled: list[Image.Image] = []
+            last_frame_index = -1
+            last_sampled_index = -1
+            last_frame_image: Image.Image | None = None
+            for frame_index, frame in enumerate(reader.iter_data()):
+                image = Image.fromarray(frame).convert("RGB")
+                last_frame_index = frame_index
+                last_frame_image = image
+                if frame_index == 0 or frame_index % frame_step == 0:
+                    sampled.append(image)
+                    last_sampled_index = frame_index
+                    if max_frames > 0 and len(sampled) >= max_frames:
+                        break
+            if last_frame_image is not None and last_sampled_index != last_frame_index:
+                if max_frames <= 0 or len(sampled) < max_frames:
+                    sampled.append(last_frame_image)
+                elif sampled:
+                    sampled[-1] = last_frame_image
+            return sampled
+        except Exception:
+            return self._sample_video_frames_evenly(path, max_frames if max_frames > 0 else 12)
+        finally:
+            reader.close()
+
+    def _sample_video_frames_evenly(self, path: Path, max_frames: int) -> list[Image.Image]:
         if max_frames <= 0:
             return []
         reader = imageio.get_reader(str(path))
@@ -316,14 +379,18 @@ class OpenAICompatibleAIClient:
             frame_total = reader.count_frames()
             if frame_total <= 0:
                 return []
+            if max_frames == 1:
+                return [Image.fromarray(reader.get_data(frame_total - 1)).convert("RGB")]
             step = max(1, frame_total // max_frames)
             sampled: list[Image.Image] = []
             for frame_index in range(0, frame_total, step):
                 frame = reader.get_data(frame_index)
-                sampled.append(Image.fromarray(frame))
-                if len(sampled) >= max_frames:
+                sampled.append(Image.fromarray(frame).convert("RGB"))
+                if len(sampled) >= max_frames - 1:
                     break
-            return sampled
+            final_frame = Image.fromarray(reader.get_data(frame_total - 1)).convert("RGB")
+            sampled.append(final_frame)
+            return sampled[:max_frames]
         finally:
             reader.close()
 

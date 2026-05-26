@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from src.database.config import DB_URL
@@ -17,13 +17,14 @@ class Settings:
     temperature: float = 0.0
     enable_thinking: bool = False
     default_system_prompt: str = (
-        "你是自动化测试分析助手。结合截图、视频抽帧和用户说明，"
+        "你是自动化测试分析助手。结合截图、视频和用户说明，"
         "判断当前界面状态、可自动化定位线索、风险点，以及建议的断言或复用步骤。"
     )
     extra_headers_json: str = "{}"
+    video_sampling_mode: str = "fixed_interval"
     video_frame_count: int = 4
+    video_frame_interval_seconds: float = 0.5
     video_fps: int = 5
-    send_video_directly: bool = True
     analysis_batch_size: int = 1
     send_fullscreen_screenshots: bool = False
     ai_observation_excluded_process_names: str = "explorer\nmsedge\nnotepad\nwordpad\nwrite"
@@ -68,7 +69,8 @@ class SettingsStore:
             return Settings()
 
         defaults = asdict(Settings())
-        defaults.update(payload)
+        valid_fields = {field.name for field in fields(Settings)}
+        defaults.update({key: value for key, value in payload.items() if key in valid_fields})
         if not str(defaults.get("prompt_db_connection_string", "")).strip():
             defaults["prompt_db_connection_string"] = DB_URL
         return Settings(**defaults)

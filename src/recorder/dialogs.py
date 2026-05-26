@@ -38,34 +38,36 @@ from .system_info import safe_relpath
 
 AI_CHECKPOINT_CT_VALIDATION_PROMPT = """你是一名严谨的CT验证工程师。
 
-请仅根据图像中直接可见的内容，判断以下问题是否成立：
+请仅根据视觉内容（截图或视频）中直接可见的内容，判断以下问题是否成立：
 {query}
 
 判定原则：
-- 只能依据图像中清晰可见的信息进行判断。
+- 只能依据截图或视频中清晰可见的信息进行判断。
+- 如果输入是视频，请按时间顺序观察界面变化；如果问题关注最终状态，优先参考视频末尾稳定画面。
 - 不得依赖猜测、经验、常识、上下文补全或任何图像外信息。
-- 如果图像中没有足够证据支持判断，则必须返回 False。
+- 如果视觉内容中没有足够证据支持判断，则必须返回 False。
 
 请严格按照以下格式输出，不要输出任何额外内容：
 
 如果可以确认成立：
 result: True
-reason: <图像中直接可见的依据>
+reason: <视觉内容中直接可见的依据>
 
 如果无法确认或不成立：
 result: False
-reason: <图像中信息不足或无法直接确认的原因>"""
+reason: <视觉内容中信息不足或无法直接确认的原因>"""
 
-AI_CHECKPOINT_EXTRACTION_PROMPT = """你是一名严谨的图像信息提取助手。
+AI_CHECKPOINT_EXTRACTION_PROMPT = """你是一名严谨的视觉信息提取助手。
 
-请仅根据图像中直接可见的内容，提取以下信息：
+请仅根据视觉内容（截图或视频）中直接可见的内容，提取以下信息：
 {query}
 
 返回要求：
 - 只返回一个 JSON 对象。
 - JSON 中只能包含一个字段：value。
 - 不要输出任何额外解释、注释、标题或 Markdown 代码块。
-- 如果无法从图像中直接确认该值，则返回 {\"value\": null}。
+- 如果输入是视频，请按时间顺序观察界面变化；如果问题关注最终值，优先参考视频末尾稳定画面。
+- 如果无法从视觉内容中直接确认该值，则返回 {\"value\": null}。
 
 示例：
 {\"value\": 12}
@@ -77,6 +79,10 @@ AI_CHECKPOINT_EXTRACTION_PROMPT = """你是一名严谨的图像信息提取助�
 SESSION_SCOPE_OPTIONS = ["All", "Sub"]
 PRS_RECORDING_OPTIONS = [("是", True), ("否", False)]
 SESSION_PROJECT_OPTIONS = ["Earth_kylin", "Taichi", "Kylin", "Earth_Kylin", "Earth_Taichi", "Earth"]
+VIDEO_SAMPLING_MODE_OPTIONS = [
+    ("fixed_interval", "固定间隔", "Fixed interval"),
+    ("fixed_count", "固定帧数", "Fixed frame count"),
+]
 MAX_AI_CHECKPOINT_IMAGES = 5
 AI_CHECKPOINT_PREVIEW_HEIGHT = 220
 AI_CHECKPOINT_SCROLLBAR_WIDTH = 18
@@ -265,6 +271,9 @@ class AICheckpointDraft:
     video_path: Path | None = None
     video_region: dict[str, int] | None = None
     video_status: str = "未录制视频"
+    video_sampling_mode: str = ""
+    video_frame_count: int | None = None
+    video_frame_interval_seconds: float | None = None
     query_result: dict[str, object] | None = None
 
     def clear(self) -> None:
@@ -281,6 +290,9 @@ class AICheckpointDraft:
         self.video_path = None
         self.video_region = None
         self.video_status = "未录制视频"
+        self.video_sampling_mode = ""
+        self.video_frame_count = None
+        self.video_frame_interval_seconds = None
         self.query_result = None
 
 
@@ -1008,9 +1020,10 @@ class SettingsDialog:
         self.timeout_var = tk.StringVar(value=str(self.settings.timeout_seconds))
         self.temperature_var = tk.StringVar(value=str(self.settings.temperature))
         self.enable_thinking_var = tk.BooleanVar(value=self.settings.enable_thinking)
+        self.video_sampling_mode_var = tk.StringVar(value=self._video_sampling_mode_to_label(self.settings.video_sampling_mode))
         self.video_frames_var = tk.StringVar(value=str(self.settings.video_frame_count))
+        self.video_frame_interval_var = tk.StringVar(value=str(self.settings.video_frame_interval_seconds))
         self.video_fps_var = tk.StringVar(value=str(self.settings.video_fps))
-        self.send_video_directly_var = tk.BooleanVar(value=self.settings.send_video_directly)
         self.analysis_batch_size_var = tk.StringVar(value=str(self.settings.analysis_batch_size))
         self.send_fullscreen_var = tk.BooleanVar(value=self.settings.send_fullscreen_screenshots)
         self.ai_observation_excluded_process_var = tk.StringVar(value=self.settings.ai_observation_excluded_process_names)
@@ -1123,7 +1136,6 @@ class SettingsDialog:
             ("Model", self.model_var),
             ("Timeout(s)", self.timeout_var),
             ("Temperature", self.temperature_var),
-            (self._t("视频抽帧数", "Video Frames"), self.video_frames_var),
             (self._t("视频录制FPS", "Video FPS"), self.video_fps_var),
             (self._t("分析批次步数", "Analysis Batch Size"), self.analysis_batch_size_var),
         ]
@@ -1132,13 +1144,14 @@ class SettingsDialog:
             show = "*" if label == "API Key" else ""
             if variable is self.ui_language_var:
                 ttk.Combobox(form, textvariable=variable, state="readonly", values=ui_language_labels(), width=18).grid(row=row_index, column=1, sticky=tk.W, pady=6)
+            elif variable is self.video_sampling_mode_var:
+                ttk.Combobox(form, textvariable=variable, state="readonly", values=self._video_sampling_mode_labels(), width=24).grid(row=row_index, column=1, sticky=tk.W, pady=6)
             else:
                 ttk.Entry(form, textvariable=variable, show=show).grid(row=row_index, column=1, sticky=tk.EW, pady=6)
 
         check_frame = ttk.Frame(parent)
         check_frame.pack(fill=tk.X, pady=(12, 0))
         ttk.Checkbutton(check_frame, text="enable_thinking", variable=self.enable_thinking_var).pack(side=tk.LEFT)
-        ttk.Checkbutton(check_frame, text=self._t("直接发送原始视频给 AI", "Send raw video directly to AI"), variable=self.send_video_directly_var).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Checkbutton(check_frame, text=self._t("发送全屏截图给 AI", "Send full-screen screenshots to AI"), variable=self.send_fullscreen_var).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(check_frame, textvariable=self.connection_status_var).pack(side=tk.LEFT, padx=12)
         ttk.Button(check_frame, text=self._t("检测连接", "Check Connection"), command=self.check_connection).pack(side=tk.RIGHT)
@@ -1146,8 +1159,8 @@ class SettingsDialog:
         ttk.Label(
             parent,
             text=self._t(
-                "提示: 默认会直接发送原始视频给模型；如服务端不兼容，可关闭该选项回退到旧的抽帧分析逻辑。双屏整图场景下默认只发送当前操作所在屏幕，也可切换为发送全屏截图。",
-                "Tip: Raw video is sent to the model by default. If your service is incompatible, turn this off to fall back to frame-based analysis. In multi-monitor setups, only the active screen is sent by default, but you can switch to full-screen screenshots.",
+                "提示: AI Checkpoint 的视频发送方式和抽帧策略会在 Checkpoint 窗口中按视频单独设置，并保存到事件明细。这里的视频 FPS 只影响录制帧率。",
+                "Tip: AI Checkpoint video delivery and frame sampling are configured per video checkpoint in the Checkpoint window and saved to event details. Video FPS here only controls the recording frame rate.",
             ),
             wraplength=860,
         ).pack(anchor=tk.W, pady=(8, 0))
@@ -1325,6 +1338,10 @@ class SettingsDialog:
         self.playground_system_prompt_text.pack(fill=tk.BOTH, expand=False)
         _set_text(self.playground_system_prompt_text, self.settings.default_system_prompt)
 
+        ttk.Label(parent, text=self._t("对话输入", "User Prompt")).pack(anchor=tk.W, pady=(12, 4))
+        self.playground_input_text = tk.Text(parent, height=10, wrap=tk.WORD, font=("Segoe UI", 11))
+        self.playground_input_text.pack(fill=tk.BOTH, expand=False)
+
         self.playground_status_var = tk.StringVar(value=self._t("未发送", "Not sent"))
         ttk.Label(parent, textvariable=self.playground_status_var).pack(anchor=tk.W, pady=(8, 4))
 
@@ -1332,9 +1349,33 @@ class SettingsDialog:
         self.playground_response_text = tk.Text(parent, height=16, wrap=tk.WORD, font=("Consolas", 10))
         self.playground_response_text.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(parent, text=self._t("对话输入", "User Prompt")).pack(anchor=tk.W, pady=(12, 4))
-        self.playground_input_text = tk.Text(parent, height=10, wrap=tk.WORD, font=("Segoe UI", 11))
-        self.playground_input_text.pack(fill=tk.BOTH, expand=False)
+    def _video_sampling_mode_labels(self) -> list[str]:
+        return [self._t(zh_label, en_label) for _mode, zh_label, en_label in VIDEO_SAMPLING_MODE_OPTIONS]
+
+    def _video_sampling_mode_to_label(self, mode: str) -> str:
+        normalized_mode = str(mode or "fixed_interval").strip().lower()
+        for option_mode, zh_label, en_label in VIDEO_SAMPLING_MODE_OPTIONS:
+            if option_mode == normalized_mode:
+                return self._t(zh_label, en_label)
+        return self._t("固定间隔", "Fixed interval")
+
+    def _video_sampling_mode_from_label(self, label: str) -> str:
+        selected_label = str(label or "").strip()
+        for mode, zh_label, en_label in VIDEO_SAMPLING_MODE_OPTIONS:
+            if selected_label == self._t(zh_label, en_label):
+                return mode
+        return "fixed_interval"
+
+    def _validate_video_sampling_settings(self, settings: Settings) -> None:
+        valid_modes = {mode for mode, _zh_label, _en_label in VIDEO_SAMPLING_MODE_OPTIONS}
+        if settings.video_sampling_mode not in valid_modes:
+            raise ValueError(self._t("视频抽帧策略无效。", "Invalid video sampling mode."))
+        if settings.video_frame_count < 0:
+            raise ValueError(self._t("抽帧数量/上限不能小于 0。", "Frame count / limit cannot be negative."))
+        if settings.video_sampling_mode == "fixed_count" and settings.video_frame_count < 1:
+            raise ValueError(self._t("固定帧数模式下，抽帧数量必须至少为 1。", "Fixed frame count mode requires at least 1 frame."))
+        if settings.video_frame_interval_seconds <= 0:
+            raise ValueError(self._t("固定间隔秒/帧必须大于 0。", "Fixed interval seconds must be greater than 0."))
 
     def save(self) -> None:
         try:
@@ -1349,9 +1390,10 @@ class SettingsDialog:
                 default_system_prompt=self.prompt_text.get("1.0", tk.END).strip(),
                 analysis_system_prompt=self.analysis_prompt_text.get("1.0", tk.END).strip(),
                 extra_headers_json=self.headers_text.get("1.0", tk.END).strip() or "{}",
+                video_sampling_mode=self._video_sampling_mode_from_label(self.video_sampling_mode_var.get()),
                 video_frame_count=int(self.video_frames_var.get().strip()),
+                video_frame_interval_seconds=float(self.video_frame_interval_var.get().strip()),
                 video_fps=int(self.video_fps_var.get().strip()),
-                send_video_directly=self.send_video_directly_var.get(),
                 analysis_batch_size=int(self.analysis_batch_size_var.get().strip()),
                 send_fullscreen_screenshots=self.send_fullscreen_var.get(),
                 ai_observation_excluded_process_names=self.ai_observation_excluded_process_text.get("1.0", tk.END).strip(),
@@ -1379,6 +1421,7 @@ class SettingsDialog:
             SettingsStore.parse_pattern_list(settings.ai_observation_excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_process_names)
             SettingsStore.parse_pattern_list(settings.excluded_window_keywords)
+            self._validate_video_sampling_settings(settings)
             if settings.design_steps_overlay_width < 320:
                 raise ValueError(self._t("Design Steps 悬浮窗宽度不能小于 320", "Design Steps overlay width must be at least 320"))
             if settings.design_steps_overlay_height < 160:
@@ -1502,9 +1545,10 @@ class SettingsDialog:
             default_system_prompt=self.prompt_text.get("1.0", tk.END).strip(),
             analysis_system_prompt=self.analysis_prompt_text.get("1.0", tk.END).strip(),
             extra_headers_json=self.headers_text.get("1.0", tk.END).strip() or "{}",
+            video_sampling_mode=self._video_sampling_mode_from_label(self.video_sampling_mode_var.get()),
             video_frame_count=int(self.video_frames_var.get().strip()),
+            video_frame_interval_seconds=float(self.video_frame_interval_var.get().strip()),
             video_fps=int(self.video_fps_var.get().strip()),
-            send_video_directly=self.send_video_directly_var.get(),
             analysis_batch_size=int(self.analysis_batch_size_var.get().strip()),
             send_fullscreen_screenshots=self.send_fullscreen_var.get(),
             ai_observation_excluded_process_names=self.ai_observation_excluded_process_text.get("1.0", tk.END).strip(),
@@ -1890,6 +1934,14 @@ class AICheckpointDialog:
         self.prompt_template_label_lookup: dict[str, str] = {}
         self.prompt_template_load_error: str | None = None
         self.default_design_steps = self._get_default_design_steps()
+        video_defaults = self.settings_store.load()
+        self.checkpoint_video_sampling_mode_var = tk.StringVar(
+            value=self._video_sampling_mode_to_label(draft.video_sampling_mode or video_defaults.video_sampling_mode)
+        )
+        self.checkpoint_video_frames_var = tk.StringVar(value=str(draft.video_frame_count if draft.video_frame_count is not None else video_defaults.video_frame_count))
+        self.checkpoint_video_frame_interval_var = tk.StringVar(
+            value=str(draft.video_frame_interval_seconds if draft.video_frame_interval_seconds is not None else video_defaults.video_frame_interval_seconds)
+        )
 
         self._reload_prompt_templates(initial_key=draft.prompt_template_key or "")
 
@@ -2004,6 +2056,37 @@ class AICheckpointDialog:
             text=self._t("双击预览也可播放", "Double-click the preview to play"),
         ).pack(side=tk.LEFT, padx=(8, 0))
 
+        self.video_ai_settings_frame = ttk.LabelFrame(self.video_preview_frame, text=self._t("AI 视频发送/抽帧设置", "AI Video Delivery / Sampling"), padding=8)
+        self.video_ai_settings_frame.columnconfigure(1, weight=1)
+        self.checkpoint_video_sampling_label = ttk.Label(self.video_ai_settings_frame, text=self._t("抽帧策略", "Sampling Mode"))
+        self.checkpoint_video_sampling_label.grid(row=0, column=0, sticky=tk.W, pady=3)
+        self.checkpoint_video_sampling_combo = ttk.Combobox(
+            self.video_ai_settings_frame,
+            textvariable=self.checkpoint_video_sampling_mode_var,
+            state="readonly",
+            values=self._video_sampling_mode_labels(),
+            width=22,
+        )
+        self.checkpoint_video_sampling_combo.grid(row=0, column=1, sticky=tk.EW, pady=3, padx=(8, 0))
+        self.checkpoint_video_sampling_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_media_summary())
+        self.checkpoint_video_frames_label = ttk.Label(self.video_ai_settings_frame, text=self._t("抽帧数量/上限", "Frame Count / Limit"))
+        self.checkpoint_video_frames_label.grid(row=1, column=0, sticky=tk.W, pady=3)
+        self.checkpoint_video_frames_entry = ttk.Entry(self.video_ai_settings_frame, textvariable=self.checkpoint_video_frames_var, width=12)
+        self.checkpoint_video_frames_entry.grid(row=1, column=1, sticky=tk.W, pady=3, padx=(8, 0))
+        self.checkpoint_video_interval_label = ttk.Label(self.video_ai_settings_frame, text=self._t("固定间隔秒/帧", "Fixed Interval Seconds"))
+        self.checkpoint_video_interval_label.grid(row=2, column=0, sticky=tk.W, pady=3)
+        self.checkpoint_video_interval_entry = ttk.Entry(self.video_ai_settings_frame, textvariable=self.checkpoint_video_frame_interval_var, width=12)
+        self.checkpoint_video_interval_entry.grid(row=2, column=1, sticky=tk.W, pady=3, padx=(8, 0))
+        self.checkpoint_video_settings_hint_label = ttk.Label(
+            self.video_ai_settings_frame,
+            text=self._t(
+                "固定间隔: 每 X 秒 1 帧，可设置最多 N 帧；固定帧数: 均匀抽 N 帧。固定间隔下 N=0 表示不设上限。",
+                "Fixed interval samples one frame every X seconds with an optional N-frame limit; fixed count samples N evenly-spaced frames. In fixed interval mode, N=0 means no limit.",
+            ),
+            wraplength=420,
+        )
+        self.checkpoint_video_settings_hint_label.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
         right_content = ttk.Frame(right)
         right_content.pack(fill=tk.BOTH, expand=True)
         right_content.columnconfigure(0, weight=1, uniform="ai_checkpoint_right")
@@ -2094,6 +2177,112 @@ class AICheckpointDialog:
             return ""
         return str(getattr(metadata, "design_steps", "") or "").strip()
 
+    def _video_sampling_mode_labels(self) -> list[str]:
+        return [self._t(zh_label, en_label) for _mode, zh_label, en_label in VIDEO_SAMPLING_MODE_OPTIONS]
+
+    def _video_sampling_mode_to_label(self, mode: str) -> str:
+        normalized_mode = str(mode or "fixed_interval").strip().lower()
+        for option_mode, zh_label, en_label in VIDEO_SAMPLING_MODE_OPTIONS:
+            if option_mode == normalized_mode:
+                return self._t(zh_label, en_label)
+        return self._t("固定间隔", "Fixed interval")
+
+    def _video_sampling_mode_from_label(self, label: str) -> str:
+        selected_label = str(label or "").strip()
+        for mode, zh_label, en_label in VIDEO_SAMPLING_MODE_OPTIONS:
+            if selected_label == self._t(zh_label, en_label):
+                return mode
+        return "fixed_interval"
+
+    def _parse_optional_video_frame_count(self) -> int:
+        try:
+            return int(self.checkpoint_video_frames_var.get().strip())
+        except Exception:
+            return Settings().video_frame_count
+
+    def _parse_optional_video_interval_seconds(self) -> float:
+        try:
+            interval_seconds = float(self.checkpoint_video_frame_interval_var.get().strip())
+            return interval_seconds if interval_seconds > 0 else Settings().video_frame_interval_seconds
+        except Exception:
+            return Settings().video_frame_interval_seconds
+
+    def _get_checkpoint_video_sampling_settings(self) -> dict[str, object]:
+        mode = self._video_sampling_mode_from_label(self.checkpoint_video_sampling_mode_var.get())
+        frame_count = self._parse_optional_video_frame_count()
+        interval_seconds = self._parse_optional_video_interval_seconds()
+        try:
+            frame_count = int(self.checkpoint_video_frames_var.get().strip())
+        except Exception as exc:
+            raise ValueError(self._t("抽帧数量/上限必须是整数。", "Frame count / limit must be an integer.")) from exc
+        if frame_count < 0:
+            raise ValueError(self._t("抽帧数量/上限不能小于 0。", "Frame count / limit cannot be negative."))
+        if mode == "fixed_count" and frame_count < 1:
+            raise ValueError(self._t("固定帧数模式下，抽帧数量必须至少为 1。", "Fixed frame count mode requires at least 1 frame."))
+        if mode == "fixed_interval":
+            try:
+                interval_seconds = float(self.checkpoint_video_frame_interval_var.get().strip())
+            except Exception as exc:
+                raise ValueError(self._t("固定间隔秒/帧必须是数字。", "Fixed interval seconds must be numeric.")) from exc
+            if interval_seconds <= 0:
+                raise ValueError(self._t("固定间隔秒/帧必须大于 0。", "Fixed interval seconds must be greater than 0."))
+        return {
+            "video_sampling_mode": mode,
+            "video_frame_count": frame_count,
+            "video_frame_interval_seconds": interval_seconds,
+        }
+
+    def _sync_video_sampling_controls_state(self) -> None:
+        if not hasattr(self, "checkpoint_video_sampling_combo"):
+            return
+        mode = self._video_sampling_mode_from_label(self.checkpoint_video_sampling_mode_var.get())
+        self.checkpoint_video_sampling_label.grid(row=0, column=0, sticky=tk.W, pady=3)
+        self.checkpoint_video_sampling_combo.grid(row=0, column=1, sticky=tk.EW, pady=3, padx=(8, 0))
+        self.checkpoint_video_frames_label.grid(row=1, column=0, sticky=tk.W, pady=3)
+        self.checkpoint_video_frames_entry.grid(row=1, column=1, sticky=tk.W, pady=3, padx=(8, 0))
+        if mode == "fixed_interval":
+            self.checkpoint_video_interval_label.grid(row=2, column=0, sticky=tk.W, pady=3)
+            self.checkpoint_video_interval_entry.grid(row=2, column=1, sticky=tk.W, pady=3, padx=(8, 0))
+            hint = self._t(
+                "固定间隔会使用“固定间隔秒/帧”和“抽帧数量/上限”；抽帧数量为 0 表示不设上限。",
+                "Fixed interval uses both interval seconds and frame count / limit; frame count 0 means no limit.",
+            )
+        else:
+            self.checkpoint_video_interval_label.grid_remove()
+            self.checkpoint_video_interval_entry.grid_remove()
+            hint = self._t(
+                "固定帧数只使用“抽帧数量/上限”，不会使用固定间隔秒/帧。",
+                "Fixed frame count only uses frame count / limit; fixed interval seconds are not used.",
+            )
+        self.checkpoint_video_settings_hint_label.configure(text=hint)
+
+    def _apply_checkpoint_video_settings(self, settings: Settings) -> dict[str, object]:
+        video_settings = self._get_checkpoint_video_sampling_settings()
+        settings.video_sampling_mode = str(video_settings["video_sampling_mode"])
+        settings.video_frame_count = int(video_settings["video_frame_count"])
+        settings.video_frame_interval_seconds = float(video_settings["video_frame_interval_seconds"])
+        return video_settings
+
+    def _describe_current_video_sampling_mode(self) -> str:
+        try:
+            video_settings = self._get_checkpoint_video_sampling_settings()
+        except Exception:
+            return self._t("视频抽帧设置无效", "Invalid video sampling settings")
+        return self._describe_video_sampling_values(
+            str(video_settings["video_sampling_mode"]),
+            int(video_settings["video_frame_count"]),
+            float(video_settings["video_frame_interval_seconds"]),
+        )
+
+    @staticmethod
+    def _describe_video_sampling_values(mode: str, frame_count: int, interval_seconds: float) -> str:
+        limit_text = "不设上限" if frame_count == 0 else f"最多 {frame_count} 帧"
+        if mode == "fixed_interval":
+            return f"固定间隔，每 {interval_seconds:g} 秒 1 帧，{limit_text}"
+        if mode == "fixed_count":
+            return f"固定帧数，均匀抽取 {max(frame_count, 1)} 帧"
+        return f"固定间隔，每 {interval_seconds:g} 秒 1 帧，{limit_text}"
+
     def _build_effective_query_text(self) -> str:
         query = self._get_query_text()
         sections: list[str] = []
@@ -2122,12 +2311,52 @@ class AICheckpointDialog:
 
         template_text = template_option.prompt_template
         if template_option.key == "empty":
-            return query
+            return self._apply_checkpoint_media_prompt_context(query)
         if "{query}" in template_text:
-            return template_text.replace("{query}", query)
+            return self._apply_checkpoint_media_prompt_context(template_text.replace("{query}", query))
         if query and query not in template_text:
-            return f"{template_text.rstrip()}\n\n{query}".strip()
-        return template_text
+            return self._apply_checkpoint_media_prompt_context(f"{template_text.rstrip()}\n\n{query}".strip())
+        return self._apply_checkpoint_media_prompt_context(template_text)
+
+    def _apply_checkpoint_media_prompt_context(self, prompt: str) -> str:
+        prompt = prompt.strip()
+        if not self.video_path:
+            return prompt
+        prompt = self._adapt_prompt_text_for_video(prompt)
+        delivery_text = f"视频会按“{self._describe_current_video_sampling_mode()}”策略抽帧发送给模型。"
+        media_context = (
+            "【媒体说明】\n"
+            f"本次 AI Checkpoint 输入包含一段录屏视频。{delivery_text}\n"
+            "请按时间顺序理解视频里的界面变化；如果用户问题要求判断最终状态，优先参考视频末尾稳定画面；"
+            "如果视频中证据不足，请明确返回无法确认。"
+        )
+        if not prompt:
+            return media_context
+        return f"{media_context}\n\n{prompt}".strip()
+
+    def _describe_video_sampling_mode(self, settings: Settings) -> str:
+        mode = str(getattr(settings, "video_sampling_mode", "fixed_interval") or "fixed_interval").strip().lower()
+        frame_count = int(getattr(settings, "video_frame_count", 4) or 0)
+        interval = float(getattr(settings, "video_frame_interval_seconds", 0.5) or 0.5)
+        return self._describe_video_sampling_values(mode, frame_count, interval)
+
+    @staticmethod
+    def _adapt_prompt_text_for_video(prompt: str) -> str:
+        replacements = [
+            ("图像信息", "视觉信息"),
+            ("图像中", "视觉内容中"),
+            ("图片中", "视觉内容中"),
+            ("图像外", "视觉内容外"),
+            ("图片外", "视觉内容外"),
+            ("从图像", "从视觉内容"),
+            ("从图片", "从视觉内容"),
+            ("根据图像", "根据视觉内容"),
+            ("根据图片", "根据视觉内容"),
+        ]
+        adapted = prompt
+        for old_text, new_text in replacements:
+            adapted = adapted.replace(old_text, new_text)
+        return adapted
 
     def _reload_prompt_templates(self, initial_key: str = "") -> None:
         selected_key = initial_key.strip() or self.prompt_template_var.get().strip()
@@ -2162,13 +2391,12 @@ class AICheckpointDialog:
             self.prompt_template_var.set(selected_option.key)
         self.prompt_template_combo.set(selected_option.label if selected_option else "")
 
-    def _build_query_result_display(self, prompt: str, response_text: str) -> str:
-        return (
-            "[发送给模型的内容]\n"
-            f"{prompt or '(无)'}\n\n"
-            "[模型返回的内容]\n"
-            f"{response_text or '(无)'}"
-        )
+    def _build_query_result_display(self, prompt: str, response_text: str, media_delivery_text: str = "") -> str:
+        sections = ["[发送给模型的内容]\n" f"{prompt or '(无)'}"]
+        if media_delivery_text:
+            sections.append("[媒体发送方式]\n" f"{media_delivery_text}")
+        sections.append("[模型返回的内容]\n" f"{response_text or '(无)'}")
+        return "\n\n".join(sections)
 
     def add_image(self, show_notice: bool = True) -> None:
         self.capture_image(len(self.image_selections), show_notice=show_notice)
@@ -2547,6 +2775,12 @@ class AICheckpointDialog:
         if not self.image_selections and not self.video_path:
             messagebox.showerror(self._t("查询失败", "Query failed"), self._t("请至少提供截图或视频。", "Provide at least one screenshot or a video."), parent=self.window)
             return
+        if self.video_path:
+            try:
+                self._get_checkpoint_video_sampling_settings()
+            except ValueError as exc:
+                messagebox.showerror(self._t("查询失败", "Query failed"), str(exc), parent=self.window)
+                return
 
         self.query_status_var.set(self._t("查询中...", "Querying..."))
         self.last_effective_prompt = prompt
@@ -2555,6 +2789,8 @@ class AICheckpointDialog:
             try:
                 settings = self.settings_store.load()
                 settings.enable_thinking = self.enable_thinking_var.get()
+                if self.video_path:
+                    self._apply_checkpoint_video_settings(settings)
                 client = OpenAICompatibleAIClient(settings)
                 result = client.query(
                     user_prompt=prompt,
@@ -2639,6 +2875,7 @@ class AICheckpointDialog:
         session_dir = session_dir.resolve()
 
         media: list[dict[str, object]] = []
+        video_sampling_settings: dict[str, object] | None = None
         for image_path, region in self.image_selections:
             session_image_path = self._materialize_image_for_session(image_path)
             if session_image_path is None:
@@ -2655,6 +2892,11 @@ class AICheckpointDialog:
             except Exception as exc:
                 messagebox.showerror(self._t("保存失败", "Save failed"), self._t(f"生成视频相对路径失败:\n{exc}", f"Failed to build the video relative path:\n{exc}"), parent=self.window)
                 return None
+            try:
+                video_sampling_settings = self._get_checkpoint_video_sampling_settings()
+            except ValueError as exc:
+                messagebox.showerror(self._t("保存失败", "Save failed"), str(exc), parent=self.window)
+                return None
             media.append({"type": "video", "path": relative_video_path, "region": self.video_region or {}})
 
         return {
@@ -2669,6 +2911,7 @@ class AICheckpointDialog:
             "step_description": step_description,
             "step_comment": step_description,
             "enable_thinking": self.enable_thinking_var.get(),
+            "video_sampling_settings": video_sampling_settings,
         }
 
     def _refresh_media_summary(self) -> None:
@@ -2676,21 +2919,49 @@ class AICheckpointDialog:
         if self.video_path:
             parts = [self._t(f"截图: {len(self.image_selections)} 张", f"Screenshots: {len(self.image_selections)}")]
             parts.append(self._t(f"视频: {self.video_path.name}", f"Video: {self.video_path.name}"))
+            sampling_description = self._describe_current_video_sampling_mode()
+            parts.append(self._t(f"发送方式: {sampling_description}", f"Delivery: {sampling_description}"))
         else:
             parts = [self._t(f"截图: {len(self.image_selections)} 张", f"Screenshots: {len(self.image_selections)}")]
             parts.append(self._t("视频: 无", "Video: None"))
         self.media_var.set(" | ".join(parts))
+        self._sync_video_sampling_controls_state()
+        self._sync_video_ai_settings_visibility()
+
+    def _sync_video_ai_settings_visibility(self) -> None:
+        frame = getattr(self, "video_ai_settings_frame", None)
+        if frame is None:
+            return
+        if self.video_path:
+            if not frame.winfo_ismapped():
+                frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        else:
+            frame.pack_forget()
 
     def _on_query_success(self, prompt: str, result: dict[str, object]) -> None:
         response_text = str(result.get("response_text", ""))
-        display_text = self._build_query_result_display(prompt, response_text)
+        display_text = self._build_query_result_display(prompt, response_text, self._format_query_media_delivery(result))
+        video_sampling_settings: dict[str, object] = {}
+        if self.video_path:
+            try:
+                video_sampling_settings = self._get_checkpoint_video_sampling_settings()
+            except ValueError:
+                video_sampling_settings = {}
         self.query_result = {
             **result,
             "request_prompt": prompt,
             "display_text": display_text,
+            "video_sampling_settings": video_sampling_settings,
         }
         _set_text(self.response_text, display_text)
         self.query_status_var.set(self._t("查询完成", "Query complete"))
+
+    def _format_query_media_delivery(self, result: dict[str, object]) -> str:
+        mode = str(result.get("video_delivery_mode", "") or "")
+        if mode == "sampled_frames":
+            frame_count = result.get("sampled_video_frames", 0)
+            return self._t(f"视频已按时间顺序抽帧发送，共 {frame_count} 帧。", f"Video was sent as sampled frames in chronological order, {frame_count} frame(s).")
+        return ""
 
     def _on_query_error(self, message: str) -> None:
         self.query_status_var.set(self._t("查询失败", "Query failed"))
