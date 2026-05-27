@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from src.database.config import DB_URL
@@ -50,6 +50,7 @@ class Settings:
     design_steps_overlay_height: int = 220
     design_steps_overlay_bg_color: str = "#d7caa3"
     design_steps_overlay_opacity: float = 0.88
+    recent_session_dirs: list[str] = field(default_factory=list)
 
 
 AISettings = Settings

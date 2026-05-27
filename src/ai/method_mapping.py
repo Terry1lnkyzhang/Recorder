@@ -110,6 +110,36 @@ EVENT_METHOD_SUGGESTION_OPTIONS: dict[str, tuple[MethodSuggestionOption, ...]] =
             reason="默认建议：getScreenshot 类型映射到 GetScreenShot。",
         ),
     ),
+    "RunTestcase": (
+        MethodSuggestionOption(
+            name="RunTestcase",
+            reason="默认建议：RunTestcase 类型映射到 RunTestcase。",
+        ),
+        MethodSuggestionOption(
+            name="IfElse",
+            reason="备选建议：需要条件分支时可改用 IfElse。",
+            score=90.0,
+            confidence=0.9,
+        ),
+        MethodSuggestionOption(
+            name="ForLoop",
+            reason="备选建议：需要固定次数或集合循环时可改用 ForLoop。",
+            score=88.0,
+            confidence=0.88,
+        ),
+        MethodSuggestionOption(
+            name="WhileLoop",
+            reason="备选建议：需要条件循环时可改用 WhileLoop。",
+            score=86.0,
+            confidence=0.86,
+        ),
+        MethodSuggestionOption(
+            name="Condition",
+            reason="备选建议：只需要表达式条件判断时可改用 Condition。",
+            score=84.0,
+            confidence=0.84,
+        ),
+    ),
 }
 
 

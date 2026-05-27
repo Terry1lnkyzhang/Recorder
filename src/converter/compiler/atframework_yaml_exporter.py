@@ -9,8 +9,13 @@ from typing import Any
 import yaml
 
 
-def export_suggestions_to_atframework_yaml(suggestion_result: Any, output_path: Path, source_root: Path | None = None) -> int:
-    payload = build_atframework_yaml_dict(suggestion_result)
+def export_suggestions_to_atframework_yaml(
+    suggestion_result: Any,
+    output_path: Path,
+    source_root: Path | None = None,
+    setting_payload: dict[str, Any] | None = None,
+) -> int:
+    payload = build_atframework_yaml_dict(suggestion_result, setting_payload=setting_payload)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if source_root is not None:
         _rewrite_wait_for_exists_screenshot_paths(payload, source_root, output_path.parent)
@@ -19,11 +24,15 @@ def export_suggestions_to_atframework_yaml(suggestion_result: Any, output_path: 
     return len(steps) if isinstance(steps, list) else 0
 
 
-def build_atframework_yaml_dict(suggestion_result: Any) -> dict[str, Any]:
+def build_atframework_yaml_dict(suggestion_result: Any, setting_payload: dict[str, Any] | None = None) -> dict[str, Any]:
     suggestions = list(getattr(suggestion_result, "suggestions", []) or [])
     ordered = sorted(suggestions, key=lambda item: int(getattr(item, "step_id", 0) or 0))
     steps = [_build_atframework_step(item) for item in ordered if str(getattr(item, "method_name", "")).strip()]
-    return {"Steps": steps}
+    payload: dict[str, Any] = {}
+    if setting_payload:
+        payload["Setting"] = setting_payload
+    payload["Steps"] = steps
+    return payload
 
 
 def _build_atframework_step(suggestion: Any) -> dict[str, Any]:

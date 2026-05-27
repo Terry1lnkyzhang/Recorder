@@ -61,6 +61,8 @@ def normalize_event_type(value: Any, action: Any = "") -> str:
 
     if lowered == "performscan" or action_text == "performscan":
         return "PerformScan"
+    if lowered == "runtestcase" or action_text == "runtestcase":
+        return "RunTestcase"
     if action_text == "wait_for_image" or lowered == "wait":
         return "wait"
     if lowered == "getscreenshot" or action_text in {"getscreenshot", "manual_screenshot"}:

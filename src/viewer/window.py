@@ -9,12 +9,14 @@ import shutil
 import tempfile
 import threading
 import time
+import zipfile
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 import tkinter as tk
+from xml.sax.saxutils import escape
 
 import requests
 import yaml
@@ -80,6 +82,29 @@ def get_checkpoint_background_ai_job_count() -> int:
         return len(_CHECKPOINT_BACKGROUND_AI_JOBS)
 
 
+class _MenuLinkedControl:
+    def __init__(self, widget: tk.Widget | None = None, menu: tk.Menu | None = None, menu_index: int | None = None) -> None:
+        self._widget = widget
+        self._menu = menu
+        self._menu_index = menu_index
+
+    def configure(self, **kwargs: object) -> None:
+        if self._widget is not None:
+            self._widget.configure(**kwargs)
+        if self._menu is not None and self._menu_index is not None:
+            if "state" in kwargs:
+                self._menu.entryconfigure(self._menu_index, state=kwargs["state"])
+            if "text" in kwargs:
+                self._menu.entryconfigure(self._menu_index, label=kwargs["text"])
+
+    config = configure
+
+    def __getattr__(self, name: str) -> object:
+        if self._widget is None:
+            raise AttributeError(name)
+        return getattr(self._widget, name)
+
+
 def get_checkpoint_background_ai_jobs_snapshot() -> list[dict[str, object]]:
     with _CHECKPOINT_BACKGROUND_AI_LOCK:
         return [dict(job) for job in _CHECKPOINT_BACKGROUND_AI_JOBS.values()]
@@ -143,6 +168,154 @@ def _coerce_optional_float(value: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+_XLSX_INVALID_XML_CHARS_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+
+def _xlsx_column_name(column_index: int) -> str:
+    name = ""
+    while column_index > 0:
+        column_index, remainder = divmod(column_index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name or "A"
+
+
+def _xlsx_safe_text(value: object) -> str:
+    text = "" if value is None else str(value)
+    return _XLSX_INVALID_XML_CHARS_RE.sub(" ", text)
+
+
+def _xlsx_display_width(value: object) -> int:
+    text = _xlsx_safe_text(value)
+    if not text:
+        return 0
+    return max(sum(2 if ord(char) > 127 else 1 for char in line) for line in text.splitlines() or [text])
+
+
+def _xlsx_cell_xml(row_index: int, column_index: int, value: object, *, style_id: int = 0) -> str:
+    cell_reference = f"{_xlsx_column_name(column_index)}{row_index}"
+    text = _xlsx_safe_text(value)
+    style_attribute = f' s="{style_id}"' if style_id else ""
+    preserve_space = ' xml:space="preserve"' if text != text.strip() or "\n" in text or "\t" in text else ""
+    return f'<c r="{cell_reference}" t="inlineStr"{style_attribute}><is><t{preserve_space}>{escape(text)}</t></is></c>'
+
+
+def _write_simple_xlsx(path: Path, rows: list[list[object]], *, column_widths: list[float] | None = None) -> None:
+    column_count = max((len(row) for row in rows), default=0)
+    if column_count <= 0:
+        raise ValueError("XLSX export requires at least one column.")
+
+    normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    row_count = len(normalized_rows)
+    dimension = f"A1:{_xlsx_column_name(column_count)}{max(row_count, 1)}"
+
+    columns_xml_parts: list[str] = []
+    for column_index in range(1, column_count + 1):
+        if column_widths and column_index <= len(column_widths):
+            width = column_widths[column_index - 1]
+        else:
+            width = min(60, max(8, max(_xlsx_display_width(row[column_index - 1]) for row in normalized_rows) + 2))
+        columns_xml_parts.append(f'<col min="{column_index}" max="{column_index}" width="{width:.1f}" customWidth="1"/>')
+    columns_xml = f"<cols>{''.join(columns_xml_parts)}</cols>"
+
+    sheet_rows: list[str] = []
+    for row_index, row in enumerate(normalized_rows, start=1):
+        style_id = 1 if row_index == 1 else 0
+        cells = "".join(_xlsx_cell_xml(row_index, column_index, row[column_index - 1], style_id=style_id) for column_index in range(1, column_count + 1))
+        sheet_rows.append(f'<row r="{row_index}">{cells}</row>')
+    auto_filter = f'<autoFilter ref="A1:{_xlsx_column_name(column_count)}{max(row_count, 1)}"/>'
+    worksheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<dimension ref="{dimension}"/>'
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        f'{columns_xml}'
+        f'<sheetData>{"".join(sheet_rows)}</sheetData>'
+        f'{auto_filter}'
+        '</worksheet>'
+    )
+    created_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as workbook:
+        workbook.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+            '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>'
+            '</Types>',
+        )
+        workbook.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+            '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>'
+            '</Relationships>',
+        )
+        workbook.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="Sessions" sheetId="1" r:id="rId1"/></sheets>'
+            '</workbook>',
+        )
+        workbook.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+            '</Relationships>',
+        )
+        workbook.writestr(
+            "xl/styles.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts>'
+            '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+            '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+            '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+            '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+            '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>'
+            '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+            '</styleSheet>',
+        )
+        workbook.writestr("xl/worksheets/sheet1.xml", worksheet_xml)
+        workbook.writestr(
+            "docProps/core.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
+            'xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            '<dc:creator>Recorder</dc:creator><cp:lastModifiedBy>Recorder</cp:lastModifiedBy>'
+            f'<dcterms:created xsi:type="dcterms:W3CDTF">{created_at}</dcterms:created>'
+            f'<dcterms:modified xsi:type="dcterms:W3CDTF">{created_at}</dcterms:modified>'
+            '</cp:coreProperties>',
+        )
+        workbook.writestr(
+            "docProps/app.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" '
+            'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">'
+            '<Application>Recorder</Application><DocSecurity>0</DocSecurity><ScaleCrop>false</ScaleCrop>'
+            '<HeadingPairs><vt:vector size="2" baseType="variant"><vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant>'
+            '<vt:variant><vt:i4>1</vt:i4></vt:variant></vt:vector></HeadingPairs>'
+            '<TitlesOfParts><vt:vector size="1" baseType="lpstr"><vt:lpstr>Sessions</vt:lpstr></vt:vector></TitlesOfParts>'
+            '<Company></Company><LinksUpToDate>false</LinksUpToDate><SharedDoc>false</SharedDoc><HyperlinksChanged>false</HyperlinksChanged><AppVersion>16.0000</AppVersion>'
+            '</Properties>',
+        )
 
 
 def _normalize_invalid_step_ids(item: dict[str, object]) -> list[int]:
@@ -1083,6 +1256,80 @@ def pick_session_from_recordings(
         selected_path = Path(str(visible_sessions[int(selection[0])]["path"]))
         dialog.destroy()
 
+    def export_visible_sessions_to_excel() -> None:
+        if not visible_sessions:
+            messagebox.showinfo(t("提示", "Notice"), t("当前表格没有可导出的 Session。", "There are no sessions to export in the current table."), parent=dialog)
+            return
+
+        export_headers = [column_title_by_id[column_id] for column_id in columns] + [t("Session 路径", "Session Path")]
+        export_rows: list[list[object]] = [export_headers]
+        for item in visible_sessions:
+            export_rows.append(
+                [
+                    item.get("name", ""),
+                    item.get("testcase_id", ""),
+                    item.get("project", ""),
+                    priority_display_by_value.get(normalize_session_priority(item.get("priority", "")), ""),
+                    item.get("recorder_person", ""),
+                    item.get("converter_person", ""),
+                    review_status_display_by_value.get(normalize_session_review_status(item.get("review_status", "")), ""),
+                    item.get("lock_status", ""),
+                    item.get("lock_ip", ""),
+                    item.get("review_comments", ""),
+                    item.get("modified", ""),
+                    item.get("events", ""),
+                    item.get("path", ""),
+                ]
+            )
+
+        current_grab = dialog.grab_current()
+        try:
+            if current_grab is not None:
+                try:
+                    current_grab.grab_release()
+                except Exception:
+                    current_grab = None
+            file_path = filedialog.asksaveasfilename(
+                parent=dialog,
+                title=t("导出 Session Excel", "Export Sessions Excel"),
+                defaultextension=".xlsx",
+                filetypes=[(t("Excel 工作簿", "Excel Workbook"), "*.xlsx"), (t("所有文件", "All Files"), "*.*")],
+                initialdir=str(recordings_root if recordings_root.exists() else Path.home()),
+                initialfile=f"sessions_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
+            )
+        finally:
+            if dialog.winfo_exists():
+                if current_grab is not None and current_grab.winfo_exists():
+                    try:
+                        current_grab.grab_set()
+                    except Exception:
+                        pass
+                dialog.lift()
+                dialog.focus_force()
+        if not file_path:
+            return
+
+        output_path = Path(file_path)
+        if output_path.suffix.casefold() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+        try:
+            _write_simple_xlsx(
+                output_path,
+                export_rows,
+                column_widths=[30, 16, 18, 12, 16, 16, 20, 20, 16, 36, 22, 10, 64],
+            )
+        except Exception as exc:
+            messagebox.showerror(t("导出失败", "Export Failed"), str(exc), parent=dialog)
+            return
+
+        exported_count = len(export_rows) - 1
+        status_var.set(t(f"已导出 {exported_count} 条 Session 到 Excel: {output_path}", f"Exported {exported_count} sessions to Excel: {output_path}"))
+        messagebox.showinfo(
+            t("导出完成", "Export Complete"),
+            t(f"已导出 {exported_count} 条 Session:\n{output_path}", f"Exported {exported_count} sessions:\n{output_path}"),
+            parent=dialog,
+        )
+
     def force_unlock_selected() -> None:
         selection = tree.selection()
         if not selection:
@@ -1238,6 +1485,7 @@ def pick_session_from_recordings(
 
     ttk.Button(button_bar, text=t("刷新", "Refresh"), command=lambda: populate(force_refresh=True)).pack(side=tk.LEFT)
     ttk.Button(button_bar, text=t("打开 recordings 目录", "Open recordings folder"), command=lambda: _open_path(recordings_root)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(button_bar, text=t("导出 Excel", "Export Excel"), command=export_visible_sessions_to_excel).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(button_bar, text=t("强制解锁所选 Session", "Force Unlock Selected Session"), command=force_unlock_selected).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(button_bar, text=t("取消", "Cancel"), command=dialog.destroy).pack(side=tk.RIGHT)
     ttk.Button(button_bar, text=confirm_button_text, command=confirm).pack(side=tk.RIGHT, padx=(0, 8))
@@ -1254,7 +1502,10 @@ def pick_session_from_recordings(
 class RecorderViewerWindow:
     def __init__(self, master: tk.Misc, initial_path: Path | None = None) -> None:
         self.settings_store = SettingsStore(get_settings_path())
-        self.ui_language = self.settings_store.load().ui_language
+        settings = self.settings_store.load()
+        self.ui_language = settings.ui_language
+        self.recent_session_dirs = self._normalize_recent_session_dirs(getattr(settings, "recent_session_dirs", []))
+        self.recent_sessions_menu: tk.Menu | None = None
         self.window = tk.Toplevel(master)
         self.window.title(self._t("Recorder Session Viewer", "Recorder Session Viewer"))
         self.window.geometry("1440x900")
@@ -1274,13 +1525,6 @@ class RecorderViewerWindow:
         self._tree_batch_size = 200
         self._pending_tree_selection: list[int] = []
         self._pending_tree_focus: int | None = None
-        self.event_list_window: tk.Toplevel | None = None
-        self.event_list_tree: ttk.Treeview | None = None
-        self.event_list_status_var: tk.StringVar | None = None
-        self.popup_process_filter_combo: ttk.Combobox | None = None
-        self._event_list_reload_after_id: str | None = None
-        self._pending_event_list_rows: list[tuple[int, dict[str, object]]] = []
-        self._event_list_batch_size = 300
         self._session_load_token = 0
         self._session_candidate_cache: dict[str, dict[str, object]] = {}
         self._auto_cleaning_check_token = 0
@@ -1367,7 +1611,6 @@ class RecorderViewerWindow:
         self._finish_viewer_close()
 
     def _finish_viewer_close(self) -> None:
-        self._close_event_list_window()
         self._release_session_lock_handle()
         if self.close_callback:
             self.close_callback()
@@ -1380,38 +1623,78 @@ class RecorderViewerWindow:
         self._session_lock_handle.release()
         self._session_lock_handle = None
 
+    def _add_menu_command(self, menu: tk.Menu, *, label: str, command: Callable[[], object], state: str = tk.NORMAL) -> tuple[tk.Menu, int]:
+        menu.add_command(label=label, command=command, state=state)
+        menu_index = int(menu.index(tk.END) or 0)
+        return menu, menu_index
+
+    def _build_menu_bar(self) -> dict[str, tuple[tk.Menu, int]]:
+        menu_entries: dict[str, tuple[tk.Menu, int]] = {}
+        menubar = tk.Menu(self.window)
+
+        session_menu = tk.Menu(menubar, tearoff=False)
+        session_menu.add_command(label=self._t("选择 Session 目录", "Select Session Folder"), command=self.select_session_dir)
+        session_menu.add_command(label=self._t("打开当前 Session 目录", "Open Current Session Folder"), command=self.open_current_session_dir)
+        self.recent_sessions_menu = tk.Menu(session_menu, tearoff=False, postcommand=self._refresh_recent_sessions_menu)
+        session_menu.add_cascade(label=self._t("近期打开的 Session", "Recent Sessions"), menu=self.recent_sessions_menu)
+        session_menu.add_separator()
+        session_menu.add_command(label="Session Setting", command=self.open_session_setting_dialog)
+        menubar.add_cascade(label="Session", menu=session_menu)
+
+        ai_menu = tk.Menu(menubar, tearoff=False)
+        menu_entries["ai"] = self._add_menu_command(ai_menu, label=self._t("AI分析全部", "AI Analysis All"), command=self.run_ai_analysis)
+        menu_entries["selected_ai"] = self._add_menu_command(ai_menu, label=self._t("AI分析选中行", "Analyze Selected Rows"), command=self.run_selected_ai_analysis)
+        menu_entries["ai_summary"] = self._add_menu_command(ai_menu, label=self._t("AI总结", "AI Summary"), command=self.run_ai_process_summary)
+        ai_menu.add_separator()
+        menu_entries["load_ai"] = self._add_menu_command(ai_menu, label=self._t("加载历史AI结果", "Load Historical AI Results"), command=self.load_historical_ai_analysis, state=tk.DISABLED)
+        menu_entries["cancel_ai"] = self._add_menu_command(ai_menu, label=self._t("终止AI分析", "Cancel AI Analysis"), command=self.cancel_ai_analysis, state=tk.DISABLED)
+        menubar.add_cascade(label="AI", menu=ai_menu)
+
+        suggestion_menu = tk.Menu(menubar, tearoff=False)
+        menu_entries["generate_suggestion"] = self._add_menu_command(suggestion_menu, label=self._t("生成方法建议", "Generate Method Suggestions"), command=self.run_method_suggestion_generation)
+        menu_entries["parameter_recommend"] = self._add_menu_command(suggestion_menu, label=self._t("生成参数推荐", "Generate Parameter Suggestions"), command=self.run_parameter_recommendation)
+        menubar.add_cascade(label=self._t("转换建议", "Conversion Suggestions"), menu=suggestion_menu)
+
+        atframework_menu = tk.Menu(menubar, tearoff=False)
+        menu_entries["debug_run"] = self._add_menu_command(atframework_menu, label=self._t("调试", "Debug"), command=self.debug_atframework_steps)
+        menu_entries["stop_debug"] = self._add_menu_command(atframework_menu, label=self._t("停止调试", "Stop Debug"), command=self.cancel_debug_atframework_steps, state=tk.DISABLED)
+        atframework_menu.add_separator()
+        menu_entries["export_yaml"] = self._add_menu_command(atframework_menu, label=self._t("导出 YAML", "Export YAML"), command=self.export_atframework_yaml)
+        menubar.add_cascade(label="ATFramework", menu=atframework_menu)
+
+        cleaning_menu = tk.Menu(menubar, tearoff=False)
+        cleaning_menu.add_command(label=self._t("应用AI删除建议", "Apply AI Deletion Suggestions"), command=self.apply_ai_deletions)
+        cleaning_menu.add_separator()
+        cleaning_menu.add_command(label=self._t("预览清洗", "Preview Cleaning"), command=self.preview_cleaning)
+        cleaning_menu.add_command(label=self._t("应用清洗", "Apply Cleaning"), command=self.apply_cleaning)
+        cleaning_menu.add_command(label=self._t("清除高亮", "Clear Highlights"), command=self.clear_cleaning_highlight)
+        menubar.add_cascade(label=self._t("数据清洗", "Data Cleaning"), menu=cleaning_menu)
+
+        self.window.configure(menu=menubar)
+        return menu_entries
+
     def _build_ui(self) -> None:
+        menu_entries = self._build_menu_bar()
         toolbar = ttk.Frame(self.window, padding=(16, 12))
         toolbar.pack(fill=tk.X)
 
         ttk.Button(toolbar, text=self._t("选择 Session 目录", "Select Session Folder"), command=self.select_session_dir).pack(side=tk.LEFT)
-        ttk.Button(toolbar, text=self._t("打开当前 Session 目录", "Open Current Session Folder"), command=self.open_current_session_dir).pack(side=tk.LEFT, padx=(8, 0))
-        self.ai_button = ttk.Button(toolbar, text=self._t("AI分析", "AI Analysis"), command=self.run_ai_analysis)
-        self.ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.selected_ai_button = ttk.Button(toolbar, text=self._t("AI分析选中行", "Analyze Selected Rows"), command=self.run_selected_ai_analysis)
-        self.selected_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.ai_process_summary_button = ttk.Button(toolbar, text=self._t("AI总结", "AI Summary"), command=self.run_ai_process_summary)
-        self.ai_process_summary_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.load_ai_button = ttk.Button(toolbar, text=self._t("加载历史AI结果", "Load Historical AI Results"), command=self.load_historical_ai_analysis, state=tk.DISABLED)
-        self.load_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.cancel_ai_button = ttk.Button(toolbar, text=self._t("终止AI分析", "Cancel AI Analysis"), command=self.cancel_ai_analysis, state=tk.DISABLED)
-        self.cancel_ai_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.generate_suggestion_button = ttk.Button(toolbar, text=self._t("为当前步骤生成方法建议", "Generate Method Suggestions for Current Steps"), command=self.run_method_suggestion_generation)
-        self.generate_suggestion_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.parameter_recommend_button = ttk.Button(toolbar, text=self._t("为当前步骤生成参数推荐", "Generate Parameter Suggestions for Current Steps"), command=self.run_parameter_recommendation)
-        self.parameter_recommend_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.export_yaml_button = ttk.Button(toolbar, text=self._t("转成ATFramework YAML", "Export to ATFramework YAML"), command=self.export_atframework_yaml)
-        self.export_yaml_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.debug_run_button = ttk.Button(toolbar, text=self._t("调试", "Debug"), command=self.debug_atframework_steps)
-        self.debug_run_button.pack(side=tk.LEFT, padx=(8, 0))
-        self.stop_debug_button = ttk.Button(toolbar, text=self._t("停止调试", "Stop Debug"), command=self.cancel_debug_atframework_steps, state=tk.DISABLED)
-        self.stop_debug_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text=self._t("全选步骤", "Select All Steps"), command=self.select_all_events).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text=self._t("应用AI删除建议", "Apply AI Deletion Suggestions"), command=self.apply_ai_deletions).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text=self._t("数据清洗", "Preview Cleaning"), command=self.preview_cleaning).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text=self._t("应用清洗", "Apply Cleaning"), command=self.apply_cleaning,).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text=self._t("清除高亮", "Clear Highlights"), command=self.clear_cleaning_highlight).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(toolbar, text=self._t("弹出事件列表", "Open Event List"), command=self.open_event_list_window).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(toolbar, text="Session Setting", command=self.open_session_setting_dialog).pack(side=tk.LEFT, padx=(8, 0))
+        ai_button_widget = ttk.Button(toolbar, text=self._t("AI分析", "AI Analysis"), command=self.run_ai_analysis)
+        ai_button_widget.pack(side=tk.LEFT, padx=(8, 0))
+        debug_run_button_widget = ttk.Button(toolbar, text=self._t("调试", "Debug"), command=self.debug_atframework_steps)
+        debug_run_button_widget.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.ai_button = _MenuLinkedControl(ai_button_widget, *menu_entries["ai"])
+        self.selected_ai_button = _MenuLinkedControl(menu=menu_entries["selected_ai"][0], menu_index=menu_entries["selected_ai"][1])
+        self.ai_process_summary_button = _MenuLinkedControl(menu=menu_entries["ai_summary"][0], menu_index=menu_entries["ai_summary"][1])
+        self.load_ai_button = _MenuLinkedControl(menu=menu_entries["load_ai"][0], menu_index=menu_entries["load_ai"][1])
+        self.cancel_ai_button = _MenuLinkedControl(menu=menu_entries["cancel_ai"][0], menu_index=menu_entries["cancel_ai"][1])
+        self.generate_suggestion_button = _MenuLinkedControl(menu=menu_entries["generate_suggestion"][0], menu_index=menu_entries["generate_suggestion"][1])
+        self.parameter_recommend_button = _MenuLinkedControl(menu=menu_entries["parameter_recommend"][0], menu_index=menu_entries["parameter_recommend"][1])
+        self.debug_run_button = _MenuLinkedControl(debug_run_button_widget, *menu_entries["debug_run"])
+        self.stop_debug_button = _MenuLinkedControl(menu=menu_entries["stop_debug"][0], menu_index=menu_entries["stop_debug"][1])
+        self.export_yaml_button = _MenuLinkedControl(menu=menu_entries["export_yaml"][0], menu_index=menu_entries["export_yaml"][1])
         ttk.Label(toolbar, text=self._t("进程筛选", "Process Filter")).pack(side=tk.LEFT, padx=(12, 0))
         self.process_filter_combo = ttk.Combobox(toolbar, textvariable=self.process_filter_var, state="readonly", width=24)
         self.process_filter_combo.pack(side=tk.LEFT, padx=(6, 0))
@@ -1625,6 +1908,421 @@ class RecorderViewerWindow:
         self.session_name_label.grid(row=1, column=0, sticky=tk.W, padx=8, pady=6)
         self.session_name_entry.grid(row=1, column=1, sticky=tk.EW, padx=8, pady=6)
 
+    def open_session_setting_dialog(self) -> None:
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        suggestion_result = self._load_existing_suggestion_result()
+        saved = self._open_session_setting_dialog(
+            session_dir=self.session_dir,
+            session_data=self.session_data,
+            suggestion_result=suggestion_result,
+            title="Session Setting",
+            is_current_session=True,
+        )
+        if saved:
+            self.load_status_var.set("Session Setting 已保存。")
+
+    def _open_session_setting_dialog(
+        self,
+        *,
+        session_dir: Path,
+        session_data: dict[str, object],
+        suggestion_result: SuggestionGenerationResult | None,
+        title: str,
+        is_current_session: bool = False,
+    ) -> bool:
+        payload = self._get_session_setting_payload(session_data, session_dir)
+        result = {"saved": False}
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title(title)
+        dialog.transient(self.window)
+        dialog.grab_set()
+        dialog.geometry("760x520")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        form = ttk.Frame(dialog, padding=12)
+        form.grid(row=0, column=0, sticky="ew")
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(form, text="Name").grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=(0, 8))
+        name_var = tk.StringVar(value=str(payload.get("FileName", "")))
+        ttk.Entry(form, textvariable=name_var).grid(row=0, column=1, sticky="ew", pady=(0, 8))
+
+        ttk.Label(form, text="Document").grid(row=1, column=0, sticky=tk.NW, padx=(0, 8), pady=(0, 8))
+        document_text = tk.Text(form, height=4, wrap=tk.WORD)
+        document_text.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        document_text.insert("1.0", str(payload.get("document", "") or ""))
+
+        table_frame = ttk.Frame(dialog, padding=(12, 0, 12, 0))
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+
+        columns = ("Name", "Value", "Comment")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        for column, width in (("Name", 160), ("Value", 260), ("Comment", 260)):
+            tree.heading(column, text=column)
+            tree.column(column, width=width, anchor=tk.W, stretch=True)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=scrollbar.set)
+        for item in payload.get("memvar", []) if isinstance(payload.get("memvar", []), list) else []:
+            if not isinstance(item, dict):
+                continue
+            tree.insert("", tk.END, values=(str(item.get("Name", "")), str(item.get("Value", "")), str(item.get("Comment", ""))))
+
+        member_actions = ttk.Frame(dialog, padding=(12, 8, 12, 0))
+        member_actions.grid(row=2, column=0, sticky="ew")
+
+        def add_row() -> None:
+            row = self._show_member_variable_row_dialog(dialog, title="添加 Member Variable")
+            if row is None:
+                return
+            tree.insert("", tk.END, values=(row["Name"], row["Value"], row["Comment"]))
+
+        def edit_row(_event: tk.Event | None = None) -> None:
+            selection = tree.selection()
+            if not selection:
+                return
+            item_id = selection[0]
+            values = list(tree.item(item_id, "values") or ("", "", ""))
+            while len(values) < 3:
+                values.append("")
+            row = self._show_member_variable_row_dialog(
+                dialog,
+                title="编辑 Member Variable",
+                initial={"Name": values[0], "Value": values[1], "Comment": values[2]},
+            )
+            if row is None:
+                return
+            tree.item(item_id, values=(row["Name"], row["Value"], row["Comment"]))
+
+        def delete_row() -> None:
+            for item_id in tree.selection():
+                tree.delete(item_id)
+
+        ttk.Button(member_actions, text="添加", command=add_row).pack(side=tk.LEFT)
+        ttk.Button(member_actions, text="编辑", command=edit_row).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(member_actions, text="删除", command=delete_row).pack(side=tk.LEFT, padx=(8, 0))
+        tree.bind("<Double-1>", edit_row)
+
+        buttons = ttk.Frame(dialog, padding=12)
+        buttons.grid(row=3, column=0, sticky="ew")
+
+        def collect_payload() -> dict[str, object] | None:
+            file_name = name_var.get().strip()
+            if not file_name:
+                messagebox.showerror("保存失败", "Name 不能为空。", parent=dialog)
+                return None
+            memvars: list[dict[str, str]] = []
+            for item_id in tree.get_children(""):
+                values = list(tree.item(item_id, "values") or ("", "", ""))
+                while len(values) < 3:
+                    values.append("")
+                name = str(values[0]).strip()
+                value = str(values[1]).strip()
+                comment = str(values[2]).strip()
+                if not name and not value and not comment:
+                    continue
+                if not name:
+                    messagebox.showerror("保存失败", "Member Variable 的 Name 不能为空。", parent=dialog)
+                    return None
+                memvars.append({"Comment": comment, "Name": name, "Value": value})
+            return {
+                "FileName": file_name,
+                "document": document_text.get("1.0", tk.END).strip(),
+                "memvar": memvars,
+            }
+
+        def save() -> None:
+            new_payload = collect_payload()
+            if new_payload is None:
+                return
+            if not self._save_session_setting_payload(
+                session_dir=session_dir,
+                session_data=session_data,
+                suggestion_result=suggestion_result,
+                setting_payload=new_payload,
+                parent=dialog,
+                is_current_session=is_current_session,
+            ):
+                return
+            result["saved"] = True
+            dialog.destroy()
+
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="OK", command=save).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+        return bool(result["saved"])
+
+    def _show_member_variable_row_dialog(self, parent: tk.Misc, *, title: str, initial: dict[str, object] | None = None) -> dict[str, str] | None:
+        result: dict[str, str] | None = None
+        dialog = tk.Toplevel(parent)
+        dialog.title(title)
+        dialog.transient(parent)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        container = ttk.Frame(dialog, padding=12)
+        container.grid(row=0, column=0, sticky="nsew")
+        container.columnconfigure(1, weight=1)
+        name_var = tk.StringVar(value=str((initial or {}).get("Name", "")))
+        value_var = tk.StringVar(value=str((initial or {}).get("Value", "")))
+        comment_var = tk.StringVar(value=str((initial or {}).get("Comment", "")))
+        for row_index, (label, var) in enumerate((("Name", name_var), ("Value", value_var), ("Comment", comment_var))):
+            ttk.Label(container, text=label).grid(row=row_index, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+            ttk.Entry(container, textvariable=var, width=60).grid(row=row_index, column=1, sticky="ew", pady=4)
+        buttons = ttk.Frame(container)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+        def save() -> None:
+            nonlocal result
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("保存失败", "Name 不能为空。", parent=dialog)
+                return
+            result = {"Name": name, "Value": value_var.get().strip(), "Comment": comment_var.get().strip()}
+            dialog.destroy()
+
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="OK", command=save).pack(side=tk.RIGHT, padx=(0, 8))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.wait_window()
+        return result
+
+    def _get_session_setting_payload(self, session_data: dict[str, object], session_dir: Path | None = None) -> dict[str, object]:
+        raw_payload = session_data.get("session_setting", {}) if isinstance(session_data, dict) else {}
+        payload = dict(raw_payload) if isinstance(raw_payload, dict) else {}
+        default_name = self._default_session_setting_file_name(session_data, session_dir)
+        memvars: list[dict[str, str]] = []
+        for item in payload.get("memvar", []) if isinstance(payload.get("memvar", []), list) else []:
+            if not isinstance(item, dict):
+                continue
+            memvars.append({
+                "Comment": str(item.get("Comment", "")).strip(),
+                "Name": str(item.get("Name", "")).strip(),
+                "Value": str(item.get("Value", "")).strip(),
+            })
+        return {
+            "FileName": str(payload.get("FileName", "") or default_name).strip() or default_name,
+            "document": str(payload.get("document", "") or ""),
+            "memvar": memvars,
+        }
+
+    def _default_session_setting_file_name(self, session_data: dict[str, object], session_dir: Path | None = None) -> str:
+        metadata = session_data.get("metadata", {}) if isinstance(session_data, dict) else {}
+        if isinstance(metadata, dict):
+            for field_name in ("testcase_id", "name"):
+                value = str(metadata.get(field_name, "") or "").strip()
+                if value:
+                    return value
+        if session_dir is not None:
+            return session_dir.name
+        return "Testcase"
+
+    def _save_session_setting_payload(
+        self,
+        *,
+        session_dir: Path,
+        session_data: dict[str, object],
+        suggestion_result: SuggestionGenerationResult | None,
+        setting_payload: dict[str, object],
+        parent: tk.Misc,
+        is_current_session: bool = False,
+    ) -> bool:
+        memvars = [item for item in setting_payload.get("memvar", []) if isinstance(item, dict)]
+        replace_values = False
+        if memvars:
+            found_rows, missing_rows = self._inspect_member_variable_parameter_usage(suggestion_result, memvars)
+            if found_rows:
+                preview = "\n".join(found_rows[:12])
+                suffix = "\n..." if len(found_rows) > 12 else ""
+                replace_values = messagebox.askyesno(
+                    "变量替换确认",
+                    f"以下变量 Value 已在方法参数中找到：\n{preview}{suffix}\n\n是否替换为对应的 $(Name)？",
+                    parent=parent,
+                )
+            if missing_rows:
+                preview = "\n".join(missing_rows[:12])
+                suffix = "\n..." if len(missing_rows) > 12 else ""
+                if not messagebox.askyesno(
+                    "变量未匹配",
+                    f"以下变量 Value 未在当前方法参数中找到，无法自动替换：\n{preview}{suffix}\n\n是否仍保存并同步到服务端？",
+                    parent=parent,
+                ):
+                    return False
+        changed = False
+        if replace_values and suggestion_result is not None:
+            changed = self._replace_member_variable_parameter_values(suggestion_result, memvars)
+            if changed:
+                if is_current_session:
+                    self.suggestion_result = suggestion_result
+                    self._persist_suggestion_result()
+                    self._reload_tree()
+                else:
+                    self.suggestion_service.write_result_file(session_dir / "conversion_suggestions.json", suggestion_result)
+
+        session_data["session_setting"] = setting_payload
+        if is_current_session and self.session_data is session_data:
+            self._persist_session()
+        else:
+            self._write_session_payload_to_dir(session_dir, session_data)
+
+        sync_message = self._send_varoperator_requests(memvars)
+        if sync_message:
+            messagebox.showwarning("VarOperator 同步", sync_message, parent=parent)
+        elif memvars:
+            messagebox.showinfo("保存完成", "Session Setting 已保存，VarOperator 已同步。", parent=parent)
+        elif changed:
+            messagebox.showinfo("保存完成", "Session Setting 已保存，方法参数已替换。", parent=parent)
+        return True
+
+    def _inspect_member_variable_parameter_usage(self, suggestion_result: SuggestionGenerationResult | None, memvars: list[dict[str, object]]) -> tuple[list[str], list[str]]:
+        found_rows: list[str] = []
+        missing_rows: list[str] = []
+        for item in memvars:
+            name = str(item.get("Name", "") or "").strip()
+            value = str(item.get("Value", "") or "").strip()
+            if not name or not value:
+                continue
+            occurrences = self._find_value_occurrences_in_suggestion_result(suggestion_result, value)
+            if occurrences:
+                steps = ", ".join(str(step_id) for step_id in occurrences[:8])
+                if len(occurrences) > 8:
+                    steps += ", ..."
+                found_rows.append(f"{value} -> $({name}) | Steps: {steps}")
+            else:
+                missing_rows.append(f"{value} -> $({name})")
+        return found_rows, missing_rows
+
+    def _find_value_occurrences_in_suggestion_result(self, suggestion_result: SuggestionGenerationResult | None, value: str) -> list[int]:
+        if suggestion_result is None or not value:
+            return []
+        step_ids: list[int] = []
+        seen: set[int] = set()
+        for suggestion in list(getattr(suggestion_result, "suggestions", []) or []):
+            step_id = int(getattr(suggestion, "step_id", 0) or 0)
+            if step_id <= 0:
+                continue
+            matched = False
+            for parameter in list(getattr(suggestion, "parameters", []) or []):
+                if self._object_contains_text(getattr(parameter, "suggested_value", None), value):
+                    matched = True
+                    break
+            if not matched:
+                candidate_payload = getattr(suggestion, "candidate_payload", {})
+                if isinstance(candidate_payload, dict) and self._object_contains_text(candidate_payload.get("viewer_parameter_summary_override", ""), value):
+                    matched = True
+            if matched and step_id not in seen:
+                step_ids.append(step_id)
+                seen.add(step_id)
+        return step_ids
+
+    def _object_contains_text(self, value: object, needle: str) -> bool:
+        if not needle:
+            return False
+        if isinstance(value, dict):
+            return any(self._object_contains_text(item, needle) for item in value.values())
+        if isinstance(value, list):
+            return any(self._object_contains_text(item, needle) for item in value)
+        if value is None:
+            return False
+        return needle in str(value)
+
+    def _replace_member_variable_parameter_values(self, suggestion_result: SuggestionGenerationResult, memvars: list[dict[str, object]]) -> bool:
+        replacements: list[tuple[str, str]] = []
+        for item in memvars:
+            name = str(item.get("Name", "") or "").strip()
+            value = str(item.get("Value", "") or "").strip()
+            if name and value:
+                replacements.append((value, f"$({name})"))
+        replacements.sort(key=lambda item: len(item[0]), reverse=True)
+        changed = False
+        for suggestion in list(getattr(suggestion_result, "suggestions", []) or []):
+            for parameter in list(getattr(suggestion, "parameters", []) or []):
+                new_value, value_changed = self._replace_member_variable_values_recursive(getattr(parameter, "suggested_value", None), replacements)
+                if value_changed:
+                    parameter.suggested_value = new_value
+                    changed = True
+            payload = getattr(suggestion, "candidate_payload", {})
+            if isinstance(payload, dict) and "viewer_parameter_summary_override" in payload:
+                new_override, override_changed = self._replace_member_variable_values_recursive(payload.get("viewer_parameter_summary_override"), replacements)
+                if override_changed:
+                    payload = dict(payload)
+                    payload["viewer_parameter_summary_override"] = new_override
+                    suggestion.candidate_payload = payload
+                    changed = True
+        return changed
+
+    def _replace_member_variable_values_recursive(self, value: object, replacements: list[tuple[str, str]]) -> tuple[object, bool]:
+        if isinstance(value, dict):
+            changed = False
+            result: dict[object, object] = {}
+            for key, item in value.items():
+                new_item, item_changed = self._replace_member_variable_values_recursive(item, replacements)
+                result[key] = new_item
+                changed = changed or item_changed
+            return result, changed
+        if isinstance(value, list):
+            changed = False
+            result_list: list[object] = []
+            for item in value:
+                new_item, item_changed = self._replace_member_variable_values_recursive(item, replacements)
+                result_list.append(new_item)
+                changed = changed or item_changed
+            return result_list, changed
+        if isinstance(value, str):
+            text = value
+            changed = False
+            for raw_value, token in replacements:
+                if raw_value and raw_value in text and token not in text:
+                    text = text.replace(raw_value, token)
+                    changed = True
+            return text, changed
+        if value is None:
+            return value, False
+        text_value = str(value)
+        for raw_value, token in replacements:
+            if raw_value and text_value == raw_value:
+                return token, True
+        return value, False
+
+    def _send_varoperator_requests(self, memvars: list[dict[str, object]]) -> str:
+        if not memvars:
+            return ""
+        endpoint = "http://127.0.0.1:38002/runteststeps"
+        failures: list[str] = []
+        for item in memvars:
+            name = str(item.get("Name", "") or "").strip()
+            value = str(item.get("Value", "") or "").strip()
+            if not name:
+                continue
+            parameter = {"formula": value, "varName": name}
+            payload = {
+                "ControlName": "Null",
+                "Action": "VarOperator",
+                "ParameterValue": json.dumps(parameter, ensure_ascii=False),
+                "Check": "Null",
+                "CheckParameterValue": "",
+                "StepDescription": f"Set member variable {name}",
+                "Expectresult": "",
+            }
+            try:
+                response = requests.post(endpoint, json=payload, timeout=5)
+                if response.status_code >= 400:
+                    failures.append(f"{name}: HTTP {response.status_code} {response.text[:200]}")
+            except Exception as exc:
+                failures.append(f"{name}: {exc}")
+        if not failures:
+            return ""
+        preview = "\n".join(failures[:8])
+        suffix = "\n..." if len(failures) > 8 else ""
+        return f"Session Setting 已保存，但 VarOperator 同步失败：\n{preview}{suffix}"
+
     def _set_paned_ratio(self, paned: ttk.Panedwindow, left_ratio: float) -> None:
         if self._top_pane_ratio_initialized:
             return
@@ -1658,6 +2356,99 @@ class RecorderViewerWindow:
             messagebox.showerror(self._t("打开失败", "Open failed"), self._t(f"目录不存在:\n{self.session_dir}", f"Folder does not exist:\n{self.session_dir}"), parent=self.window)
             return
         self._open_path(self.session_dir)
+
+    def _normalize_recent_session_dirs(self, values: object) -> list[str]:
+        if not isinstance(values, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            raw_path = str(value or "").strip()
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            try:
+                resolved = Path(os.path.abspath(os.fspath(path)))
+            except Exception:
+                continue
+            key = os.path.normcase(os.fspath(resolved))
+            if key in seen:
+                continue
+            normalized.append(str(resolved))
+            seen.add(key)
+            if len(normalized) >= 10:
+                break
+        return normalized
+
+    def _remember_recent_session(self, session_dir: Path) -> None:
+        try:
+            resolved = Path(os.path.abspath(os.fspath(session_dir)))
+        except Exception:
+            return
+        path_text = str(resolved)
+        key = os.path.normcase(path_text)
+        updated = [path_text]
+        for existing in self.recent_session_dirs:
+            existing_key = os.path.normcase(os.path.abspath(os.fspath(Path(existing))))
+            if existing_key == key:
+                continue
+            updated.append(existing)
+            if len(updated) >= 10:
+                break
+        if updated == self.recent_session_dirs:
+            return
+        self.recent_session_dirs = updated
+        self._save_recent_session_dirs()
+        self._refresh_recent_sessions_menu()
+
+    def _save_recent_session_dirs(self) -> None:
+        try:
+            settings = self.settings_store.load()
+            settings.recent_session_dirs = list(self.recent_session_dirs)
+            self.settings_store.save(settings)
+        except Exception:
+            logger.exception("Failed to save recent session directories")
+
+    def _refresh_recent_sessions_menu(self) -> None:
+        menu = self.recent_sessions_menu
+        if menu is None:
+            return
+        try:
+            menu.delete(0, tk.END)
+        except tk.TclError:
+            pass
+        valid_paths: list[str] = []
+        for raw_path in self.recent_session_dirs:
+            session_dir = Path(raw_path)
+            if (session_dir / "session.json").exists():
+                valid_paths.append(str(session_dir))
+        if valid_paths != self.recent_session_dirs:
+            self.recent_session_dirs = self._normalize_recent_session_dirs(valid_paths)
+            self._save_recent_session_dirs()
+        if not self.recent_session_dirs:
+            menu.add_command(label=self._t("无近期 Session", "No recent sessions"), state=tk.DISABLED)
+            return
+        for raw_path in self.recent_session_dirs:
+            session_dir = Path(raw_path)
+            menu.add_command(label=self._format_recent_session_label(session_dir), command=lambda path=session_dir: self.load_session(path))
+        menu.add_separator()
+        menu.add_command(label=self._t("清空近期 Session", "Clear Recent Sessions"), command=self._clear_recent_sessions)
+
+    def _format_recent_session_label(self, session_dir: Path) -> str:
+        label = session_dir.name
+        try:
+            metadata = load_session_candidate_metadata(self.recordings_root, session_dir)
+            testcase_id = str(metadata.get("testcase_id", "") or "").strip()
+            if testcase_id:
+                label = testcase_id if testcase_id == session_dir.name else f"{testcase_id} — {session_dir.name}"
+        except Exception:
+            pass
+        return label
+
+    def _clear_recent_sessions(self) -> None:
+        self.recent_session_dirs = []
+        self._save_recent_session_dirs()
+        self._refresh_recent_sessions_menu()
 
     def _try_load_initial_path(self, initial_path: Path) -> None:
         candidate = initial_path
@@ -1972,60 +2763,6 @@ class RecorderViewerWindow:
         self.window.wait_window(dialog)
         return selected_path
 
-    def open_event_list_window(self) -> None:
-        if self.event_list_window and self.event_list_window.winfo_exists():
-            self.event_list_window.deiconify()
-            self.event_list_window.lift()
-            self.event_list_window.focus_force()
-            self._reload_event_list_popup()
-            return
-
-        popup = tk.Toplevel(self.window)
-        popup.title(self._t("事件列表", "Event List"))
-        popup.geometry("1320x720")
-        popup.minsize(960, 520)
-        self.event_list_window = popup
-
-        toolbar = ttk.Frame(popup, padding=(12, 12, 12, 0))
-        toolbar.pack(fill=tk.X)
-        ttk.Label(toolbar, text=self._t("进程筛选", "Process Filter")).pack(side=tk.LEFT)
-        popup_filter = ttk.Combobox(toolbar, textvariable=self.process_filter_var, state="readonly", width=24)
-        popup_filter.pack(side=tk.LEFT, padx=(6, 0))
-        popup_filter.bind("<<ComboboxSelected>>", lambda _event: self._on_filter_changed())
-        self.event_list_status_var = tk.StringVar(value=self._t("准备加载事件列表", "Preparing to load the event list"))
-        ttk.Label(toolbar, textvariable=self.event_list_status_var).pack(side=tk.LEFT, padx=(12, 0))
-        self.popup_process_filter_combo = popup_filter
-        self._sync_filter_combo_values()
-
-        wrapper = ttk.Frame(popup, padding=12)
-        wrapper.pack(fill=tk.BOTH, expand=True)
-        wrapper.columnconfigure(0, weight=1)
-        wrapper.rowconfigure(0, weight=1)
-
-        tree = ttk.Treeview(
-            wrapper,
-            columns=("idx", "event_type", "action", "time", "process_name", "method_suggestion", "parameter_suggestion", "comment", "ai_note", "ai_summary", "module_suggestion"),
-            show="headings",
-            selectmode="extended",
-        )
-        self._configure_event_tree_columns(tree)
-        tree.grid(row=0, column=0, sticky="nsew")
-        tree.bind("<<TreeviewSelect>>", self._on_popup_tree_select)
-        tree.bind("<Double-1>", self.on_double_click)
-        tree.bind("<Button-3>", self._on_event_tree_context_menu, add="+")
-        tree.bind("<Button-1>", self._on_event_tree_mouse_down, add="+")
-
-        y_scroll = ttk.Scrollbar(wrapper, orient=tk.VERTICAL, command=tree.yview)
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll = ttk.Scrollbar(wrapper, orient=tk.HORIZONTAL, command=tree.xview)
-        x_scroll.grid(row=1, column=0, columnspan=2, sticky="ew")
-        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        self._configure_event_tree_tags(tree)
-
-        self.event_list_tree = tree
-        popup.protocol("WM_DELETE_WINDOW", self._close_event_list_window)
-        self._reload_event_list_popup()
-
     def _configure_event_tree_columns(self, tree: ttk.Treeview) -> None:
         tree.heading("idx", text="#")
         tree.heading("event_type", text=self._build_filter_heading_text("type"))
@@ -2049,94 +2786,6 @@ class RecorderViewerWindow:
         tree.column("ai_note", width=420, minwidth=240, anchor=tk.W, stretch=False)
         tree.column("ai_summary", width=420, minwidth=240, anchor=tk.W, stretch=False)
         tree.column("module_suggestion", width=180, minwidth=120, anchor=tk.W, stretch=False)
-
-    def _reload_event_list_popup(self) -> None:
-        if not self.event_list_tree or not self.event_list_tree.winfo_exists():
-            return
-        self._cancel_event_list_reload()
-        self._clear_tree(self.event_list_tree)
-        self._pending_event_list_rows = [(row_index, self.event_rows[row_index]) for row_index in self._visible_row_indexes()]
-        self._sync_filter_combo_values()
-        total = len(self._pending_event_list_rows)
-        if self.event_list_status_var is not None:
-            self.event_list_status_var.set(self._t(f"正在加载事件 0/{total}", f"Loading events 0/{total}"))
-        if not total:
-            return
-        self._load_next_event_list_batch(0)
-
-    def _cancel_event_list_reload(self) -> None:
-        if self._event_list_reload_after_id:
-            try:
-                self.window.after_cancel(self._event_list_reload_after_id)
-            except Exception:
-                pass
-            self._event_list_reload_after_id = None
-        self._pending_event_list_rows = []
-
-    def _load_next_event_list_batch(self, inserted_count: int) -> None:
-        if not self.event_list_tree or not self.event_list_tree.winfo_exists():
-            self._event_list_reload_after_id = None
-            self._pending_event_list_rows = []
-            return
-
-        batch = self._pending_event_list_rows[: self._event_list_batch_size]
-        self._pending_event_list_rows = self._pending_event_list_rows[self._event_list_batch_size :]
-        for row_index, event in batch:
-            self.event_list_tree.insert(
-                "",
-                tk.END,
-                iid=str(row_index),
-                tags=self._build_row_tags(row_index),
-                values=self._build_event_row_values(row_index, event),
-            )
-
-        inserted_count += len(batch)
-        total = inserted_count + len(self._pending_event_list_rows)
-        if self.event_list_status_var is not None:
-            self.event_list_status_var.set(self._t(f"正在加载事件 {inserted_count}/{total}", f"Loading events {inserted_count}/{total}"))
-
-        if inserted_count >= total:
-            self._event_list_reload_after_id = None
-            if self.event_list_status_var is not None:
-                self.event_list_status_var.set(self._t(f"已加载 {total} 条事件", f"Loaded {total} events"))
-            row_index = self._get_primary_selected_row_index()
-            if row_index is not None and self.event_list_tree.exists(str(row_index)):
-                self.event_list_tree.selection_set(str(row_index))
-                self.event_list_tree.focus(str(row_index))
-                self.event_list_tree.see(str(row_index))
-            return
-
-        self._event_list_reload_after_id = self.window.after(1, lambda: self._load_next_event_list_batch(inserted_count))
-
-    def _on_popup_tree_select(self, _event: object) -> None:
-        if self._synchronizing_tree_selection or not self.event_list_tree:
-            return
-        selection = self.event_list_tree.selection()
-        if not selection:
-            return
-        row_indexes: list[int] = []
-        for item_id in selection:
-            try:
-                row_indexes.append(int(item_id))
-            except ValueError:
-                continue
-        row_indexes = sorted(set(row_indexes))
-        if not row_indexes:
-            return
-        try:
-            focus_index = int(self.event_list_tree.focus() or selection[0])
-        except ValueError:
-            focus_index = row_indexes[0]
-        self._set_selected_row_indexes(row_indexes, focus_index=focus_index, source_tree=self.event_list_tree)
-
-    def _close_event_list_window(self) -> None:
-        self._cancel_event_list_reload()
-        if self.event_list_window and self.event_list_window.winfo_exists():
-            self.event_list_window.destroy()
-        self.event_list_window = None
-        self.event_list_tree = None
-        self.event_list_status_var = None
-        self.popup_process_filter_combo = None
 
     def _find_session_candidates(
         self,
@@ -2226,6 +2875,7 @@ class RecorderViewerWindow:
         self.session_data = payload
         self.event_rows = list(self.session_data.get("events", []))
         self.path_var.set(str(session_dir))
+        self._remember_recent_session(session_dir)
         self.cleaning_suggestions = []
         self.ai_analysis = None
         self.ai_step_tags = {}
@@ -2250,7 +2900,6 @@ class RecorderViewerWindow:
         self._load_session_metadata_editor()
         self.summary_var.set(self._build_session_summary_text())
         self._reload_tree()
-        self._reload_event_list_popup()
         self._schedule_auto_cleaning_check(token, session_dir)
 
     def _build_session_summary_text(self) -> str:
@@ -2601,11 +3250,6 @@ class RecorderViewerWindow:
             parent=self.window,
         )
 
-    def _sync_filter_combo_values(self) -> None:
-        process_values = self.process_filter_combo.cget("values")
-        if self.popup_process_filter_combo and self.popup_process_filter_combo.winfo_exists():
-            self.popup_process_filter_combo.configure(values=process_values)
-
     def _default_filter_value(self, column_name: str) -> str:
         if column_name == "process":
             return self._t("全部进程", "All Processes")
@@ -2669,7 +3313,6 @@ class RecorderViewerWindow:
         if current_action not in action_values:
             self.action_filter_var.set(self._default_filter_value("action"))
 
-        self._sync_filter_combo_values()
         self._update_filter_headings()
 
     def _on_filter_changed(self) -> None:
@@ -2696,10 +3339,6 @@ class RecorderViewerWindow:
             self.tree.heading("event_type", text=self._build_filter_heading_text("type"))
             self.tree.heading("process_name", text=self._build_filter_heading_text("process"))
             self.tree.heading("action", text=self._build_filter_heading_text("action"))
-        if self.event_list_tree and self.event_list_tree.winfo_exists():
-            self.event_list_tree.heading("event_type", text=self._build_filter_heading_text("type"))
-            self.event_list_tree.heading("process_name", text=self._build_filter_heading_text("process"))
-            self.event_list_tree.heading("action", text=self._build_filter_heading_text("action"))
 
     def _on_event_tree_mouse_down(self, event: tk.Event) -> str | None:
         tree = event.widget if isinstance(event.widget, ttk.Treeview) else None
@@ -2798,6 +3437,8 @@ class RecorderViewerWindow:
             state=method_annotation_state,
         )
         menu.add_separator()
+        menu.add_command(label="提取子testcase", command=self.extract_selected_rows_to_subtestcase)
+        menu.add_separator()
         delete_label = "删除选中行" if len(selected_rows) > 1 else "删除"
         menu.add_command(label=delete_label, command=self.delete_selected_events)
 
@@ -2811,6 +3452,169 @@ class RecorderViewerWindow:
         finally:
             menu.grab_release()
         return "break"
+
+    def extract_selected_rows_to_subtestcase(self) -> None:
+        if not self.session_dir or not self.session_data:
+            messagebox.showinfo("提示", "请先加载 Session。", parent=self.window)
+            return
+        row_indexes = self._get_selected_row_indexes()
+        if not row_indexes:
+            messagebox.showinfo("提示", "请先在事件列表中选择要提取的行。", parent=self.window)
+            return
+        if not messagebox.askyesno("提取子testcase", f"确认将选中的 {len(row_indexes)} 行提取为独立子 testcase？", parent=self.window):
+            return
+        default_name = self._build_default_subtestcase_name()
+        raw_name = simpledialog.askstring("提取子testcase", "请输入子 testcase 名称：", parent=self.window, initialvalue=default_name)
+        if raw_name is None:
+            return
+        child_name = self._sanitize_subtestcase_name(raw_name)
+        if not child_name:
+            messagebox.showerror("提取失败", "子 testcase 名称不能为空。", parent=self.window)
+            return
+        try:
+            child_dir, child_data, child_result = self._create_subtestcase_session_from_rows(row_indexes, child_name)
+        except Exception as exc:
+            messagebox.showerror("提取失败", str(exc), parent=self.window)
+            return
+        actual_child_name = child_dir.name
+        self._open_session_setting_dialog(
+            session_dir=child_dir,
+            session_data=child_data,
+            suggestion_result=child_result,
+            title=f"Session Setting - {actual_child_name}",
+            is_current_session=False,
+        )
+        delete_from_parent = messagebox.askyesno(
+            "提取子testcase",
+            f"已创建子 testcase：\n{child_dir}\n\n是否从父 Session 中删除已提取的 {len(row_indexes)} 行步骤？\n\n选择“是”：父 Session 删除这些步骤。\n选择“否”：父 Session 保留这些步骤。",
+            parent=self.window,
+        )
+        if delete_from_parent:
+            self._delete_event_rows(row_indexes)
+        self.load_session(child_dir)
+
+    def _build_default_subtestcase_name(self) -> str:
+        base_name = self._default_session_setting_file_name(self.session_data or {}, self.session_dir)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self._sanitize_subtestcase_name(f"{base_name}_Sub_{timestamp}")
+
+    @staticmethod
+    def _sanitize_subtestcase_name(value: str) -> str:
+        raw_value = str(value or "").strip().strip('"')
+        raw_value = raw_value.replace("\\", "/").split("/")[-1]
+        sanitized = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", raw_value).strip(" ._")
+        return sanitized
+
+    def _create_subtestcase_session_from_rows(self, row_indexes: list[int], child_name: str) -> tuple[Path, dict[str, object], SuggestionGenerationResult | None]:
+        if not self.session_dir or not self.session_data:
+            raise RuntimeError("未加载 Session。")
+        sub_root = self.session_dir / "subtestcases"
+        child_dir = sub_root / child_name
+        if child_dir.exists():
+            suffix = datetime.now().strftime("_%H%M%S")
+            child_dir = sub_root / f"{child_name}{suffix}"
+        actual_child_name = child_dir.name
+        child_dir.mkdir(parents=True, exist_ok=True)
+
+        selected_events = [copy.deepcopy(self.event_rows[index]) for index in row_indexes if 0 <= index < len(self.event_rows) and isinstance(self.event_rows[index], dict)]
+        copied_events = [self._copy_event_media_paths_for_child(event, child_dir) for event in selected_events]
+
+        child_data = copy.deepcopy(self.session_data)
+        child_data["events"] = copied_events
+        child_data.pop("subtestcase_sessions", None)
+        metadata = dict(child_data.get("metadata", {}) or {}) if isinstance(child_data.get("metadata", {}), dict) else {}
+        metadata["testcase_id"] = actual_child_name
+        metadata["name"] = actual_child_name
+        metadata["scope"] = "Sub"
+        child_data["metadata"] = metadata
+        child_data["session_setting"] = {
+            "FileName": actual_child_name,
+            "document": "",
+            "memvar": [],
+        }
+        self._write_session_payload_to_dir(child_dir, child_data)
+
+        child_result = self._build_subtestcase_suggestion_result(row_indexes, actual_child_name)
+        if child_result is not None:
+            self.suggestion_service.write_result_file(child_dir / "conversion_suggestions.json", child_result)
+        self._register_subtestcase_session(child_dir)
+        return child_dir, child_data, child_result
+
+    def _copy_event_media_paths_for_child(self, event: dict[str, object], child_dir: Path) -> dict[str, object]:
+        copied = copy.deepcopy(event)
+        return self._rewrite_path_values_for_child(copied, child_dir)
+
+    def _rewrite_path_values_for_child(self, value: object, child_dir: Path, parent_key: str = "") -> object:
+        if isinstance(value, dict):
+            for key, item in list(value.items()):
+                value[key] = self._rewrite_path_values_for_child(item, child_dir, parent_key=str(key))
+            return value
+        if isinstance(value, list):
+            return [self._rewrite_path_values_for_child(item, child_dir, parent_key=parent_key) for item in value]
+        if isinstance(value, str):
+            return self._copy_media_path_value_for_child(value, child_dir, parent_key=parent_key)
+        return value
+
+    def _copy_media_path_value_for_child(self, value: str, child_dir: Path, parent_key: str = "") -> str:
+        if not self.session_dir:
+            return value
+        text = str(value or "")
+        stripped = text.strip()
+        if not stripped:
+            return value
+        media_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".mp4", ".avi", ".mov", ".mkv", ".webm"}
+        key_hint = parent_key.lower()
+        looks_like_media = Path(stripped).suffix.lower() in media_suffixes or any(token in key_hint for token in ("path", "image", "video", "screenshot", "media"))
+        if not looks_like_media:
+            return value
+        candidate = Path(stripped)
+        source_path = candidate if candidate.is_absolute() else self.session_dir / stripped
+        if not source_path.exists() or not source_path.is_file():
+            return value
+        try:
+            relative = source_path.relative_to(self.session_dir)
+        except ValueError:
+            relative = Path("media") / source_path.name
+        if relative.parts and relative.parts[0].lower() == "subtestcases":
+            relative = Path("media") / source_path.name
+        target_path = child_dir / relative
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(source_path, target_path)
+            return str(relative).replace("\\", "/")
+        except Exception:
+            return value
+
+    def _build_subtestcase_suggestion_result(self, row_indexes: list[int], child_name: str) -> SuggestionGenerationResult | None:
+        source_result = self._load_existing_suggestion_result()
+        if source_result is None:
+            return None
+        selected_step_ids = {row_index + 1: position + 1 for position, row_index in enumerate(row_indexes)}
+        suggestions: list[MethodSelectionSuggestion] = []
+        for suggestion in source_result.suggestions:
+            old_step_id = int(getattr(suggestion, "step_id", 0) or 0)
+            new_step_id = selected_step_ids.get(old_step_id)
+            if new_step_id is None:
+                continue
+            copied = copy.deepcopy(suggestion)
+            copied.step_id = new_step_id
+            suggestions.append(copied)
+        return SuggestionGenerationResult(session_id=child_name, suggestions=suggestions, notes=list(getattr(source_result, "notes", []) or []))
+
+    def _register_subtestcase_session(self, child_dir: Path) -> None:
+        if not self.session_dir or not self.session_data:
+            return
+        try:
+            relative = child_dir.relative_to(self.session_dir)
+            relative_text = str(relative).replace("\\", "/")
+        except ValueError:
+            relative_text = str(child_dir)
+        raw_items = self.session_data.get("subtestcase_sessions", [])
+        items = [str(item) for item in raw_items] if isinstance(raw_items, list) else []
+        if relative_text not in items:
+            items.append(relative_text)
+        self.session_data["subtestcase_sessions"] = items
+        self._persist_session()
 
     def _extract_event_type(self, event: dict[str, object]) -> str:
         return normalize_event_type(event.get("event_type", ""), event.get("action", ""))
@@ -2948,7 +3752,6 @@ class RecorderViewerWindow:
         visible_total = len(visible_indexes)
         if not visible_total:
             self.load_status_var.set("当前筛选条件下无匹配事件")
-            self._reload_event_list_popup()
             return
         self._pending_tree_rows = [(index, self.event_rows[index]) for index in visible_indexes]
         if visible_total >= 2000:
@@ -2956,7 +3759,6 @@ class RecorderViewerWindow:
         else:
             self.load_status_var.set(f"正在加载事件 0/{visible_total}")
         self._load_next_tree_batch(0)
-        self._reload_event_list_popup()
 
     def _cancel_tree_reload(self) -> None:
         if self._tree_reload_after_id:
@@ -3052,7 +3854,6 @@ class RecorderViewerWindow:
             self._update_event_comment(index, new_comment)
             self._persist_session()
             self._reload_tree()
-            self._reload_event_list_popup()
             self._select_row_index(index)
             return
 
@@ -3112,7 +3913,6 @@ class RecorderViewerWindow:
         scope_prefix = self._build_cleaning_scope_status_prefix(selected_rows)
         if not self.cleaning_suggestions:
             self.cleaning_var.set(f"{scope_prefix}未发现明显可清洗项")
-            self._reload_event_list_popup()
             return
         self.cleaning_var.set(f"{scope_prefix}{self._build_cleaning_suggestion_summary(self.cleaning_suggestions)}")
 
@@ -3301,7 +4101,6 @@ class RecorderViewerWindow:
             for row_index in suggestion.row_indexes:
                 if self.tree.exists(str(row_index)):
                     self.tree.item(str(row_index), tags=self._build_row_tags(row_index))
-        self._reload_event_list_popup()
 
     def _build_cleaning_suggestion_summary(self, suggestions: list[CleaningSuggestion]) -> str:
         delete_count = sum(1 for item in suggestions if item.kind in {"drop_noop", "drop_noop_scroll"})
@@ -3355,9 +4154,6 @@ class RecorderViewerWindow:
     def clear_cleaning_highlight(self) -> None:
         for item_id in self.tree.get_children():
             self.tree.item(item_id, tags=self._build_row_tags(int(item_id), include_cleaning=False))
-        if self.event_list_tree and self.event_list_tree.winfo_exists():
-            for item_id in self.event_list_tree.get_children():
-                self.event_list_tree.item(item_id, tags=self._build_row_tags(int(item_id), include_cleaning=False))
 
     def run_ai_analysis(self) -> None:
         if not self.session_dir or not self.session_data:
@@ -5206,7 +6002,7 @@ class RecorderViewerWindow:
                 continue
             candidates.append(value)
             seen.add(value)
-        for value in ("controlOperation", "mouseAction", "input", "wait", "comment", "checkpoint", "getScreenshot", "Click", "PerformScan"):
+        for value in ("controlOperation", "mouseAction", "input", "wait", "comment", "checkpoint", "getScreenshot", "Click", "PerformScan", "RunTestcase"):
             if value not in seen:
                 candidates.append(value)
                 seen.add(value)
@@ -5321,6 +6117,8 @@ class RecorderViewerWindow:
 
     def _build_event_type_method_candidates(self, event: dict[str, object]) -> list[str]:
         event_type = normalize_event_type(event.get("event_type", ""), event.get("action", "")) if isinstance(event, dict) else ""
+        if event_type == "RunTestcase":
+            return ["RunTestcase", "IfElse", "ForLoop", "WhileLoop", "Condition"]
         if event_type == "mouseAction":
             return ["Wheel", "DragDrop"]
         return []
@@ -5838,8 +6636,6 @@ class RecorderViewerWindow:
         row_id = str(row_index)
         if self.tree.exists(row_id):
             self.tree.item(row_id, values=values, tags=self._build_row_tags(row_index))
-        if self.event_list_tree is not None and self.event_list_tree.winfo_exists() and self.event_list_tree.exists(row_id):
-            self.event_list_tree.item(row_id, values=values, tags=self._build_row_tags(row_index))
 
     def _invalidate_derived_outputs_for_rows(self, row_indexes: list[int], *, reason: str) -> None:
         normalized_rows = sorted({row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)})
@@ -6045,16 +6841,9 @@ class RecorderViewerWindow:
                 if self.tree.exists(focus_row_id):
                     self.tree.focus(focus_row_id)
                     self.tree.see(focus_row_id)
-            if self.event_list_tree and self.event_list_tree.winfo_exists():
-                popup_row_ids = [item_id for item_id in row_ids if self.event_list_tree.exists(item_id)]
-                if popup_row_ids:
-                    self.event_list_tree.selection_set(popup_row_ids)
-                    if self.event_list_tree.exists(focus_row_id):
-                        self.event_list_tree.focus(focus_row_id)
-                        self.event_list_tree.see(focus_row_id)
         finally:
             self._synchronizing_tree_selection = False
-        if source_tree is self.event_list_tree or source_tree is None:
+        if source_tree is None:
             self.on_select_event(None)
 
     def select_all_events(self) -> None:
@@ -6233,7 +7022,6 @@ class RecorderViewerWindow:
             "design_steps": "Viewer 临时插入录制",
             "scope": "All",
         }
-        popup_was_visible = bool(self.event_list_window and self.event_list_window.winfo_exists())
         owner_window = self.window.master if isinstance(self.window.master, tk.Misc) else None
         owner_window_state = owner_window.wm_state() if owner_window and owner_window.winfo_exists() else "withdrawn"
         try:
@@ -6246,14 +7034,9 @@ class RecorderViewerWindow:
         if owner_window and owner_window is not self.window and owner_window_state not in {"withdrawn", "iconic"}:
             owner_window.iconify()
         self.window.withdraw()
-        if popup_was_visible and self.event_list_window:
-            self.event_list_window.withdraw()
 
         outcome: tuple[str, Path | None] = self._run_temporary_recording_controller(temp_engine)
 
-        if popup_was_visible and self.event_list_window and self.event_list_window.winfo_exists():
-            self.event_list_window.deiconify()
-            self.event_list_window.lift()
         if owner_window and owner_window is not self.window and owner_window.winfo_exists() and owner_window_state not in {"withdrawn", "iconic"}:
             owner_window.deiconify()
             owner_window.lift()
@@ -7797,14 +8580,20 @@ class RecorderViewerWindow:
         if not self.session_dir or not self.session_data:
             return
         self.session_data["events"] = self.event_rows
-        session_path = self.session_dir / "session.json"
-        yaml_path = self.session_dir / "session.yaml"
-        events_log_path = self.session_dir / "events.jsonl"
-        session_path.write_text(json.dumps(self.session_data, indent=2, ensure_ascii=False), encoding="utf-8")
-        yaml_path.write_text(yaml.safe_dump(self.session_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
-        event_lines = [json.dumps(event, ensure_ascii=False) for event in self.event_rows if isinstance(event, dict)]
+        self._write_session_payload_to_dir(self.session_dir, self.session_data)
+
+    def _write_session_payload_to_dir(self, session_dir: Path, session_data: dict[str, object]) -> None:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        events = session_data.get("events", []) if isinstance(session_data, dict) else []
+        event_rows = events if isinstance(events, list) else []
+        session_path = session_dir / "session.json"
+        yaml_path = session_dir / "session.yaml"
+        events_log_path = session_dir / "events.jsonl"
+        session_path.write_text(json.dumps(session_data, indent=2, ensure_ascii=False), encoding="utf-8")
+        yaml_path.write_text(yaml.safe_dump(session_data, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        event_lines = [json.dumps(event, ensure_ascii=False) for event in event_rows if isinstance(event, dict)]
         events_log_path.write_text("\n".join(event_lines) + ("\n" if event_lines else ""), encoding="utf-8")
-        write_session_summary_from_session_payload(self.session_dir, self.session_data, event_count=len(self.event_rows))
+        write_session_summary_from_session_payload(session_dir, session_data, event_count=len(event_rows))
 
     def apply_ai_deletions(self) -> None:
         if not self.ai_analysis:
@@ -8096,10 +8885,6 @@ class RecorderViewerWindow:
                 self.tree.item(row_id, tags=self._build_row_tags(row_index))
                 if center_current:
                     self._center_tree_item(self.tree, row_id)
-            if self.event_list_tree and self.event_list_tree.winfo_exists() and self.event_list_tree.exists(row_id):
-                self.event_list_tree.item(row_id, tags=self._build_row_tags(row_index))
-                if center_current:
-                    self._center_tree_item(self.event_list_tree, row_id)
 
     def _set_tree_selection_silently(self, row_indexes: list[int], focus_index: int | None = None) -> None:
         unique_row_indexes = sorted({row_index for row_index in row_indexes if 0 <= row_index < len(self.event_rows)})
@@ -8112,11 +8897,6 @@ class RecorderViewerWindow:
             if focus_row_id and self.tree.exists(focus_row_id):
                 self.tree.focus(focus_row_id)
                 self.tree.see(focus_row_id)
-            if self.event_list_tree and self.event_list_tree.winfo_exists():
-                self.event_list_tree.selection_set([item_id for item_id in row_ids if self.event_list_tree.exists(item_id)])
-                if focus_row_id and self.event_list_tree.exists(focus_row_id):
-                    self.event_list_tree.focus(focus_row_id)
-                    self.event_list_tree.see(focus_row_id)
         finally:
             self._synchronizing_tree_selection = False
 
@@ -10109,12 +10889,19 @@ class RecorderViewerWindow:
         def worker() -> None:
             try:
                 suggestion_result = self._load_suggestion_result_for_export()
-                step_count = export_suggestions_to_atframework_yaml(suggestion_result, output_path, source_root=self.session_dir)
+                setting_payload = self._get_session_setting_payload(self.session_data or {}, self.session_dir)
+                step_count = export_suggestions_to_atframework_yaml(
+                    suggestion_result,
+                    output_path,
+                    source_root=self.session_dir,
+                    setting_payload=setting_payload,
+                )
+                sub_exports = self._export_subtestcase_yaml_files(export_dir)
             except Exception as exc:
                 message = str(exc)
                 self.window.after(0, lambda message=message: self._on_export_atframework_yaml_failed(message))
                 return
-            self.window.after(0, lambda output_path=output_path, step_count=step_count: self._on_export_atframework_yaml_success(output_path, step_count))
+            self.window.after(0, lambda output_path=output_path, step_count=step_count, sub_exports=sub_exports: self._on_export_atframework_yaml_success(output_path, step_count, sub_exports))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -10151,6 +10938,82 @@ class RecorderViewerWindow:
         if not sanitized_stem:
             return ""
         return sanitized_stem + suffix
+
+    def _export_subtestcase_yaml_files(self, export_dir: Path) -> list[tuple[Path, int]]:
+        sub_exports: list[tuple[Path, int]] = []
+        for sub_dir in self._discover_subtestcase_session_dirs():
+            session_data = self._load_session_payload_from_dir(sub_dir)
+            if session_data is None:
+                continue
+            setting_payload = self._get_session_setting_payload(session_data, sub_dir)
+            output_file = self._normalize_atframework_yaml_file_name(str(setting_payload.get("FileName", "") or sub_dir.name))
+            if not output_file:
+                output_file = f"{sub_dir.name}.yaml"
+            output_path = export_dir / output_file
+            if output_path.exists():
+                stem = output_path.stem
+                suffix = output_path.suffix or ".yaml"
+                output_path = export_dir / f"{stem}_{sub_dir.name}{suffix}"
+            suggestion_result = self._load_suggestion_result_from_dir(sub_dir)
+            if suggestion_result is None:
+                suggestion_result = SuggestionGenerationResult(session_id=sub_dir.name, suggestions=[], notes=[])
+            step_count = export_suggestions_to_atframework_yaml(
+                suggestion_result,
+                output_path,
+                source_root=sub_dir,
+                setting_payload=setting_payload,
+            )
+            sub_exports.append((output_path, step_count))
+        return sub_exports
+
+    def _discover_subtestcase_session_dirs(self) -> list[Path]:
+        if not self.session_dir:
+            return []
+        dirs: list[Path] = []
+        seen: set[Path] = set()
+        raw_items = []
+        if isinstance(self.session_data, dict):
+            stored_items = self.session_data.get("subtestcase_sessions", [])
+            if isinstance(stored_items, list):
+                raw_items = [str(item) for item in stored_items]
+        for item in raw_items:
+            path = Path(item)
+            sub_dir = path if path.is_absolute() else self.session_dir / path
+            if sub_dir.exists() and (sub_dir / "session.json").exists():
+                resolved = sub_dir.resolve()
+                if resolved not in seen:
+                    dirs.append(sub_dir)
+                    seen.add(resolved)
+        sub_root = self.session_dir / "subtestcases"
+        if sub_root.exists():
+            for session_json in sorted(sub_root.glob("*/session.json")):
+                sub_dir = session_json.parent
+                resolved = sub_dir.resolve()
+                if resolved not in seen:
+                    dirs.append(sub_dir)
+                    seen.add(resolved)
+        return dirs
+
+    def _load_session_payload_from_dir(self, session_dir: Path) -> dict[str, object] | None:
+        session_path = session_dir / "session.json"
+        if not session_path.exists():
+            return None
+        try:
+            payload = json.loads(session_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _load_suggestion_result_from_dir(self, session_dir: Path) -> SuggestionGenerationResult | None:
+        suggestion_path = session_dir / "conversion_suggestions.json"
+        if not suggestion_path.exists():
+            return None
+        try:
+            result = self.suggestion_service.load_result_file(suggestion_path)
+            self._materialize_parameter_summary_overrides(result)
+            return result
+        except Exception:
+            return None
 
     def _load_suggestion_result_for_export(self):
         if self.suggestion_result is not None:
@@ -10417,13 +11280,18 @@ class RecorderViewerWindow:
         self.load_status_var.set(f"本地ATFramework调试完成: 成功 {success_count}/{total}")
         self.cleaning_var.set(f"本地ATFramework调试完成: {success_count}/{total}")
 
-    def _on_export_atframework_yaml_success(self, output_path: Path, step_count: int) -> None:
+    def _on_export_atframework_yaml_success(self, output_path: Path, step_count: int, sub_exports: list[tuple[Path, int]] | None = None) -> None:
         self.export_yaml_running = False
         self.export_yaml_button.configure(state=tk.NORMAL)
-        self.load_status_var.set(f"已导出 ATFramework YAML: {output_path} | 步骤数 {step_count}")
+        sub_exports = sub_exports or []
+        sub_message = f" | 子 testcase {len(sub_exports)} 个" if sub_exports else ""
+        self.load_status_var.set(f"已导出 ATFramework YAML: {output_path} | 步骤数 {step_count}{sub_message}")
         screenshot_dir = output_path.parent / "screenshot"
         screenshot_message = f"\n截图目录: {screenshot_dir}" if screenshot_dir.exists() else ""
-        messagebox.showinfo("导出完成", f"已导出 ATFramework YAML:\n{output_path}\n\n步骤数: {step_count}{screenshot_message}", parent=self.window)
+        child_lines = ""
+        if sub_exports:
+            child_lines = "\n\n子 testcase YAML:\n" + "\n".join(f"- {path} | 步骤数 {count}" for path, count in sub_exports)
+        messagebox.showinfo("导出完成", f"已导出 ATFramework YAML:\n{output_path}\n\n步骤数: {step_count}{child_lines}{screenshot_message}", parent=self.window)
 
     def _on_export_atframework_yaml_failed(self, message: str) -> None:
         self.export_yaml_running = False

@@ -34,5 +34,9 @@
   "design_steps_overlay_width": 520,
   "design_steps_overlay_height": 220,
   "design_steps_overlay_bg_color": "#d7caa3",
-  "design_steps_overlay_opacity": 0.88
+  "design_steps_overlay_opacity": 0.88,
+  "recent_session_dirs": [
+    "\\\\130.147.129.203\\AutomaticShared\\Recordings\\111Test\\Taichi\\111Test_111_Terry_20260423_094905",
+    "\\\\130.147.129.203\\AutomaticShared\\Recordings\\111Test\\Taichi\\111Test_111_Terry_20260423_094905\\subtestcases\\111Test_Sub_20260526_192857"
+  ]
 }
