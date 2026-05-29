@@ -1257,30 +1257,18 @@ def pick_session_from_recordings(
         dialog.destroy()
 
     def export_visible_sessions_to_excel() -> None:
-        if not visible_sessions:
+        tree_item_ids = list(tree.get_children(""))
+        if not tree_item_ids:
             messagebox.showinfo(t("提示", "Notice"), t("当前表格没有可导出的 Session。", "There are no sessions to export in the current table."), parent=dialog)
             return
 
-        export_headers = [column_title_by_id[column_id] for column_id in columns] + [t("Session 路径", "Session Path")]
+        export_headers = [column_title_by_id[column_id] for column_id in columns]
         export_rows: list[list[object]] = [export_headers]
-        for item in visible_sessions:
-            export_rows.append(
-                [
-                    item.get("name", ""),
-                    item.get("testcase_id", ""),
-                    item.get("project", ""),
-                    priority_display_by_value.get(normalize_session_priority(item.get("priority", "")), ""),
-                    item.get("recorder_person", ""),
-                    item.get("converter_person", ""),
-                    review_status_display_by_value.get(normalize_session_review_status(item.get("review_status", "")), ""),
-                    item.get("lock_status", ""),
-                    item.get("lock_ip", ""),
-                    item.get("review_comments", ""),
-                    item.get("modified", ""),
-                    item.get("events", ""),
-                    item.get("path", ""),
-                ]
-            )
+        for item_id in tree_item_ids:
+            row_values = list(tree.item(item_id, "values") or [])
+            if len(row_values) < len(columns):
+                row_values.extend([""] * (len(columns) - len(row_values)))
+            export_rows.append(row_values[: len(columns)])
 
         current_grab = dialog.grab_current()
         try:
@@ -1316,7 +1304,7 @@ def pick_session_from_recordings(
             _write_simple_xlsx(
                 output_path,
                 export_rows,
-                column_widths=[30, 16, 18, 12, 16, 16, 20, 20, 16, 36, 22, 10, 64],
+                column_widths=[30, 16, 18, 12, 16, 16, 20, 20, 16, 36, 22, 10],
             )
         except Exception as exc:
             messagebox.showerror(t("导出失败", "Export Failed"), str(exc), parent=dialog)
